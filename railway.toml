@@ -1,0 +1,7 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+# Railway Cron starts this one-shot process three times a day.
+startCommand = "python youtube_shorts_bot.py --publish --scheduled"
+restartPolicyType = "NEVER"

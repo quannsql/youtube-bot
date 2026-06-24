@@ -35,6 +35,8 @@ File `railway.toml` đã đặt start command cho Railway:
 python youtube_shorts_bot.py --publish --scheduled
 ```
 
+`nixpacks.toml` cài `ffmpeg` và `ffprobe` vào container Railway. Hai công cụ này là bắt buộc để nối các cảnh LTX-2 và ghép voice-over.
+
 Tại Railway, vào Service → **Settings → Cron Schedule** và đặt:
 
 ```text

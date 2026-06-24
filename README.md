@@ -64,6 +64,28 @@ railway volume files upload .\youtube_token.json /youtube_token.json
 
 `youtube_token.json` phải được tạo ở local trước bằng một lần chạy `--publish`, vì OAuth Desktop không thể mở trình duyệt cấp quyền trong Railway Cron headless.
 
+### Khi Railway CLI/SFTP timeout
+
+Nếu `railway volume files upload` không mở được SFTP, không đưa JSON lên GitHub. Thay vào đó, mã nguồn hỗ trợ nhận ba JSON qua Railway Variables dưới dạng Base64 và tự ghi chúng vào Volume lúc Cron bắt đầu.
+
+Trên máy local, chạy từng lệnh sau. Mỗi lệnh đưa Base64 vào clipboard, không in secret ra màn hình:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('.\google_tts_service_account.json')) | Set-Clipboard
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('.\client_secrets.json')) | Set-Clipboard
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('.\youtube_token.json')) | Set-Clipboard
+```
+
+Sau mỗi lệnh, trong Railway → **Variables**, tạo một variable rồi dán clipboard tương ứng:
+
+```text
+GOOGLE_TTS_SERVICE_ACCOUNT_JSON_B64
+YOUTUBE_CLIENT_SECRETS_JSON_B64
+YOUTUBE_TOKEN_JSON_B64
+```
+
+Các biến này chỉ cần để bootstrap credential file; `shorts.db`, video tạo ra và token vẫn nằm ở Volume `/app/data` sau lần chạy đầu tiên.
+
 Trong Railway → **Variables**, thêm:
 
 ```dotenv

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import base64
 import sys
 from pathlib import Path
 
@@ -47,6 +48,13 @@ def test_archive_counts_jobs_created_today(tmp_path):
         current = bot.ShortPlan.from_dict({**plan.to_dict(), "title": f"Title {number}"})
         archive.reserve(current, tmp_path / f"output-{number}")
     assert archive.jobs_created_today() == 3
+
+
+def test_materialize_credential_file_from_base64(tmp_path, monkeypatch):
+    destination = tmp_path / "credential.json"
+    monkeypatch.setenv("TEST_CREDENTIAL_B64", base64.b64encode(b'{"credential": true}').decode())
+    bot.materialize_credential_file("TEST_CREDENTIAL_B64", destination)
+    assert destination.read_bytes() == b'{"credential": true}'
 
 
 def test_three_pass_planner_returns_a_20_second_story(tmp_path):

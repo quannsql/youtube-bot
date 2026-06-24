@@ -1,4 +1,5 @@
 .env
+.venv/
 client_secrets.json
 google_tts_service_account.json
 youtube_token.json
@@ -6,3 +7,4 @@ shorts.db
 generated/
 __pycache__/
 .pytest_cache/
+fpt_tts.html

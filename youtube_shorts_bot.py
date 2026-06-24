@@ -7,6 +7,7 @@ uploads unless --publish is supplied, but a scheduled task can use that flag.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import logging
@@ -42,6 +43,34 @@ for _stream in (sys.stdout, sys.stderr):
 
 class BotError(RuntimeError):
     pass
+
+
+def materialize_credential_file(env_name: str, destination: Path) -> None:
+    """Decode a Railway secret variable to the Volume when a file is unavailable."""
+    encoded = os.getenv(env_name, "")
+    if not encoded:
+        return
+    try:
+        content = base64.b64decode("".join(encoded.split()), validate=True)
+    except ValueError as exc:
+        raise BotError(f"{env_name} không phải Base64 hợp lệ.") from exc
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(content)
+
+
+def materialize_railway_credentials() -> None:
+    materialize_credential_file(
+        "GOOGLE_TTS_SERVICE_ACCOUNT_JSON_B64",
+        DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
+    )
+    materialize_credential_file(
+        "YOUTUBE_CLIENT_SECRETS_JSON_B64",
+        DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
+    )
+    materialize_credential_file(
+        "YOUTUBE_TOKEN_JSON_B64",
+        DATA_DIR / os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
+    )
 
 
 @dataclass(frozen=True)
@@ -474,6 +503,7 @@ def main() -> int:
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     args = parser.parse_args()
     configure_logging(args.log_level)
+    materialize_railway_credentials()
     settings = Settings.from_env(args.duration)
     archive, client, tts = Archive(), Pollinations(settings), GoogleChirpTTS(settings)
     if args.upload_file:

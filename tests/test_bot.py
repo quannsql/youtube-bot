@@ -38,6 +38,87 @@ def test_archive_blocks_exactly_repeated_plan(tmp_path):
     assert archive.duplicate_of(plan) is not None
 
 
+def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
+    archived = bot.ShortPlan.from_dict({
+        "topic": "Antikythera mechanism", "angle": "Ancient gears predicted eclipses",
+        "title": "Ancient Gears Predicted Eclipses", "description": "#Shorts",
+        "tags": ["shorts", "history"], "narration": "A short script.",
+        "fact_note": "Avoids overclaiming precision", "source_hints": ["Museum"],
+        "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
+    })
+    fresh_plan = {
+        "topic": "The Green Sahara", "angle": "A desert shaped by monsoon shifts",
+        "title": "When the Sahara Was Green", "description": "A desert was once a lake country. #Shorts",
+        "tags": ["shorts", "science", "history"],
+        "hook": "Twelve thousand years ago, the Sahara was green.",
+        "narration": "Twelve thousand years ago, the Sahara was green. Monsoon rains fed lakes across North Africa, supporting grasslands and animals. Sediment evidence shows this humid period varied by region. Then Earth's orbit helped weaken the rains. A desert can be a climate snapshot, not a permanent identity.",
+        "closing_line": "A desert can be a climate snapshot, not a permanent identity.",
+        "scenes": [{"duration": 5, "visual_prompt": "Scene one"}, {"duration": 5, "visual_prompt": "Scene two"}, {"duration": 5, "visual_prompt": "Scene three"}, {"duration": 5, "visual_prompt": "Scene four"}],
+        "fact_note": "Regional timing varied.", "source_hints": ["NOAA"],
+    }
+    archive = bot.Archive(tmp_path / "shorts.db")
+    archive.reserve(archived, tmp_path / "old")
+    prompts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = [
+                {"central_claim": "The Sahara had wet periods.", "evidence_points": ["lakes", "sediment", "monsoons"], "uncertainty": "regional timing", "fresh_angle": "climate snapshot", "source_leads": ["NOAA"], "avoid": ["exact dates"]},
+                fresh_plan,
+                {"quality_check": {"hook_score": 9, "clarity_score": 9}, "plan": fresh_plan},
+            ]
+
+        def chat(self, prompt, temperature=0.55):
+            prompts.append(prompt)
+            return json.dumps(self.responses.pop(0))
+
+    bot.plan_short(
+        FakeClient(),
+        archive,
+        "little-known discoveries",
+        20,
+        [{"topic": "Antikythera mechanism", "angle": "eclipses", "title": "Ancient Greek Gears That Predicted Eclipses"}],
+    )
+
+    assert "Existing archive" in prompts[0]
+    assert "Ancient Gears Predicted Eclipses" in prompts[0]
+    assert "Rejected candidates from this run" in prompts[0]
+    assert "Ancient Greek Gears That Predicted Eclipses" in prompts[0]
+
+
+def test_choose_novel_plan_passes_duplicate_candidate_to_retry(tmp_path, monkeypatch):
+    duplicate_plan = bot.ShortPlan.from_dict({
+        "topic": "Antikythera mechanism", "angle": "Ancient gears predicted eclipses",
+        "title": "Ancient Gears Predicted Eclipses", "description": "#Shorts",
+        "tags": ["shorts"], "narration": "A short script.",
+        "fact_note": "Avoids overclaiming precision", "source_hints": ["Museum"],
+        "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
+    })
+    fresh_plan = bot.ShortPlan.from_dict({
+        "topic": "The Green Sahara", "angle": "A desert shaped by monsoon shifts",
+        "title": "When the Sahara Was Green", "description": "#Shorts",
+        "tags": ["shorts"], "narration": "A short script.",
+        "fact_note": "Regional timing varied", "source_hints": ["NOAA"],
+        "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
+    })
+    archive = bot.Archive(tmp_path / "shorts.db")
+    archive.reserve(duplicate_plan, tmp_path / "old")
+    rejected_seen = []
+
+    def fake_plan_short(_client, _archive, _theme, _duration, rejected=None):
+        rejected_seen.append(list(rejected or []))
+        return duplicate_plan if len(rejected_seen) == 1 else fresh_plan
+
+    monkeypatch.setattr(bot, "plan_short", fake_plan_short)
+
+    result = bot.choose_novel_plan(object(), archive, "little-known discoveries", 20, max_attempts=2)
+
+    assert result == fresh_plan
+    assert rejected_seen[0] == []
+    assert rejected_seen[1][0]["title"] == "Ancient Gears Predicted Eclipses"
+    assert rejected_seen[1][0]["matched_existing_title"] == "Ancient Gears Predicted Eclipses"
+
+
 def test_archive_counts_jobs_created_today(tmp_path):
     plan = bot.ShortPlan.from_dict({
         "topic": "Topic", "angle": "Angle", "title": "Title", "description": "#Shorts", "tags": ["shorts"],

@@ -474,19 +474,36 @@ def extract_json(text: str) -> dict[str, Any]:
         raise BotError(f"Grok trả JSON lỗi: {exc}") from exc
 
 
-def research_brief(client: Pollinations, theme: str) -> dict[str, Any]:
+def research_brief(
+    client: Pollinations,
+    theme: str,
+    past: list[dict[str, str]] | None = None,
+    rejected: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    past = past or []
+    rejected = rejected or []
     prompt = f'''Act as a meticulous research editor for an English science/history YouTube Short.
 Theme: {theme}
 Use your reasoning internally before responding. Return only JSON using this schema:
 {RESEARCH_SCHEMA}
-Rules: Choose one topic that can be explained with established evidence. Do not invent sources, data, fossil finds, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it. Prefer a surprising, specific angle over a broad textbook summary.'''
+Rules: Choose one topic that can be explained with established evidence. Do not invent sources, data, fossil finds, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it. Prefer a surprising, specific angle over a broad textbook summary.
+Novelty rule: The topic and fresh_angle must be materially different from every item in the existing archive and rejected candidates below. Do not choose the same object, event, artifact, site, person, mechanism, or central claim. If a broad theme keeps pointing to the same subject, switch domains within the theme.
+Existing archive: {json.dumps(past, ensure_ascii=False)}
+Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     LOG.info("Research pass: selecting a defensible, novel story angle…")
     return extract_json(client.chat(prompt, temperature=0.35))
 
 
-def plan_short(client: Pollinations, archive: Archive, theme: str, duration: int) -> ShortPlan:
+def plan_short(
+    client: Pollinations,
+    archive: Archive,
+    theme: str,
+    duration: int,
+    rejected: list[dict[str, str]] | None = None,
+) -> ShortPlan:
     past = archive.recent_context()
-    brief = research_brief(client, theme)
+    rejected = rejected or []
+    brief = research_brief(client, theme, past, rejected)
     prompt = f'''Act as a senior documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
 Audience: curious global English-speaking viewers. Topics may cover discovery, history, geography, science, or technology.
@@ -495,10 +512,11 @@ Facts: only use the supplied evidence points. Preserve the uncertainty exactly w
 Visuals: artistic documentary, painterly animation or restrained historical animation; intentional slight movement discontinuity is acceptable; vertical 9:16; no text, logos, watermarks, or readable signs inside video.
 Split scenes into 4 or 5 scenes whose total duration is exactly {duration}; each scene must be 3–6 seconds. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, on_screen_text, fact_note, and source_hints.
-The existing archive below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
+The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
-Existing archive: {json.dumps(past, ensure_ascii=False)}'''
+Existing archive: {json.dumps(past, ensure_ascii=False)}
+Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     LOG.info("Writing pass: turning the research brief into a short-form story…")
     draft = ShortPlan.from_dict(extract_json(client.chat(prompt, temperature=0.65)))
     review_prompt = f'''Act as the final fact and retention editor. Think deeply but return only JSON.
@@ -544,6 +562,35 @@ English plan: {json.dumps(plan.to_dict(), ensure_ascii=False)}'''
         raise BotError(f"Kịch bản tiếng Việt có {words} từ, quá ngắn cho Short {duration}s.")
     LOG.info("Vietnamese social plan ready: %r (%d words)", social.title, words)
     return social
+
+
+def rejection_context(plan: ShortPlan, duplicate: sqlite3.Row) -> dict[str, str]:
+    return {
+        "topic": plan.topic,
+        "angle": plan.angle,
+        "title": plan.title,
+        "matched_existing_topic": str(duplicate["topic"]),
+        "matched_existing_angle": str(duplicate["angle"]),
+        "matched_existing_title": str(duplicate["title"]),
+    }
+
+
+def choose_novel_plan(
+    client: Pollinations,
+    archive: Archive,
+    theme: str,
+    duration: int,
+    max_attempts: int = 4,
+) -> ShortPlan | None:
+    rejected: list[dict[str, str]] = []
+    for _attempt in range(1, max_attempts + 1):
+        plan = plan_short(client, archive, theme, duration, rejected)
+        duplicate = archive.duplicate_of(plan)
+        if not duplicate:
+            return plan
+        rejected.append(rejection_context(plan, duplicate))
+        print(f"Ý tưởng trùng ({duplicate['title']!r}); yêu cầu Grok tạo góc khác…")
+    return None
 
 
 def require_tools() -> None:
@@ -890,14 +937,13 @@ def main() -> int:
     if args.scheduled and archive.jobs_created_today() >= 3:
         LOG.warning("Daily limit reached: 3 video jobs have already been created today (UTC). Exiting.")
         return 0
-    for attempt in range(1, 5):
-        plan = plan_short(client, archive, args.theme, settings.duration)
-        duplicate = archive.duplicate_of(plan)
-        if not duplicate:
-            break
-        print(f"Ý tưởng trùng ({duplicate['title']!r}); yêu cầu Grok tạo góc khác…")
-    else:
-        raise BotError("Không tìm được ý tưởng đủ mới sau 4 lần.")
+    plan = choose_novel_plan(client, archive, args.theme, settings.duration)
+    if plan is None:
+        message = "Không tìm được ý tưởng đủ mới sau 4 lần."
+        if args.scheduled:
+            LOG.warning("%s Bỏ qua lượt scheduled này.", message)
+            return 0
+        raise BotError(message)
 
     if args.dry_run:
         print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))

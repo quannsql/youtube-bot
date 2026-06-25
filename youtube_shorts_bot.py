@@ -404,44 +404,57 @@ class Pollinations:
     def image(self, prompt: str, destination: Path, seed: int) -> None:
         params = {"model": self.s.image_model, "width": 720, "height": 1280, "seed": seed, "nologo": "true"}
         partial = destination.with_name(f"{destination.name}.part")
+        key_candidates = [("video key", self.video_headers)]
+        if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key != self.s.video_api_key:
+            key_candidates.append(("grok key fallback", self.grok_headers))
         last_error: Exception | None = None
         for attempt in range(1, self.s.video_scene_attempts + 1):
             if partial.exists():
                 partial.unlink()
-            LOG.info(
-                "Requesting Image scene: %s (attempt %d/%d)",
-                destination.name,
-                attempt,
-                self.s.video_scene_attempts,
-            )
-            try:
-                response = self._request(
-                    "GET",
-                    f"https://image.pollinations.ai/prompt/{quote(prompt, safe='')}",
-                    headers={},
-                    params=params,
-                    stream=True,
+            for key_label, headers in key_candidates:
+                LOG.info(
+                    "Requesting Image scene: %s with %s (attempt %d/%d)",
+                    destination.name,
+                    key_label,
+                    attempt,
+                    self.s.video_scene_attempts,
                 )
-                bytes_written = 0
-                with partial.open("wb") as handle:
-                    for chunk in response.iter_content(1024 * 1024):
-                        if chunk:
-                            handle.write(chunk)
-                            bytes_written += len(chunk)
-                if bytes_written < 1024:
-                    raise PollinationsTransientError(f"Image API returned only {bytes_written} bytes for {destination.name}")
-                partial.replace(destination)
-                LOG.info("Downloaded %s (%.1f MB)", destination.name, bytes_written / (1024 * 1024))
-                return
-            except PollinationsTransientError as exc:
-                last_error = exc
-                LOG.warning("Image scene failed: %s", exc)
-            except requests.RequestException as exc:
-                last_error = exc
-                LOG.warning("Image scene stream failed: %s", exc)
-            finally:
-                if partial.exists():
-                    partial.unlink()
+                try:
+                    response = self._request(
+                        "GET",
+                        f"https://image.pollinations.ai/prompt/{quote(prompt, safe='')}",
+                        headers=headers,
+                        params=params,
+                        stream=True,
+                    )
+                    bytes_written = 0
+                    with partial.open("wb") as handle:
+                        for chunk in response.iter_content(1024 * 1024):
+                            if chunk:
+                                handle.write(chunk)
+                                bytes_written += len(chunk)
+                    if bytes_written < 1024:
+                        raise PollinationsTransientError(f"Image API returned only {bytes_written} bytes for {destination.name}")
+                    partial.replace(destination)
+                    LOG.info("Downloaded %s (%.1f MB)", destination.name, bytes_written / (1024 * 1024))
+                    return
+                except PollinationsQuotaError as exc:
+                    last_error = exc
+                    LOG.warning("Image API %s is out of quota or rate-limited: %s", key_label, exc)
+                    if partial.exists():
+                        partial.unlink()
+                    continue
+                except PollinationsTransientError as exc:
+                    last_error = exc
+                    LOG.warning("Image scene failed: %s", exc)
+                    break
+                except requests.RequestException as exc:
+                    last_error = exc
+                    LOG.warning("Image scene stream failed: %s", exc)
+                    break
+                finally:
+                    if partial.exists():
+                        partial.unlink()
             if attempt < self.s.video_scene_attempts:
                 sleep_for = self.s.video_scene_retry_backoff_seconds * attempt
                 LOG.info("Retrying %s in %ss…", destination.name, sleep_for)

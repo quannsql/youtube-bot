@@ -116,6 +116,18 @@ class Settings:
     youtube_client_secrets: Path = DATA_DIR / "client_secrets.json"
     youtube_token: Path = DATA_DIR / "youtube_token.json"
     youtube_privacy: str = "private"
+    social_tts_voice: str = "vi-VN-Standard-A"
+    social_tts_speaking_rate: float = 1.05
+    publish_facebook: bool = False
+    facebook_graph_version: str = "v25.0"
+    facebook_page_id: str = ""
+    facebook_page_access_token: str = ""
+    publish_tiktok: bool = False
+    tiktok_access_token: str = ""
+    tiktok_privacy_level: str = "SELF_ONLY"
+    tiktok_disable_duet: bool = False
+    tiktok_disable_comment: bool = False
+    tiktok_disable_stitch: bool = False
 
     @classmethod
     def from_env(cls, duration_override: int | None = None) -> "Settings":
@@ -143,6 +155,18 @@ class Settings:
             youtube_client_secrets=DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
             youtube_token=DATA_DIR / os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
             youtube_privacy=os.getenv("YOUTUBE_PRIVACY_STATUS", "private"),
+            social_tts_voice=os.getenv("SOCIAL_TTS_VOICE", "vi-VN-Standard-A"),
+            social_tts_speaking_rate=float(os.getenv("SOCIAL_TTS_SPEAKING_RATE", os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05"))),
+            publish_facebook=env_bool("PUBLISH_FACEBOOK", False),
+            facebook_graph_version=os.getenv("FACEBOOK_GRAPH_VERSION", "v25.0"),
+            facebook_page_id=os.getenv("FACEBOOK_PAGE_ID", "").strip(),
+            facebook_page_access_token=os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", "").strip(),
+            publish_tiktok=env_bool("PUBLISH_TIKTOK", False),
+            tiktok_access_token=os.getenv("TIKTOK_ACCESS_TOKEN", "").strip(),
+            tiktok_privacy_level=os.getenv("TIKTOK_PRIVACY_LEVEL", "SELF_ONLY").strip() or "SELF_ONLY",
+            tiktok_disable_duet=env_bool("TIKTOK_DISABLE_DUET", False),
+            tiktok_disable_comment=env_bool("TIKTOK_DISABLE_COMMENT", False),
+            tiktok_disable_stitch=env_bool("TIKTOK_DISABLE_STITCH", False),
         )
 
 
@@ -190,6 +214,30 @@ class ShortPlan:
         return asdict(self)
 
 
+@dataclass
+class SocialPlan:
+    title: str
+    description: str
+    tags: list[str]
+    narration: str
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "SocialPlan":
+        required = {"title", "description", "tags", "narration"}
+        missing = required - value.keys()
+        if missing:
+            raise BotError(f"Grok trả kế hoạch social thiếu trường: {', '.join(sorted(missing))}")
+        return cls(
+            title=str(value["title"])[:100],
+            description=str(value["description"])[:2200],
+            tags=[str(tag).lstrip("#") for tag in value["tags"]][:15],
+            narration=str(value["narration"]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def normalized_words(text: str) -> set[str]:
     value = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
     return {word for word in re.findall(r"[a-z0-9]+", value) if len(word) > 2}
@@ -198,6 +246,10 @@ def normalized_words(text: str) -> set[str]:
 def similarity(a: str, b: str) -> float:
     left, right = normalized_words(a), normalized_words(b)
     return len(left & right) / len(left | right) if left and right else 0.0
+
+
+def narration_word_bounds(duration: int) -> tuple[int, int]:
+    return max(24, round(duration * 1.5)), duration * 4 + 4
 
 
 class Archive:
@@ -358,7 +410,12 @@ class GoogleChirpTTS:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
 
-    def speech(self, text: str, destination: Path) -> None:
+    @staticmethod
+    def language_code_for_voice(voice: str) -> str:
+        parts = voice.split("-")
+        return "-".join(parts[:2]) if len(parts) >= 2 else voice
+
+    def speech(self, text: str, destination: Path, voice: str | None = None, speaking_rate: float | None = None) -> None:
         if not self.s.google_tts_service_account.exists():
             raise BotError(
                 "Thiếu service-account JSON cho Google TTS: "
@@ -369,18 +426,19 @@ class GoogleChirpTTS:
         except ImportError as exc:
             raise BotError("Thiếu google-cloud-texttospeech. Chạy: pip install -r requirements.txt") from exc
         try:
+            selected_voice = voice or self.s.google_tts_voice
             client = texttospeech.TextToSpeechClient.from_service_account_file(
                 str(self.s.google_tts_service_account)
             )
             response = client.synthesize_speech(
                 input=texttospeech.SynthesisInput(text=text),
                 voice=texttospeech.VoiceSelectionParams(
-                    language_code=self.s.google_tts_voice.split("-Chirp3-HD-", maxsplit=1)[0],
-                    name=self.s.google_tts_voice,
+                    language_code=self.language_code_for_voice(selected_voice),
+                    name=selected_voice,
                 ),
                 audio_config=texttospeech.AudioConfig(
                     audio_encoding=texttospeech.AudioEncoding.MP3,
-                    speaking_rate=self.s.google_tts_speaking_rate,
+                    speaking_rate=speaking_rate or self.s.google_tts_speaking_rate,
                 ),
             )
         except Exception as exc:
@@ -435,7 +493,7 @@ Audience: curious global English-speaking viewers. Topics may cover discovery, h
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: artistic documentary, painterly animation or restrained historical animation; intentional slight movement discontinuity is acceptable; vertical 9:16; no text, logos, watermarks, or readable signs inside video.
-Split scenes into 4 or 5 scenes whose total duration is exactly {duration}; each scene must be 3–6 seconds. For a {duration}-second Short, use roughly {max(30, duration * 3)}–{duration * 4} spoken English words.
+Split scenes into 4 or 5 scenes whose total duration is exactly {duration}; each scene must be 3–6 seconds. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, on_screen_text, fact_note, and source_hints.
 The existing archive below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
@@ -460,13 +518,32 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if abs(scene_total - duration) > 0.1:
         raise BotError(f"Grok chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
-    minimum_words, maximum_words = max(28, duration * 2), duration * 4 + 4
+    minimum_words, maximum_words = narration_word_bounds(duration)
     if not minimum_words <= words <= maximum_words:
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     if not plan.narration.lower().startswith(plan.hook.lower()) or not plan.narration.lower().endswith(plan.closing_line.lower()):
         raise BotError("Kịch bản phải bắt đầu bằng hook và kết thúc bằng closing_line.")
     LOG.info("Plan ready: %r (%d scenes, %d words)", plan.title, len(plan.scenes), words)
     return plan
+
+
+def plan_social_vietnamese(client: Pollinations, plan: ShortPlan, duration: int) -> SocialPlan:
+    prompt = f'''Translate and adapt this English YouTube Short plan into Vietnamese for Facebook and TikTok.
+Return raw JSON only with this schema:
+{{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with 3-6 relevant hashtags","tags":["short Vietnamese or English hashtag without #"],"narration":"Vietnamese voice-over"}}
+Rules:
+- Keep every factual claim equivalent to the English plan; do not add dates, names, statistics, sources, or certainty.
+- Make the Vietnamese narration natural, concise, and suitable for a {duration}-second short video.
+- The narration should be roughly {max(28, round(duration * 1.6))}-{duration * 4 + 8} Vietnamese words.
+- The caption should disclose that the video is AI-assisted when appropriate.
+English plan: {json.dumps(plan.to_dict(), ensure_ascii=False)}'''
+    LOG.info("Creating Vietnamese social caption and narration…")
+    social = SocialPlan.from_dict(extract_json(client.chat(prompt, temperature=0.35)))
+    words = len(re.findall(r"\b\w+\b", social.narration, flags=re.UNICODE))
+    if words < max(20, round(duration * 1.2)):
+        raise BotError(f"Kịch bản tiếng Việt có {words} từ, quá ngắn cho Short {duration}s.")
+    LOG.info("Vietnamese social plan ready: %r (%d words)", social.title, words)
+    return social
 
 
 def require_tools() -> None:
@@ -531,6 +608,25 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
     return final_video
 
 
+def render_social_video(social: SocialPlan, tts: GoogleChirpTTS, output_dir: Path, settings: Settings, target_duration: int) -> Path:
+    visuals = output_dir / "visuals.mp4"
+    if not visuals.is_file():
+        raise BotError(f"Không tìm thấy visuals.mp4 để tạo bản social: {visuals}")
+    narration = output_dir / "narration_vi.mp3"
+    LOG.info("Generating Vietnamese narration for Facebook/TikTok…")
+    tts.speech(social.narration, narration, voice=settings.social_tts_voice, speaking_rate=settings.social_tts_speaking_rate)
+    narration_seconds = media_duration(narration)
+    if narration_seconds > target_duration + 0.4:
+        tempo = min(1.25, narration_seconds / target_duration)
+        adjusted = output_dir / "narration_vi_fit.mp3"
+        run(["ffmpeg", "-y", "-i", str(narration), "-filter:a", f"atempo={tempo:.4f}", str(adjusted)])
+        narration = adjusted
+    social_video = output_dir / "short_vi.mp4"
+    LOG.info("Muxing Vietnamese social video…")
+    run(["ffmpeg", "-y", "-i", str(visuals), "-i", str(narration), "-filter_complex", f"[1:a]apad=pad_dur={target_duration}[a]", "-map", "0:v:0", "-map", "[a]", "-t", str(target_duration), "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(social_video)])
+    return social_video
+
+
 def upload_to_youtube(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> str:
     if not settings.youtube_client_secrets.exists():
         raise BotError(f"Thiếu OAuth client secrets: {settings.youtube_client_secrets}")
@@ -579,6 +675,174 @@ def upload_to_youtube(video: Path, plan: ShortPlan, settings: Settings, privacy:
     return str(response["id"])
 
 
+def response_json(response: requests.Response) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise BotError(f"API trả phản hồi không phải JSON: {response.text[:500]}") from exc
+    if not isinstance(data, dict):
+        raise BotError(f"API trả JSON không đúng định dạng: {data}")
+    return data
+
+
+def upload_to_facebook_page(video: Path, social: SocialPlan, settings: Settings) -> str:
+    if not settings.facebook_page_id or not settings.facebook_page_access_token:
+        raise BotError("Thiếu FACEBOOK_PAGE_ID hoặc FACEBOOK_PAGE_ACCESS_TOKEN.")
+    url = f"https://graph-video.facebook.com/{settings.facebook_graph_version}/{settings.facebook_page_id}/videos"
+    LOG.info("Uploading %s to Facebook Page %s…", video.name, settings.facebook_page_id)
+    with video.open("rb") as handle:
+        response = requests.post(
+            url,
+            data={
+                "access_token": settings.facebook_page_access_token,
+                "title": social.title,
+                "description": social.description,
+                "published": "true",
+            },
+            files={"source": (video.name, handle, "video/mp4")},
+            timeout=(30, 900),
+        )
+    data = response_json(response)
+    if not response.ok or "error" in data:
+        raise BotError(f"Facebook upload thất bại: {data}")
+    video_id = str(data.get("id") or data.get("video_id") or "")
+    if not video_id:
+        raise BotError(f"Facebook upload không trả video id: {data}")
+    LOG.info("Facebook upload completed: %s", video_id)
+    return video_id
+
+
+def tiktok_headers(access_token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}
+
+
+def tiktok_check_error(response: requests.Response) -> dict[str, Any]:
+    data = response_json(response)
+    error = data.get("error")
+    if not response.ok or (isinstance(error, dict) and error.get("code") not in (None, "ok")):
+        raise BotError(f"TikTok API thất bại: {data}")
+    return data
+
+
+def tiktok_creator_privacy(settings: Settings) -> str:
+    response = requests.post(
+        "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+        headers=tiktok_headers(settings.tiktok_access_token),
+        timeout=(30, 120),
+    )
+    data = tiktok_check_error(response)
+    options = data.get("data", {}).get("privacy_level_options") or []
+    if settings.tiktok_privacy_level in options:
+        return settings.tiktok_privacy_level
+    if "SELF_ONLY" in options:
+        LOG.warning("TikTok privacy %s is unavailable; falling back to SELF_ONLY.", settings.tiktok_privacy_level)
+        return "SELF_ONLY"
+    if options:
+        LOG.warning("TikTok privacy %s is unavailable; falling back to %s.", settings.tiktok_privacy_level, options[0])
+        return str(options[0])
+    return settings.tiktok_privacy_level
+
+
+def tiktok_upload_chunks(upload_url: str, video: Path, chunk_size: int, total_chunks: int) -> None:
+    total_size = video.stat().st_size
+    with video.open("rb") as handle:
+        for chunk_index in range(total_chunks):
+            start = chunk_index * chunk_size
+            if chunk_index == total_chunks - 1:
+                data = handle.read()
+            else:
+                data = handle.read(chunk_size)
+            end = start + len(data) - 1
+            response = requests.put(
+                upload_url,
+                headers={
+                    "Content-Type": "video/mp4",
+                    "Content-Length": str(len(data)),
+                    "Content-Range": f"bytes {start}-{end}/{total_size}",
+                },
+                data=data,
+                timeout=(30, 900),
+            )
+            if response.status_code not in {200, 201, 206}:
+                raise BotError(f"TikTok upload chunk {chunk_index + 1}/{total_chunks} thất bại: {response.status_code} {response.text[:500]}")
+
+
+def upload_to_tiktok(video: Path, social: SocialPlan, settings: Settings) -> str:
+    if not settings.tiktok_access_token:
+        raise BotError("Thiếu TIKTOK_ACCESS_TOKEN.")
+    total_size = video.stat().st_size
+    if total_size <= 0:
+        raise BotError(f"Video TikTok rỗng: {video}")
+    chunk_size = total_size if total_size < 5 * 1024 * 1024 else 10 * 1024 * 1024
+    total_chunks = max(1, total_size // chunk_size)
+    privacy_level = tiktok_creator_privacy(settings)
+    body = {
+        "post_info": {
+            "title": social.description[:2200],
+            "privacy_level": privacy_level,
+            "disable_duet": settings.tiktok_disable_duet,
+            "disable_comment": settings.tiktok_disable_comment,
+            "disable_stitch": settings.tiktok_disable_stitch,
+            "brand_content_toggle": False,
+            "brand_organic_toggle": False,
+            "is_aigc": True,
+        },
+        "source_info": {
+            "source": "FILE_UPLOAD",
+            "video_size": total_size,
+            "chunk_size": chunk_size,
+            "total_chunk_count": total_chunks,
+        },
+    }
+    LOG.info("Initializing TikTok direct post upload (%d bytes, %d chunk(s))…", total_size, total_chunks)
+    response = requests.post(
+        "https://open.tiktokapis.com/v2/post/publish/video/init/",
+        headers=tiktok_headers(settings.tiktok_access_token),
+        json=body,
+        timeout=(30, 120),
+    )
+    data = tiktok_check_error(response)
+    upload_url = data.get("data", {}).get("upload_url")
+    publish_id = str(data.get("data", {}).get("publish_id") or "")
+    if not upload_url:
+        raise BotError(f"TikTok không trả upload_url: {data}")
+    tiktok_upload_chunks(str(upload_url), video, chunk_size, total_chunks)
+    LOG.info("TikTok upload completed: %s", publish_id)
+    return publish_id
+
+
+def publish_social_video(video: Path, social: SocialPlan, settings: Settings) -> dict[str, str]:
+    results: dict[str, str] = {}
+    if settings.publish_facebook:
+        try:
+            results["facebook"] = upload_to_facebook_page(video, social, settings)
+        except Exception as exc:
+            LOG.error("Facebook publish failed: %s", exc)
+    if settings.publish_tiktok:
+        try:
+            results["tiktok"] = upload_to_tiktok(video, social, settings)
+        except Exception as exc:
+            LOG.error("TikTok publish failed: %s", exc)
+    return results
+
+
+def social_publish_enabled(settings: Settings) -> bool:
+    return settings.publish_facebook or settings.publish_tiktok
+
+
+def prepare_social_video(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
+    social_file = output_dir / "social_vi.json"
+    if social_file.is_file():
+        social = SocialPlan.from_dict(json.loads(social_file.read_text(encoding="utf-8")))
+    else:
+        social = plan_social_vietnamese(client, plan, settings.duration)
+        social_file.write_text(json.dumps(social.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    social_video = output_dir / "short_vi.mp4"
+    if not social_video.is_file():
+        social_video = render_social_video(social, tts, output_dir, settings, settings.duration)
+    return social_video, social
+
+
 def slug(value: str) -> str:
     simple = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]+", "-", simple).strip("-")[:42] or "short"
@@ -617,6 +881,11 @@ def main() -> int:
         plan = ShortPlan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
         youtube_id = upload_to_youtube(video, plan, settings, args.privacy_status or settings.youtube_privacy)
         print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
+        if social_publish_enabled(settings):
+            social_video, social = prepare_social_video(plan, client, tts, video.parent, settings)
+            social_results = publish_social_video(social_video, social, settings)
+            if social_results:
+                print(f"Đã publish social: {social_results}")
         return 0
     if args.scheduled and archive.jobs_created_today() >= 3:
         LOG.warning("Daily limit reached: 3 video jobs have already been created today (UTC). Exiting.")
@@ -648,6 +917,11 @@ def main() -> int:
             youtube_id = upload_to_youtube(video, plan, settings, args.privacy_status or settings.youtube_privacy)
             archive.mark(record_id, "published", youtube_id)
             print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
+            if social_publish_enabled(settings):
+                social_video, social = prepare_social_video(plan, client, tts, output_dir, settings)
+                social_results = publish_social_video(social_video, social, settings)
+                if social_results:
+                    print(f"Đã publish social: {social_results}")
     except Exception:
         archive.mark(record_id, "upload_failed" if rendered else "failed")
         raise

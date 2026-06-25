@@ -124,6 +124,105 @@ def test_ltx_video_falls_back_to_grok_key_on_quota_error(tmp_path, monkeypatch):
     assert destination.read_bytes() == b"y" * 2048
 
 
+def test_tts_language_code_supports_english_and_vietnamese_voices():
+    assert bot.GoogleChirpTTS.language_code_for_voice("en-US-Chirp3-HD-Achernar") == "en-US"
+    assert bot.GoogleChirpTTS.language_code_for_voice("vi-VN-Standard-A") == "vi-VN"
+
+
+def test_facebook_page_upload_posts_video(tmp_path, monkeypatch):
+    video = tmp_path / "short_vi.mp4"
+    video.write_bytes(b"video")
+    calls = {}
+
+    class FakeResponse:
+        ok = True
+        text = '{"id":"fb123"}'
+
+        def json(self):
+            return {"id": "fb123"}
+
+    def fake_post(url, data=None, files=None, timeout=None):
+        calls["url"] = url
+        calls["data"] = data
+        calls["files"] = files
+        calls["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    settings = bot.Settings(grok_api_key="grok", video_api_key="video", facebook_page_id="page1", facebook_page_access_token="token")
+    social = bot.SocialPlan(title="Tieu de", description="Mo ta", tags=["tag"], narration="Loi doc")
+
+    assert bot.upload_to_facebook_page(video, social, settings) == "fb123"
+    assert calls["url"].endswith("/page1/videos")
+    assert calls["data"]["description"] == "Mo ta"
+
+
+def test_tiktok_direct_post_uploads_whole_file(tmp_path, monkeypatch):
+    video = tmp_path / "short_vi.mp4"
+    video.write_bytes(b"z" * 2048)
+    posts = []
+    puts = []
+
+    class FakeResponse:
+        def __init__(self, payload, status_code=200):
+            self.payload = payload
+            self.status_code = status_code
+            self.ok = status_code < 400
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self.payload
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        posts.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        if url.endswith("/creator_info/query/"):
+            return FakeResponse({"data": {"privacy_level_options": ["SELF_ONLY"]}, "error": {"code": "ok", "message": ""}})
+        return FakeResponse({"data": {"publish_id": "tt123", "upload_url": "https://upload.example/video"}, "error": {"code": "ok", "message": ""}})
+
+    def fake_put(url, headers=None, data=None, timeout=None):
+        puts.append({"url": url, "headers": headers, "data": data, "timeout": timeout})
+        return FakeResponse({}, status_code=201)
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    monkeypatch.setattr(bot.requests, "put", fake_put)
+    settings = bot.Settings(grok_api_key="grok", video_api_key="video", tiktok_access_token="token")
+    social = bot.SocialPlan(title="Tieu de", description="Mo ta #lichsu", tags=["lichsu"], narration="Loi doc")
+
+    assert bot.upload_to_tiktok(video, social, settings) == "tt123"
+    init_body = posts[1]["json"]
+    assert init_body["source_info"]["source"] == "FILE_UPLOAD"
+    assert init_body["source_info"]["total_chunk_count"] == 1
+    assert puts[0]["headers"]["Content-Range"] == "bytes 0-2047/2048"
+
+
+def test_twenty_second_story_accepts_shorter_narration(tmp_path):
+    plan = {
+        "topic": "Antikythera mechanism", "angle": "Ancient gears modeled the sky",
+        "title": "Ancient Greek Gears Tracked the Sky", "description": "Ancient gears modeled the sky. #Shorts",
+        "tags": ["shorts", "history", "science"],
+        "hook": "A tiny bronze machine once modeled the sky.",
+        "narration": "A tiny bronze machine once modeled the sky. Its gears tracked lunar cycles, eclipses, and festival calendars. Found in a shipwreck, it showed Greek engineers built portable astronomy long before telescopes changed time.",
+        "closing_line": "Found in a shipwreck, it showed Greek engineers built portable astronomy long before telescopes changed time.",
+        "scenes": [{"duration": 4, "visual_prompt": "Scene one"}, {"duration": 4, "visual_prompt": "Scene two"}, {"duration": 4, "visual_prompt": "Scene three"}, {"duration": 4, "visual_prompt": "Scene four"}, {"duration": 4, "visual_prompt": "Scene five"}],
+        "fact_note": "Avoids claiming the mechanism predicted every event perfectly.", "source_hints": ["National Archaeological Museum, Athens"],
+    }
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = [
+                {"central_claim": "The mechanism modeled cycles.", "evidence_points": ["gears", "lunar cycles", "eclipses"], "uncertainty": "some functions remain debated", "fresh_angle": "portable astronomy", "source_leads": ["National Archaeological Museum, Athens"], "avoid": ["modern computer overclaim"]},
+                plan,
+                {"quality_check": {"hook_score": 9, "clarity_score": 9}, "plan": plan},
+            ]
+
+        def chat(self, _prompt, temperature=0.55):
+            return json.dumps(self.responses.pop(0))
+
+    result = bot.plan_short(FakeClient(), bot.Archive(tmp_path / "shorts.db"), "ancient technology", 20)
+    assert len(result.narration.split()) < 40
+    assert sum(scene.duration for scene in result.scenes) == 20
+
+
 def test_three_pass_planner_returns_a_20_second_story(tmp_path):
     plan = {
         "topic": "The Green Sahara", "angle": "A desert shaped by monsoon shifts",

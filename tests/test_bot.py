@@ -3,6 +3,7 @@ import json
 import base64
 import sys
 from pathlib import Path
+import requests
 
 SPEC = importlib.util.spec_from_file_location("bot", Path(__file__).parents[1] / "youtube_shorts_bot.py")
 bot = importlib.util.module_from_spec(SPEC)
@@ -55,6 +56,72 @@ def test_materialize_credential_file_from_base64(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_CREDENTIAL_B64", base64.b64encode(b'{"credential": true}').decode())
     bot.materialize_credential_file("TEST_CREDENTIAL_B64", destination)
     assert destination.read_bytes() == b'{"credential": true}'
+
+
+def test_ltx_video_retries_transient_download_failure(tmp_path, monkeypatch):
+    calls = {"count": 0}
+
+    class FakeResponse:
+        ok = True
+
+        def iter_content(self, _chunk_size):
+            yield b"x" * 2048
+
+    def fake_request(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise requests.Timeout("read timed out")
+        return FakeResponse()
+
+    monkeypatch.setattr(bot.requests, "request", fake_request)
+    settings = bot.Settings(
+        grok_api_key="grok",
+        video_api_key="video",
+        video_scene_attempts=2,
+        video_scene_retry_backoff_seconds=0,
+    )
+    destination = tmp_path / "scene_1.mp4"
+
+    bot.Pollinations(settings).video("a prompt", 4, destination, seed=123)
+
+    assert calls["count"] == 2
+    assert destination.read_bytes() == b"x" * 2048
+    assert not (tmp_path / "scene_1.mp4.part").exists()
+
+
+def test_ltx_video_falls_back_to_grok_key_on_quota_error(tmp_path, monkeypatch):
+    authorizations = []
+
+    class FakeQuotaResponse:
+        ok = False
+        status_code = 429
+        text = "quota exceeded"
+
+    class FakeVideoResponse:
+        ok = True
+
+        def iter_content(self, _chunk_size):
+            yield b"y" * 2048
+
+    def fake_request(*_args, **kwargs):
+        authorizations.append(kwargs["headers"]["Authorization"])
+        if kwargs["headers"]["Authorization"] == "Bearer video":
+            return FakeQuotaResponse()
+        return FakeVideoResponse()
+
+    monkeypatch.setattr(bot.requests, "request", fake_request)
+    settings = bot.Settings(
+        grok_api_key="grok",
+        video_api_key="video",
+        video_scene_attempts=1,
+        video_scene_retry_backoff_seconds=0,
+    )
+    destination = tmp_path / "scene_1.mp4"
+
+    bot.Pollinations(settings).video("a prompt", 4, destination, seed=123)
+
+    assert authorizations == ["Bearer video", "Bearer grok"]
+    assert destination.read_bytes() == b"y" * 2048
 
 
 def test_three_pass_planner_returns_a_20_second_story(tmp_path):

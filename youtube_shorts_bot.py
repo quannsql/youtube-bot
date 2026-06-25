@@ -45,6 +45,29 @@ class BotError(RuntimeError):
     pass
 
 
+class PollinationsTransientError(BotError):
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PollinationsQuotaError(PollinationsTransientError):
+    pass
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def looks_like_quota_error(status_code: int, detail: str) -> bool:
+    lowered = detail.lower()
+    quota_terms = ("quota", "credit", "balance", "pollen", "limit", "rate", "too many", "insufficient")
+    return status_code in {402, 429} or (status_code in {400, 403} and any(term in lowered for term in quota_terms))
+
+
 def materialize_credential_file(env_name: str, destination: Path) -> None:
     """Decode a Railway secret variable to the Volume when a file is unavailable."""
     encoded = os.getenv(env_name, "")
@@ -78,6 +101,11 @@ class Settings:
     grok_api_key: str
     video_api_key: str
     base_url: str = "https://gen.pollinations.ai"
+    pollinations_connect_timeout: int = 30
+    pollinations_read_timeout: int = 600
+    video_scene_attempts: int = 3
+    video_scene_retry_backoff_seconds: int = 20
+    ltx_fallback_to_grok_key: bool = True
     language: str = "en"
     duration: int = 20
     text_model: str = "grok-large"
@@ -102,6 +130,11 @@ class Settings:
             grok_api_key=grok_api_key,
             video_api_key=video_api_key,
             base_url=os.getenv("POLLINATIONS_BASE_URL", "https://gen.pollinations.ai").rstrip("/"),
+            pollinations_connect_timeout=int(os.getenv("POLLINATIONS_CONNECT_TIMEOUT_SECONDS", "30")),
+            pollinations_read_timeout=int(os.getenv("POLLINATIONS_READ_TIMEOUT_SECONDS", "600")),
+            video_scene_attempts=max(1, int(os.getenv("LTX_SCENE_ATTEMPTS", "3"))),
+            video_scene_retry_backoff_seconds=max(0, int(os.getenv("LTX_SCENE_RETRY_BACKOFF_SECONDS", "20"))),
+            ltx_fallback_to_grok_key=env_bool("LTX_FALLBACK_TO_GROK_KEY", True),
             language=os.getenv("SHORT_LANGUAGE", "en"),
             duration=duration,
             google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
@@ -226,9 +259,22 @@ class Pollinations:
 
     def _request(self, method: str, url: str, headers: dict[str, str], **kwargs: Any) -> requests.Response:
         LOG.debug("Calling Pollinations %s %s", method, url.split("?", maxsplit=1)[0])
-        response = requests.request(method, url, headers=headers, timeout=(30, 600), **kwargs)
+        try:
+            response = requests.request(
+                method,
+                url,
+                headers=headers,
+                timeout=(self.s.pollinations_connect_timeout, self.s.pollinations_read_timeout),
+                **kwargs,
+            )
+        except requests.RequestException as exc:
+            raise PollinationsTransientError(f"Pollinations request failed: {exc}") from exc
         if not response.ok:
             detail = response.text[:800]
+            if looks_like_quota_error(response.status_code, detail):
+                raise PollinationsQuotaError(f"Pollinations {response.status_code}: {detail}", response.status_code)
+            if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
+                raise PollinationsTransientError(f"Pollinations {response.status_code}: {detail}", response.status_code)
             raise BotError(f"Pollinations {response.status_code}: {detail}")
         return response
 
@@ -245,12 +291,65 @@ class Pollinations:
             raise BotError(f"Phản hồi Grok không đúng định dạng: {response}") from exc
 
     def video(self, prompt: str, duration: float, destination: Path, seed: int) -> None:
-        LOG.info("Requesting LTX-2 scene (%ss): %s", duration, destination.name)
         params = {"model": self.s.video_model, "duration": round(duration, 2), "aspectRatio": "9:16", "width": 720, "height": 1280, "seed": seed, "safe": "true"}
-        response = self._request("GET", f"{self.s.base_url}/video/{quote(prompt, safe='')}", headers=self.video_headers, params=params, stream=True)
-        with destination.open("wb") as handle:
-            for chunk in response.iter_content(1024 * 1024):
-                handle.write(chunk)
+        partial = destination.with_name(f"{destination.name}.part")
+        key_candidates = [("video key", self.video_headers)]
+        if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key != self.s.video_api_key:
+            key_candidates.append(("grok key fallback", self.grok_headers))
+        last_error: Exception | None = None
+        for attempt in range(1, self.s.video_scene_attempts + 1):
+            if partial.exists():
+                partial.unlink()
+            for key_label, headers in key_candidates:
+                LOG.info(
+                    "Requesting LTX-2 scene (%ss): %s with %s (attempt %d/%d)",
+                    duration,
+                    destination.name,
+                    key_label,
+                    attempt,
+                    self.s.video_scene_attempts,
+                )
+                try:
+                    response = self._request(
+                        "GET",
+                        f"{self.s.base_url}/video/{quote(prompt, safe='')}",
+                        headers=headers,
+                        params=params,
+                        stream=True,
+                    )
+                    bytes_written = 0
+                    with partial.open("wb") as handle:
+                        for chunk in response.iter_content(1024 * 1024):
+                            if chunk:
+                                handle.write(chunk)
+                                bytes_written += len(chunk)
+                    if bytes_written < 1024:
+                        raise PollinationsTransientError(f"LTX-2 returned only {bytes_written} bytes for {destination.name}")
+                    partial.replace(destination)
+                    LOG.info("Downloaded %s (%.1f MB)", destination.name, bytes_written / (1024 * 1024))
+                    return
+                except PollinationsQuotaError as exc:
+                    last_error = exc
+                    LOG.warning("LTX-2 %s is out of quota or rate-limited: %s", key_label, exc)
+                    if partial.exists():
+                        partial.unlink()
+                    continue
+                except PollinationsTransientError as exc:
+                    last_error = exc
+                    LOG.warning("LTX-2 scene failed: %s", exc)
+                    break
+                except requests.RequestException as exc:
+                    last_error = exc
+                    LOG.warning("LTX-2 scene stream failed: %s", exc)
+                    break
+                finally:
+                    if partial.exists():
+                        partial.unlink()
+            if attempt < self.s.video_scene_attempts:
+                sleep_for = self.s.video_scene_retry_backoff_seconds * attempt
+                LOG.info("Retrying %s in %ss…", destination.name, sleep_for)
+                time.sleep(sleep_for)
+        raise BotError(f"LTX-2 failed after {self.s.video_scene_attempts} attempts for {destination.name}: {last_error}")
 
 
 class GoogleChirpTTS:
@@ -398,6 +497,8 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         client.video(scene.visual_prompt, scene.duration, clip, seed=int(time.time()) + index)
         if clip.stat().st_size < 1024:
             raise BotError(f"Cảnh {index} không phải video hợp lệ.")
+        clip_seconds = media_duration(clip)
+        LOG.info("Scene %d ready: %.2fs, %.1f MB", index, clip_seconds, clip.stat().st_size / (1024 * 1024))
         clips.append(clip)
 
     concat = output_dir / "clips.txt"

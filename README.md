@@ -94,6 +94,11 @@ Trong Railway → **Variables**, thêm:
 POLLINATIONS_GROK_API_KEY=sk_key_for_grok
 POLLINATIONS_VIDEO_API_KEY=sk_key_for_ltx2
 POLLINATIONS_BASE_URL=https://gen.pollinations.ai
+POLLINATIONS_CONNECT_TIMEOUT_SECONDS=30
+POLLINATIONS_READ_TIMEOUT_SECONDS=600
+LTX_SCENE_ATTEMPTS=3
+LTX_SCENE_RETRY_BACKOFF_SECONDS=20
+LTX_FALLBACK_TO_GROK_KEY=true
 SHORT_DURATION_SECONDS=20
 GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json
 GOOGLE_TTS_VOICE=en-US-Chirp3-HD-Achernar
@@ -102,6 +107,8 @@ YOUTUBE_CLIENT_SECRETS=client_secrets.json
 YOUTUBE_TOKEN_FILE=youtube_token.json
 YOUTUBE_PRIVACY_STATUS=private
 ```
+
+`LTX_SCENE_ATTEMPTS` và `LTX_SCENE_RETRY_BACKOFF_SECONDS` giúp cron chịu được lỗi tạm thời từ Pollinations/LTX-2 khi render từng scene. `LTX_FALLBACK_TO_GROK_KEY=true` cho phép LTX-2 thử lại bằng `POLLINATIONS_GROK_API_KEY` khi `POLLINATIONS_VIDEO_API_KEY` hết quota hoặc bị rate-limit. Bot ghi scene vào file `.part` trước, chỉ giữ lại MP4 khi tải xong.
 
 Không thêm `BOT_DATA_DIR=.` vào Railway Variables: điều đó sẽ làm bot ghi dữ liệu vào filesystem tạm thay vì Volume. Để kiểm tra file trên Volume, Railway CLI hỗ trợ `railway volume files list /`.
 

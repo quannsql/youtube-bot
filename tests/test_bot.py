@@ -85,9 +85,15 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "Ancient Gears Predicted Eclipses" in prompts[0]
     assert "Rejected candidates from this run" in prompts[0]
     assert "Ancient Greek Gears That Predicted Eclipses" in prompts[0]
+    assert "immediate mass curiosity" in prompts[0]
+    assert "viewer_question" in prompts[0]
+    assert "procedural report" in prompts[0]
+    assert "low-stakes technical corrections" in prompts[0]
+    assert "viewer_question, stakes, and thumbnail_hint" in prompts[1]
     assert "not photorealistic" in prompts[1]
     assert "stylized animated documentary explainer" in prompts[1]
     assert "Preserve this visual direction" in prompts[2]
+    assert "dry topics that lack a strong viewer_question" in prompts[2]
 
 
 def test_choose_novel_plan_passes_duplicate_candidate_to_retry(tmp_path, monkeypatch):
@@ -166,6 +172,44 @@ def test_ltx_scene_prompt_adds_animation_style_guardrails():
     assert "Style guardrails" in prompt
     assert "not photorealistic" in prompt
     assert "live-action" in prompt
+
+
+def test_caption_chunks_are_short_and_readable():
+    chunks = bot.caption_chunks(
+        "Twelve thousand years ago, the Sahara was green. "
+        "Monsoon rains fed lakes across North Africa."
+    )
+
+    assert chunks[0] == "Twelve thousand years ago,"
+    assert all(bot.spoken_word_count(chunk) <= 7 for chunk in chunks)
+
+
+def test_caption_cues_follow_narration_timeline():
+    cues = bot.caption_cues_from_text(
+        "A tiny bronze machine modeled the sky. Its gears tracked eclipses and calendars.",
+        10.0,
+    )
+
+    assert cues[0].start == 0
+    assert cues[-1].end == 10.0
+    assert all(left.end <= right.start for left, right in zip(cues, cues[1:]))
+
+
+def test_ass_caption_file_preserves_vietnamese_text(tmp_path):
+    captions = tmp_path / "captions_vi.ass"
+    bot.write_ass_captions([bot.CaptionCue(0, 2.5, "Hóa thạch nối lục địa")], captions)
+
+    content = captions.read_text(encoding="utf-8")
+    assert "DejaVu Sans" in content
+    assert "Hóa thạch" in content
+    assert "0:00:00.00,0:00:02.50" in content
+
+
+def test_ass_filter_path_escapes_windows_drive():
+    escaped = bot.ffmpeg_filter_path(Path("D:/youtube-bot/generated/captions_en.ass"))
+
+    assert "D\\:" in escaped
+    assert escaped.endswith("/captions_en.ass")
 
 
 def test_ltx_video_retries_transient_download_failure(tmp_path, monkeypatch):

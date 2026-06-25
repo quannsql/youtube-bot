@@ -6,6 +6,10 @@ Grok dùng `POLLINATIONS_GROK_API_KEY`; LTX-2 dùng `POLLINATIONS_VIDEO_API_KEY`
 
 Visual prompt mặc định đi theo hướng animated documentary explainer: minh họa 2D/3D, cel-shaded/paper texture, bản đồ, diagram, cutaway bảo tàng và cận cảnh hiện vật/fossil; tránh photorealistic/live-action để giảm cảm giác video AI giả thật.
 
+Caption được burn-in bằng FFmpeg/ASS sau khi TTS tạo audio, không nhờ model video vẽ chữ. Bot chia narration thành cụm 3-6 từ, canh timing theo duration thực tế của MP3 sau bước chỉnh tempo, rồi lưu `captions_en.ass` và `captions_vi.ass` trong thư mục `generated/...` để dễ kiểm tra.
+
+Topic prompt mặc định ưu tiên nội dung có sức tò mò đại chúng: bí ẩn, thảm họa, biến mất, sụp đổ, thành phố/đế chế thất lạc, câu hỏi "what if", giới hạn khoa học, hoặc một câu chuyện quen thuộc có cú đảo dựa trên bằng chứng. Đây là pattern định hướng để Grok tự suy luận topic mới, không phải danh sách chủ đề cố định.
+
 ## Local setup
 
 ```powershell

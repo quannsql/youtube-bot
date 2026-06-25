@@ -263,6 +263,13 @@ class SocialPlan:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class CaptionCue:
+    start: float
+    end: float
+    text: str
+
+
 def normalized_words(text: str) -> set[str]:
     value = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
     return {word for word in re.findall(r"[a-z0-9]+", value) if len(word) > 2}
@@ -480,6 +487,18 @@ VISUAL_STYLE_RULES = (
     "uncanny faces, text, logos, watermarks, or readable signs inside the video."
 )
 
+CURIOSITY_TOPIC_RULES = (
+    "Choose topics with immediate mass curiosity, not dry textbook or back-office science. "
+    "Prefer a big viewer question, mystery, danger, disappearance, collapse, disaster, impossible limit, "
+    "hidden mechanism, or grounded what-if scenario. Useful patterns include: what really caused a famous "
+    "extinction/collapse/disaster; whether a lost city, empire, artifact, or legend had a real basis; "
+    "the largest or strangest event of its kind; what would happen if a familiar system vanished or changed; "
+    "why humans cannot cross a scientific or engineering limit; or a familiar story with a surprising evidence-based reversal. "
+    "Do not pick narrow measurement cleanups, routine satellite/data-processing details, institutional methods, "
+    "or low-stakes technical corrections unless they can be reframed around a famous mystery or dramatic consequence. "
+    "The patterns are guidance, not a fixed list: infer fresh adjacent topics and avoid merely copying examples."
+)
+
 
 PLAN_SCHEMA = '''{
   "topic":"short English topic", "angle":"specific surprising angle", "title":"<=100 chars",
@@ -491,6 +510,9 @@ PLAN_SCHEMA = '''{
 }'''
 
 RESEARCH_SCHEMA = '''{
+  "curiosity_frame":"mystery, catastrophe, what-if, lost civilization, scientific limit, hidden mechanism, or similar",
+  "viewer_question":"the clickable question this Short answers", "stakes":"why a broad viewer should care",
+  "thumbnail_hint":"2-4 words for a vivid thumbnail concept",
   "central_claim":"one defensible claim", "evidence_points":["fact 1","fact 2","fact 3"],
   "uncertainty":"what must be qualified or omitted", "fresh_angle":"a non-repetitive narrative angle",
   "source_leads":["credible primary institution, archive, museum, or research body"],
@@ -517,11 +539,13 @@ def research_brief(
 ) -> dict[str, Any]:
     past = past or []
     rejected = rejected or []
-    prompt = f'''Act as a meticulous research editor for an English science/history YouTube Short.
+    prompt = f'''Act as a high-retention research editor for an English science/history YouTube Short.
 Theme: {theme}
 Use your reasoning internally before responding. Return only JSON using this schema:
 {RESEARCH_SCHEMA}
-Rules: Choose one topic that can be explained with established evidence. Do not invent sources, data, fossil finds, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it. Prefer a surprising, specific angle over a broad textbook summary.
+Topic strategy: {CURIOSITY_TOPIC_RULES}
+Rules: Choose one topic that can be explained with established evidence and framed as a question a normal viewer would want answered. Do not invent sources, data, fossil finds, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it. Prefer a surprising, specific angle over a broad textbook summary.
+Clickability filter: before selecting the topic, silently reject candidates that sound like a procedural report, a routine measurement update, a narrow technical footnote, or a low-stakes institutional detail. The final viewer_question should feel like a documentary title someone might click without already caring about the field.
 Novelty rule: The topic and fresh_angle must be materially different from every item in the existing archive and rejected candidates below. Do not choose the same object, event, artifact, site, person, mechanism, or central claim. If a broad theme keeps pointing to the same subject, switch domains within the theme.
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
@@ -542,10 +566,13 @@ def plan_short(
     prompt = f'''Act as a senior documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
 Audience: curious global English-speaking viewers. Topics may cover discovery, history, geography, science, or technology.
+Topic strategy: {CURIOSITY_TOPIC_RULES}
+Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel like a mystery or high-stakes explanation, not a neutral encyclopedia entry.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
+On-screen text: each scene's on_screen_text must be 3-5 strong words that match the part of the narration spoken during that scene; do not invent extra claims.
 Split scenes into 3 to 5 scenes whose total duration is exactly {duration}; each scene must be 3–6 seconds. For a 25-second Short, use 5 scenes. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, on_screen_text, fact_note, and source_hints.
 The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
@@ -558,7 +585,7 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     review_prompt = f'''Act as the final fact and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
 {{"quality_check":{{"hook_score":1,"clarity_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, and repetition. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. The narration must begin with hook and end with closing_line. Keep scene durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, and dry topics that lack a strong viewer_question. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. The title should feel like a big question, mystery, consequence, or reversal without clickbait. The narration must begin with hook and end with closing_line. Keep scene durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
@@ -633,6 +660,143 @@ def ltx_scene_prompt(visual_prompt: str) -> str:
     return f"{visual_prompt}\n\nStyle guardrails: {VISUAL_STYLE_RULES}"
 
 
+def spoken_word_count(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", text, flags=re.UNICODE))
+
+
+def caption_chunks(text: str, min_words: int = 3, max_words: int = 6) -> list[str]:
+    cleaned = re.sub(r"\s+", " ", text.strip())
+    if not cleaned:
+        return []
+    chunks: list[str] = []
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?。！？])\s+", cleaned) if part.strip()]
+    for sentence in sentences:
+        current: list[str] = []
+        for token in sentence.split():
+            current.append(token)
+            words = spoken_word_count(" ".join(current))
+            punctuation_pause = token.rstrip().endswith((",", ";", ":", "—", "–"))
+            if words >= max_words or (words >= min_words and punctuation_pause):
+                chunks.append(" ".join(current).strip())
+                current = []
+        if current:
+            chunks.append(" ".join(current).strip())
+
+    merged: list[str] = []
+    for chunk in chunks:
+        if (
+            merged
+            and spoken_word_count(chunk) < min_words
+            and spoken_word_count(merged[-1]) + spoken_word_count(chunk) <= max_words + 1
+        ):
+            merged[-1] = f"{merged[-1]} {chunk}"
+        else:
+            merged.append(chunk)
+    return merged
+
+
+def caption_cues_from_text(text: str, timeline_duration: float) -> list[CaptionCue]:
+    chunks = caption_chunks(text)
+    if not chunks or timeline_duration <= 0:
+        return []
+    weights = [max(1, spoken_word_count(chunk)) for chunk in chunks]
+    total_weight = sum(weights)
+    cursor = 0.0
+    cues: list[CaptionCue] = []
+    for index, (chunk, weight) in enumerate(zip(chunks, weights, strict=True)):
+        end = timeline_duration if index == len(chunks) - 1 else cursor + timeline_duration * (weight / total_weight)
+        cue_end = end if index == len(chunks) - 1 else max(cursor + 0.25, end - 0.04)
+        cues.append(CaptionCue(start=round(cursor, 2), end=round(min(cue_end, timeline_duration), 2), text=chunk))
+        cursor = end
+    return cues
+
+
+def ass_time(seconds: float) -> str:
+    centiseconds = max(0, round(seconds * 100))
+    total_seconds, cs = divmod(centiseconds, 100)
+    minutes, sec = divmod(total_seconds, 60)
+    hours, minute = divmod(minutes, 60)
+    return f"{hours}:{minute:02d}:{sec:02d}.{cs:02d}"
+
+
+def ass_escape_text(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+
+
+def caption_ass_text(text: str, max_line_chars: int = 24) -> str:
+    words = text.split()
+    if len(text) <= max_line_chars or len(words) < 4:
+        return ass_escape_text(text)
+    best_split = 1
+    best_score = float("inf")
+    for split in range(1, len(words)):
+        left, right = " ".join(words[:split]), " ".join(words[split:])
+        score = max(len(left), len(right)) + abs(len(left) - len(right)) * 0.25
+        if score < best_score:
+            best_split, best_score = split, score
+    return "\\N".join(
+        ass_escape_text(part)
+        for part in (" ".join(words[:best_split]), " ".join(words[best_split:]))
+    )
+
+
+def write_ass_captions(cues: list[CaptionCue], destination: Path) -> None:
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 720
+PlayResY: 1280
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Caption,DejaVu Sans,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H66000000,-1,0,0,0,100,100,0,0,1,4,1,2,48,48,185,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    lines = [header]
+    for cue in cues:
+        lines.append(
+            "Dialogue: 0,"
+            f"{ass_time(cue.start)},{ass_time(cue.end)},Caption,,0,0,0,,"
+            f"{{\\fad(80,80)}}{caption_ass_text(cue.text)}\n"
+        )
+    destination.write_text("".join(lines), encoding="utf-8")
+
+
+def ffmpeg_filter_path(path: Path) -> str:
+    return path.resolve().as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
+def ass_video_filter(captions: Path) -> str:
+    return f"ass='{ffmpeg_filter_path(captions)}',format=yuv420p"
+
+
+def mux_video_audio_with_captions(
+    visuals: Path,
+    narration: Path,
+    captions: Path,
+    output: Path,
+    target_duration: int,
+) -> None:
+    run([
+        "ffmpeg", "-y",
+        "-i", str(visuals),
+        "-i", str(narration),
+        "-filter_complex", f"[0:v]{ass_video_filter(captions)}[v];[1:a]apad=pad_dur={target_duration}[a]",
+        "-map", "[v]",
+        "-map", "[a]",
+        "-t", str(target_duration),
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "18",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        str(output),
+    ])
+
+
 def require_tools() -> None:
     missing = [name for name in ("ffmpeg", "ffprobe") if shutil.which(name) is None]
     if missing:
@@ -688,10 +852,16 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         adjusted = output_dir / "narration_fit.mp3"
         run(["ffmpeg", "-y", "-i", str(narration), "-filter:a", f"atempo={tempo:.4f}", str(adjusted)])
         narration = adjusted
+        narration_seconds = media_duration(narration)
 
+    captions = output_dir / "captions_en.ass"
+    caption_seconds = min(narration_seconds, target_duration)
+    cues = caption_cues_from_text(plan.narration, caption_seconds)
+    write_ass_captions(cues, captions)
+    LOG.info("Generated %d English caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     final_video = output_dir / "short.mp4"
-    LOG.info("Muxing narration and final video…")
-    run(["ffmpeg", "-y", "-i", str(visuals), "-i", str(narration), "-filter_complex", f"[1:a]apad=pad_dur={target_duration}[a]", "-map", "0:v:0", "-map", "[a]", "-t", str(target_duration), "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(final_video)])
+    LOG.info("Muxing narration, captions, and final video…")
+    mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration)
     return final_video
 
 
@@ -708,9 +878,15 @@ def render_social_video(social: SocialPlan, tts: GoogleChirpTTS, output_dir: Pat
         adjusted = output_dir / "narration_vi_fit.mp3"
         run(["ffmpeg", "-y", "-i", str(narration), "-filter:a", f"atempo={tempo:.4f}", str(adjusted)])
         narration = adjusted
+        narration_seconds = media_duration(narration)
+    captions = output_dir / "captions_vi.ass"
+    caption_seconds = min(narration_seconds, target_duration)
+    cues = caption_cues_from_text(social.narration, caption_seconds)
+    write_ass_captions(cues, captions)
+    LOG.info("Generated %d Vietnamese caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     social_video = output_dir / "short_vi.mp4"
-    LOG.info("Muxing Vietnamese social video…")
-    run(["ffmpeg", "-y", "-i", str(visuals), "-i", str(narration), "-filter_complex", f"[1:a]apad=pad_dur={target_duration}[a]", "-map", "0:v:0", "-map", "[a]", "-t", str(target_duration), "-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", str(social_video)])
+    LOG.info("Muxing Vietnamese social video with captions…")
+    mux_video_audio_with_captions(visuals, narration, captions, social_video, target_duration)
     return social_video
 
 
@@ -1055,7 +1231,10 @@ def configure_logging(level: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--theme", default="little-known discoveries in history, science, technology, or geography")
+    parser.add_argument(
+        "--theme",
+        default="high-curiosity mysteries, disasters, lost civilizations, scientific limits, and grounded what-if questions",
+    )
     parser.add_argument(
         "--duration",
         type=int,

@@ -345,7 +345,7 @@ class GeminiClient:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
         self.client = genai.Client(api_key=settings.gemini_api_key)
-        self.model_name = "gemini-2.5-flash-lite"
+        self.model_name = "gemini-3.1-flash-lite"
 
     def chat(self, prompt: str, temperature: float = 0.55) -> str:
         models = [self.model_name, "gemini-2.5-flash", "gemini-2.5-flash-lite"]
@@ -357,7 +357,7 @@ class GeminiClient:
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         temperature=temperature,
-                        tools=[{"google_search": {}}],
+                        # tools=[{"google_search": {}}], # Tạm thời tắt Search Tool
                         system_instruction="You return only valid JSON when asked.",
                     ),
                 )

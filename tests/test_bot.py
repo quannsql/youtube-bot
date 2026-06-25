@@ -4,6 +4,7 @@ import base64
 import sys
 from pathlib import Path
 import requests
+import pytest
 
 SPEC = importlib.util.spec_from_file_location("bot", Path(__file__).parents[1] / "youtube_shorts_bot.py")
 bot = importlib.util.module_from_spec(SPEC)
@@ -84,6 +85,9 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "Ancient Gears Predicted Eclipses" in prompts[0]
     assert "Rejected candidates from this run" in prompts[0]
     assert "Ancient Greek Gears That Predicted Eclipses" in prompts[0]
+    assert "not photorealistic" in prompts[1]
+    assert "stylized animated documentary explainer" in prompts[1]
+    assert "Preserve this visual direction" in prompts[2]
 
 
 def test_choose_novel_plan_passes_duplicate_candidate_to_retry(tmp_path, monkeypatch):
@@ -137,6 +141,23 @@ def test_materialize_credential_file_from_base64(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_CREDENTIAL_B64", base64.b64encode(b'{"credential": true}').decode())
     bot.materialize_credential_file("TEST_CREDENTIAL_B64", destination)
     assert destination.read_bytes() == b'{"credential": true}'
+
+
+def test_settings_accepts_25_second_duration(monkeypatch):
+    monkeypatch.setenv("POLLINATIONS_GROK_API_KEY", "grok")
+    monkeypatch.setenv("POLLINATIONS_VIDEO_API_KEY", "video")
+    monkeypatch.setenv("SHORT_DURATION_SECONDS", "25")
+
+    assert bot.Settings.from_env().duration == 25
+
+
+def test_ltx_scene_prompt_adds_animation_style_guardrails():
+    prompt = bot.ltx_scene_prompt("A fossil leaf drifts across ancient continents.")
+
+    assert prompt.startswith("A fossil leaf")
+    assert "Style guardrails" in prompt
+    assert "not photorealistic" in prompt
+    assert "live-action" in prompt
 
 
 def test_ltx_video_retries_transient_download_failure(tmp_path, monkeypatch):
@@ -236,6 +257,86 @@ def test_facebook_page_upload_posts_video(tmp_path, monkeypatch):
     assert bot.upload_to_facebook_page(video, social, settings) == "fb123"
     assert calls["url"].endswith("/page1/videos")
     assert calls["data"]["description"] == "Mo ta"
+
+
+def test_facebook_upload_retries_with_user_token_when_page_token_expired(tmp_path, monkeypatch):
+    video = tmp_path / "short_vi.mp4"
+    video.write_bytes(b"video")
+    posts = []
+    gets = []
+
+    class FakeResponse:
+        def __init__(self, payload, status_code=200):
+            self.payload = payload
+            self.status_code = status_code
+            self.ok = status_code < 400
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self.payload
+
+    def fake_post(url, data=None, files=None, timeout=None):
+        posts.append({"url": url, "data": data, "files": files, "timeout": timeout})
+        if len(posts) == 1:
+            return FakeResponse(
+                {
+                    "error": {
+                        "message": "Error validating access token: Session has expired.",
+                        "type": "OAuthException",
+                        "code": 190,
+                        "error_subcode": 463,
+                    }
+                },
+                status_code=400,
+            )
+        return FakeResponse({"id": "fb123"})
+
+    def fake_get(url, params=None, timeout=None):
+        gets.append({"url": url, "params": params, "timeout": timeout})
+        return FakeResponse({"data": [{"id": "page1", "name": "Page", "access_token": "fresh-page-token"}]})
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+    settings = bot.Settings(
+        grok_api_key="grok",
+        video_api_key="video",
+        facebook_page_id="page1",
+        facebook_page_access_token="expired-page-token",
+        facebook_user_access_token="user-token",
+    )
+    social = bot.SocialPlan(title="Tieu de", description="Mo ta", tags=["tag"], narration="Loi doc")
+
+    assert bot.upload_to_facebook_page(video, social, settings) == "fb123"
+    assert [post["data"]["access_token"] for post in posts] == ["expired-page-token", "fresh-page-token"]
+    assert gets[0]["params"]["access_token"] == "user-token"
+
+
+def test_facebook_expired_page_token_error_is_actionable(tmp_path, monkeypatch):
+    video = tmp_path / "short_vi.mp4"
+    video.write_bytes(b"video")
+
+    class FakeResponse:
+        ok = False
+        status_code = 400
+        text = '{"error":{"message":"Session has expired.","code":190,"error_subcode":463}}'
+
+        def json(self):
+            return {"error": {"message": "Session has expired.", "code": 190, "error_subcode": 463}}
+
+    monkeypatch.setattr(bot.requests, "post", lambda *_args, **_kwargs: FakeResponse())
+    settings = bot.Settings(
+        grok_api_key="grok",
+        video_api_key="video",
+        facebook_page_id="page1",
+        facebook_page_access_token="expired-page-token",
+    )
+    social = bot.SocialPlan(title="Tieu de", description="Mo ta", tags=["tag"], narration="Loi doc")
+
+    with pytest.raises(bot.FacebookAPIError) as exc_info:
+        bot.upload_to_facebook_page(video, social, settings)
+
+    assert "access token da het han" in str(exc_info.value)
+    assert "FACEBOOK_USER_ACCESS_TOKEN" in str(exc_info.value)
 
 
 def test_tiktok_direct_post_uploads_whole_file(tmp_path, monkeypatch):

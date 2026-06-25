@@ -33,6 +33,8 @@ load_dotenv(ROOT / ".env")
 _configured_data_dir = Path(os.getenv("BOT_DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or ROOT)
 DATA_DIR = _configured_data_dir if _configured_data_dir.is_absolute() else ROOT / _configured_data_dir
 LOG = logging.getLogger("shorts_bot")
+MIN_SHORT_DURATION_SECONDS = 10
+MAX_SHORT_DURATION_SECONDS = 25
 
 # Windows PowerShell sessions can still inherit cp1252. Keep CLI output
 # deterministic instead of failing on non-ASCII text in paths or user themes.
@@ -53,6 +55,22 @@ class PollinationsTransientError(BotError):
 
 class PollinationsQuotaError(PollinationsTransientError):
     pass
+
+
+class FacebookAPIError(BotError):
+    def __init__(
+        self,
+        message: str,
+        code: str | None = None,
+        subcode: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.subcode = subcode
+
+    @property
+    def is_expired_token(self) -> bool:
+        return self.code == "190" and self.subcode == "463"
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -122,6 +140,7 @@ class Settings:
     facebook_graph_version: str = "v25.0"
     facebook_page_id: str = ""
     facebook_page_access_token: str = ""
+    facebook_user_access_token: str = ""
     publish_tiktok: bool = False
     tiktok_access_token: str = ""
     tiktok_privacy_level: str = "SELF_ONLY"
@@ -135,9 +154,12 @@ class Settings:
         video_api_key = os.getenv("POLLINATIONS_VIDEO_API_KEY", "").strip()
         if not grok_api_key or not video_api_key:
             raise BotError("Thiếu POLLINATIONS_GROK_API_KEY hoặc POLLINATIONS_VIDEO_API_KEY.")
-        duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "20"))
-        if not 10 <= duration <= 20:
-            raise BotError("SHORT_DURATION_SECONDS phải nằm trong 10–20 giây.")
+        duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "25"))
+        if not MIN_SHORT_DURATION_SECONDS <= duration <= MAX_SHORT_DURATION_SECONDS:
+            raise BotError(
+                f"SHORT_DURATION_SECONDS phải nằm trong "
+                f"{MIN_SHORT_DURATION_SECONDS}–{MAX_SHORT_DURATION_SECONDS} giây."
+            )
         return cls(
             grok_api_key=grok_api_key,
             video_api_key=video_api_key,
@@ -161,6 +183,7 @@ class Settings:
             facebook_graph_version=os.getenv("FACEBOOK_GRAPH_VERSION", "v25.0"),
             facebook_page_id=os.getenv("FACEBOOK_PAGE_ID", "").strip(),
             facebook_page_access_token=os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", "").strip(),
+            facebook_user_access_token=os.getenv("FACEBOOK_USER_ACCESS_TOKEN", "").strip(),
             publish_tiktok=env_bool("PUBLISH_TIKTOK", False),
             tiktok_access_token=os.getenv("TIKTOK_ACCESS_TOKEN", "").strip(),
             tiktok_privacy_level=os.getenv("TIKTOK_PRIVACY_LEVEL", "SELF_ONLY").strip() or "SELF_ONLY",
@@ -446,12 +469,22 @@ class GoogleChirpTTS:
         destination.write_bytes(response.audio_content)
 
 
+VISUAL_STYLE_RULES = (
+    "Use stylized animated documentary explainer visuals, not photorealistic or live-action footage. "
+    "Each visual_prompt must describe a polished educational illustration: painterly 2D/3D hybrid, "
+    "cel-shaded or paper-textured surfaces, simplified silhouettes instead of realistic faces, "
+    "clear maps, timelines, museum cutaways, diagrams, fossil/object close-ups, and slow cinematic motion. "
+    "Avoid realism cues such as DSLR footage, real actors, lifelike skin, news footage, handheld camera, "
+    "uncanny faces, text, logos, watermarks, or readable signs inside the video."
+)
+
+
 PLAN_SCHEMA = '''{
   "topic":"short English topic", "angle":"specific surprising angle", "title":"<=100 chars",
   "description":"English description with #Shorts", "tags":["shorts","history"],
   "hook":"first spoken sentence, <=12 words", "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=14 words",
-  "scenes":[{"duration":4,"visual_prompt":"English cinematic prompt, no text or logos","on_screen_text":"<=5 English words"}],
+  "scenes":[{"duration":4,"visual_prompt":"English animated documentary illustration prompt, no text/logos/photorealism","on_screen_text":"<=5 English words"}],
   "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"]
 }'''
 
@@ -509,8 +542,9 @@ Theme: {theme}
 Audience: curious global English-speaking viewers. Topics may cover discovery, history, geography, science, or technology.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
-Visuals: artistic documentary, painterly animation or restrained historical animation; intentional slight movement discontinuity is acceptable; vertical 9:16; no text, logos, watermarks, or readable signs inside video.
-Split scenes into 4 or 5 scenes whose total duration is exactly {duration}; each scene must be 3–6 seconds. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
+Visuals: {VISUAL_STYLE_RULES}
+Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
+Split scenes into 3 to 5 scenes whose total duration is exactly {duration}; each scene must be 3–6 seconds. For a 25-second Short, use 5 scenes. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, on_screen_text, fact_note, and source_hints.
 The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
@@ -522,7 +556,7 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     review_prompt = f'''Act as the final fact and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
 {{"quality_check":{{"hook_score":1,"clarity_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, and repetition. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. The narration must begin with hook and end with closing_line. Keep scene durations totaling exactly {duration}.
+The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, and repetition. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. The narration must begin with hook and end with closing_line. Keep scene durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
@@ -593,6 +627,10 @@ def choose_novel_plan(
     return None
 
 
+def ltx_scene_prompt(visual_prompt: str) -> str:
+    return f"{visual_prompt}\n\nStyle guardrails: {VISUAL_STYLE_RULES}"
+
+
 def require_tools() -> None:
     missing = [name for name in ("ffmpeg", "ffprobe") if shutil.which(name) is None]
     if missing:
@@ -618,7 +656,7 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
     clips: list[Path] = []
     for index, scene in enumerate(plan.scenes, start=1):
         clip = output_dir / f"scene_{index}.mp4"
-        client.video(scene.visual_prompt, scene.duration, clip, seed=int(time.time()) + index)
+        client.video(ltx_scene_prompt(scene.visual_prompt), scene.duration, clip, seed=int(time.time()) + index)
         if clip.stat().st_size < 1024:
             raise BotError(f"Cảnh {index} không phải video hợp lệ.")
         clip_seconds = media_duration(clip)
@@ -732,16 +770,98 @@ def response_json(response: requests.Response) -> dict[str, Any]:
     return data
 
 
-def upload_to_facebook_page(video: Path, social: SocialPlan, settings: Settings) -> str:
-    if not settings.facebook_page_id or not settings.facebook_page_access_token:
-        raise BotError("Thiếu FACEBOOK_PAGE_ID hoặc FACEBOOK_PAGE_ACCESS_TOKEN.")
+def facebook_error_detail(data: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return str(data), None, None
+    code = str(error.get("code")) if error.get("code") is not None else None
+    subcode = str(error.get("error_subcode")) if error.get("error_subcode") is not None else None
+    message = str(error.get("message") or data)
+    code_note = f" (code {code}, subcode {subcode})" if subcode else f" (code {code})" if code else ""
+    if code == "190" and subcode == "463":
+        return (
+            "Meta bao access token da het han"
+            f"{code_note}. Hay tao lai Page access token cho FACEBOOK_PAGE_ACCESS_TOKEN, "
+            "hoac dat FACEBOOK_USER_ACCESS_TOKEN la long-lived user token de bot tu lay Page token qua /me/accounts.",
+            code,
+            subcode,
+        )
+    if code == "190":
+        return (
+            "Meta bao access token khong hop le"
+            f"{code_note}: {message}. Kiem tra token, quyen Page va viec user/app van con duoc cap quyen.",
+            code,
+            subcode,
+        )
+    return f"{message}{code_note}", code, subcode
+
+
+def facebook_response_json(response: requests.Response, context: str) -> dict[str, Any]:
+    data = response_json(response)
+    if response.ok and "error" not in data:
+        return data
+    detail, code, subcode = facebook_error_detail(data)
+    raise FacebookAPIError(f"{context}: {detail}", code=code, subcode=subcode)
+
+
+def facebook_page_token_from_user_token(settings: Settings) -> str:
+    if not settings.facebook_page_id:
+        raise BotError("Thiếu FACEBOOK_PAGE_ID.")
+    if not settings.facebook_user_access_token:
+        raise BotError("Thiếu FACEBOOK_USER_ACCESS_TOKEN để tự lấy Page access token.")
+    url: str | None = f"https://graph.facebook.com/{settings.facebook_graph_version}/me/accounts"
+    params: dict[str, str] | None = {
+        "fields": "id,name,access_token",
+        "access_token": settings.facebook_user_access_token,
+    }
+    while url:
+        response = requests.get(url, params=params, timeout=(30, 120))
+        data = facebook_response_json(response, "Facebook không lấy được danh sách Page từ user token")
+        pages = data.get("data", [])
+        if not isinstance(pages, list):
+            raise BotError(f"Facebook trả danh sách Page không đúng định dạng: {data}")
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            if str(page.get("id")) == settings.facebook_page_id:
+                token = str(page.get("access_token") or "")
+                if token:
+                    LOG.info("Resolved Facebook Page access token from FACEBOOK_USER_ACCESS_TOKEN.")
+                    return token
+                raise BotError(
+                    "Facebook tìm thấy Page nhưng không trả access_token. "
+                    "Hãy cấp quyền pages_show_list và pages_manage_posts cho token."
+                )
+        paging = data.get("paging", {})
+        url = str(paging.get("next") or "") if isinstance(paging, dict) else ""
+        params = None
+    raise BotError(
+        "FACEBOOK_USER_ACCESS_TOKEN hợp lệ nhưng không thấy FACEBOOK_PAGE_ID trong /me/accounts. "
+        "Hãy chắc chắn user quản lý Page này và đã chọn Page khi cấp quyền."
+    )
+
+
+def resolve_facebook_page_access_token(settings: Settings) -> str:
+    if not settings.facebook_page_id:
+        raise BotError("Thiếu FACEBOOK_PAGE_ID.")
+    if settings.facebook_page_access_token:
+        return settings.facebook_page_access_token
+    return facebook_page_token_from_user_token(settings)
+
+
+def upload_to_facebook_page_with_token(
+    video: Path,
+    social: SocialPlan,
+    settings: Settings,
+    access_token: str,
+) -> str:
     url = f"https://graph-video.facebook.com/{settings.facebook_graph_version}/{settings.facebook_page_id}/videos"
     LOG.info("Uploading %s to Facebook Page %s…", video.name, settings.facebook_page_id)
     with video.open("rb") as handle:
         response = requests.post(
             url,
             data={
-                "access_token": settings.facebook_page_access_token,
+                "access_token": access_token,
                 "title": social.title,
                 "description": social.description,
                 "published": "true",
@@ -749,14 +869,42 @@ def upload_to_facebook_page(video: Path, social: SocialPlan, settings: Settings)
             files={"source": (video.name, handle, "video/mp4")},
             timeout=(30, 900),
         )
-    data = response_json(response)
-    if not response.ok or "error" in data:
-        raise BotError(f"Facebook upload thất bại: {data}")
+    data = facebook_response_json(response, "Facebook upload thất bại")
     video_id = str(data.get("id") or data.get("video_id") or "")
     if not video_id:
         raise BotError(f"Facebook upload không trả video id: {data}")
     LOG.info("Facebook upload completed: %s", video_id)
     return video_id
+
+
+def upload_to_facebook_page(video: Path, social: SocialPlan, settings: Settings) -> str:
+    if not settings.facebook_page_id:
+        raise BotError("Thiếu FACEBOOK_PAGE_ID.")
+    if not settings.facebook_page_access_token and not settings.facebook_user_access_token:
+        raise BotError("Thiếu FACEBOOK_PAGE_ACCESS_TOKEN hoặc FACEBOOK_USER_ACCESS_TOKEN.")
+    try:
+        return upload_to_facebook_page_with_token(
+            video,
+            social,
+            settings,
+            resolve_facebook_page_access_token(settings),
+        )
+    except FacebookAPIError as exc:
+        if not (
+            exc.is_expired_token
+            and settings.facebook_page_access_token
+            and settings.facebook_user_access_token
+        ):
+            raise
+        LOG.warning(
+            "Configured FACEBOOK_PAGE_ACCESS_TOKEN is expired; retrying with a Page token from FACEBOOK_USER_ACCESS_TOKEN."
+        )
+        return upload_to_facebook_page_with_token(
+            video,
+            social,
+            settings,
+            facebook_page_token_from_user_token(settings),
+        )
 
 
 def tiktok_headers(access_token: str) -> dict[str, str]:
@@ -906,7 +1054,12 @@ def configure_logging(level: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--theme", default="little-known discoveries in history, science, technology, or geography")
-    parser.add_argument("--duration", type=int, choices=range(10, 21), metavar="10..20")
+    parser.add_argument(
+        "--duration",
+        type=int,
+        choices=range(MIN_SHORT_DURATION_SECONDS, MAX_SHORT_DURATION_SECONDS + 1),
+        metavar=f"{MIN_SHORT_DURATION_SECONDS}..{MAX_SHORT_DURATION_SECONDS}",
+    )
     parser.add_argument("--publish", action="store_true", help="Tự upload sau khi render")
     parser.add_argument("--privacy-status", choices=("private", "unlisted", "public"))
     parser.add_argument("--dry-run", action="store_true", help="Chỉ tạo và in kế hoạch")

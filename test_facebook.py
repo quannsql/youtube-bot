@@ -1,14 +1,30 @@
 import os
 import requests
 from dotenv import load_dotenv
+from youtube_shorts_bot import BotError, Settings, resolve_facebook_page_access_token
 
 def test_facebook_token():
     load_dotenv()
     page_id = os.getenv("FACEBOOK_PAGE_ID")
-    token = os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN")
+    page_token = os.getenv("FACEBOOK_PAGE_ACCESS_TOKEN", "")
+    user_token = os.getenv("FACEBOOK_USER_ACCESS_TOKEN", "")
     
-    if not page_id or not token:
-        print("[Loi] Thieu FACEBOOK_PAGE_ID hoac FACEBOOK_PAGE_ACCESS_TOKEN trong file .env")
+    if not page_id or not (page_token or user_token):
+        print("[Loi] Thieu FACEBOOK_PAGE_ID va FACEBOOK_PAGE_ACCESS_TOKEN hoac FACEBOOK_USER_ACCESS_TOKEN trong file .env")
+        return
+
+    try:
+        token = resolve_facebook_page_access_token(
+            Settings(
+                grok_api_key="unused",
+                video_api_key="unused",
+                facebook_page_id=page_id,
+                facebook_page_access_token=page_token,
+                facebook_user_access_token=user_token,
+            )
+        )
+    except BotError as exc:
+        print(f"[That bai] Khong lay duoc Facebook token: {exc}")
         return
         
     print(f"Dang kiem tra ket noi voi Page ID: {page_id}...")

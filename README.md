@@ -1,8 +1,10 @@
 # YouTube Shorts documentary bot
 
-Python bot tạo và đăng YouTube Shorts tiếng Anh 10–20 giây. Mỗi lượt chạy hoàn thành toàn bộ chu trình: Grok nghiên cứu/kịch bản → LTX-2 tạo video → Google Chirp 3 HD tạo narration → FFmpeg ghép → YouTube upload.
+Python bot tạo và đăng YouTube Shorts tiếng Anh 10–25 giây. Mỗi lượt chạy hoàn thành toàn bộ chu trình: Grok nghiên cứu/kịch bản → LTX-2 tạo video → Google Chirp 3 HD tạo narration → FFmpeg ghép → YouTube upload.
 
 Grok dùng `POLLINATIONS_GROK_API_KEY`; LTX-2 dùng `POLLINATIONS_VIDEO_API_KEY`. Hai key độc lập giúp chi phí reasoning không ăn vào quota video.
+
+Visual prompt mặc định đi theo hướng animated documentary explainer: minh họa 2D/3D, cel-shaded/paper texture, bản đồ, diagram, cutaway bảo tàng và cận cảnh hiện vật/fossil; tránh photorealistic/live-action để giảm cảm giác video AI giả thật.
 
 ## Local setup
 
@@ -18,7 +20,7 @@ Copy-Item .env.example .env
 Chạy một video ngay:
 
 ```powershell
-python youtube_shorts_bot.py --publish --duration 20
+python youtube_shorts_bot.py --publish --duration 25
 ```
 
 `--scheduled` bật chốt an toàn: không tạo quá 3 job mới trong một ngày UTC.
@@ -43,7 +45,7 @@ Tại Railway, vào Service → **Settings → Cron Schedule** và đặt:
 0 0,6,12 * * *
 ```
 
-Railway chạy Cron theo UTC. Lịch này chạy vào 00:00, 06:00 và 12:00 UTC, tương ứng 07:00, 13:00 và 19:00 giờ Việt Nam (UTC+7). Mỗi lần chạy tạo/upload một video ngay; video LTX-2 dài 20 giây tốn khoảng `0.1` Pollen trên key video, nằm dưới quota `0.15` Pollen/giờ mà bạn nêu.
+Railway chạy Cron theo UTC. Lịch này chạy vào 00:00, 06:00 và 12:00 UTC, tương ứng 07:00, 13:00 và 19:00 giờ Việt Nam (UTC+7). Mỗi lần chạy tạo/upload một video ngay; video LTX-2 dài 25 giây tốn khoảng `0.125` Pollen trên key video, vẫn có thể tận dụng `LTX_FALLBACK_TO_GROK_KEY=true` khi key video hết quota hoặc bị rate-limit.
 
 ## Tạo và dùng Railway Volume
 
@@ -99,7 +101,7 @@ POLLINATIONS_READ_TIMEOUT_SECONDS=600
 LTX_SCENE_ATTEMPTS=3
 LTX_SCENE_RETRY_BACKOFF_SECONDS=20
 LTX_FALLBACK_TO_GROK_KEY=true
-SHORT_DURATION_SECONDS=20
+SHORT_DURATION_SECONDS=25
 GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json
 GOOGLE_TTS_VOICE=en-US-Chirp3-HD-Achernar
 GOOGLE_TTS_SPEAKING_RATE=1.05
@@ -112,6 +114,7 @@ PUBLISH_FACEBOOK=false
 FACEBOOK_GRAPH_VERSION=v25.0
 FACEBOOK_PAGE_ID=
 FACEBOOK_PAGE_ACCESS_TOKEN=
+FACEBOOK_USER_ACCESS_TOKEN=
 PUBLISH_TIKTOK=false
 TIKTOK_ACCESS_TOKEN=
 TIKTOK_PRIVACY_LEVEL=SELF_ONLY
@@ -122,7 +125,7 @@ TIKTOK_DISABLE_STITCH=false
 
 `LTX_SCENE_ATTEMPTS` và `LTX_SCENE_RETRY_BACKOFF_SECONDS` giúp cron chịu được lỗi tạm thời từ Pollinations/LTX-2 khi render từng scene. `LTX_FALLBACK_TO_GROK_KEY=true` cho phép LTX-2 thử lại bằng `POLLINATIONS_GROK_API_KEY` khi `POLLINATIONS_VIDEO_API_KEY` hết quota hoặc bị rate-limit. Bot ghi scene vào file `.part` trước, chỉ giữ lại MP4 khi tải xong.
 
-Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
+Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. Nếu Page token hết hạn hoặc bạn muốn bot tự lấy token Page mỗi lần chạy, đặt thêm `FACEBOOK_USER_ACCESS_TOKEN` là long-lived user token có quyền quản lý Page; bot sẽ gọi `/me/accounts` để lấy Page token khớp `FACEBOOK_PAGE_ID`. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
 
 Không thêm `BOT_DATA_DIR=.` vào Railway Variables: điều đó sẽ làm bot ghi dữ liệu vào filesystem tạm thay vì Volume. Để kiểm tra file trên Volume, Railway CLI hỗ trợ `railway volume files list /`.
 

@@ -126,6 +126,7 @@ class Settings:
     ltx_fallback_to_grok_key: bool = True
     language: str = "en"
     duration: int = 20
+    scheduled_daily_limit: int = 3
     text_model: str = "grok-large"
     video_model: str = "ltx-2"
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
@@ -171,6 +172,7 @@ class Settings:
             ltx_fallback_to_grok_key=env_bool("LTX_FALLBACK_TO_GROK_KEY", True),
             language=os.getenv("SHORT_LANGUAGE", "en"),
             duration=duration,
+            scheduled_daily_limit=max(0, int(os.getenv("SCHEDULED_DAILY_LIMIT", "3"))),
             google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
             google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Achernar"),
             google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
@@ -1064,7 +1066,7 @@ def main() -> int:
     parser.add_argument("--privacy-status", choices=("private", "unlisted", "public"))
     parser.add_argument("--dry-run", action="store_true", help="Chỉ tạo và in kế hoạch")
     parser.add_argument("--upload-file", type=Path, help="Upload lại MP4 đã render, không tạo nội dung/video mới")
-    parser.add_argument("--scheduled", action="store_true", help="Bật giới hạn an toàn: tối đa 3 video mới mỗi ngày UTC")
+    parser.add_argument("--scheduled", action="store_true", help="Bật giới hạn an toàn theo SCHEDULED_DAILY_LIMIT mỗi ngày UTC")
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     args = parser.parse_args()
     configure_logging(args.log_level)
@@ -1087,9 +1089,15 @@ def main() -> int:
             if social_results:
                 print(f"Đã publish social: {social_results}")
         return 0
-    if args.scheduled and archive.jobs_created_today() >= 3:
-        LOG.warning("Daily limit reached: 3 video jobs have already been created today (UTC). Exiting.")
-        return 0
+    if args.scheduled and settings.scheduled_daily_limit > 0:
+        jobs_today = archive.jobs_created_today()
+        if jobs_today >= settings.scheduled_daily_limit:
+            LOG.warning(
+                "Daily limit reached: %d/%d video jobs have already been created today (UTC). Exiting.",
+                jobs_today,
+                settings.scheduled_daily_limit,
+            )
+            return 0
     plan = choose_novel_plan(client, archive, args.theme, settings.duration)
     if plan is None:
         message = "Không tìm được ý tưởng đủ mới sau 4 lần."

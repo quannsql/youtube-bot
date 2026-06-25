@@ -23,13 +23,13 @@ Chạy một video ngay:
 python youtube_shorts_bot.py --publish --duration 25
 ```
 
-`--scheduled` bật chốt an toàn: không tạo quá 3 job mới trong một ngày UTC.
+`--scheduled` bật chốt an toàn theo `SCHEDULED_DAILY_LIMIT` trong một ngày UTC. Mặc định là `3`; đặt `0` nếu muốn tắt giới hạn này.
 
 ```powershell
 python youtube_shorts_bot.py --publish --scheduled
 ```
 
-## Railway: 3 video/ngày, cách nhau 6 giờ
+## Railway: nhiều video/ngày theo Cron
 
 File `railway.toml` đã đặt start command cho Railway:
 
@@ -45,7 +45,7 @@ Tại Railway, vào Service → **Settings → Cron Schedule** và đặt:
 0 0,6,12 * * *
 ```
 
-Railway chạy Cron theo UTC. Lịch này chạy vào 00:00, 06:00 và 12:00 UTC, tương ứng 07:00, 13:00 và 19:00 giờ Việt Nam (UTC+7). Mỗi lần chạy tạo/upload một video ngay; video LTX-2 dài 25 giây tốn khoảng `0.125` Pollen trên key video, vẫn có thể tận dụng `LTX_FALLBACK_TO_GROK_KEY=true` khi key video hết quota hoặc bị rate-limit.
+Railway chạy Cron theo UTC. Lịch này chạy vào 00:00, 06:00 và 12:00 UTC, tương ứng 07:00, 13:00 và 19:00 giờ Việt Nam (UTC+7). Mỗi lần chạy tạo/upload một video ngay, miễn là chưa chạm `SCHEDULED_DAILY_LIMIT`. Muốn nhiều hơn 3 video/ngày thì tăng cả Cron Schedule và `SCHEDULED_DAILY_LIMIT`. Video LTX-2 dài 25 giây tốn khoảng `0.125` Pollen trên key video, vẫn có thể tận dụng `LTX_FALLBACK_TO_GROK_KEY=true` khi key video hết quota hoặc bị rate-limit.
 
 ## Tạo và dùng Railway Volume
 
@@ -102,6 +102,7 @@ LTX_SCENE_ATTEMPTS=3
 LTX_SCENE_RETRY_BACKOFF_SECONDS=20
 LTX_FALLBACK_TO_GROK_KEY=true
 SHORT_DURATION_SECONDS=25
+SCHEDULED_DAILY_LIMIT=3
 GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json
 GOOGLE_TTS_VOICE=en-US-Chirp3-HD-Achernar
 GOOGLE_TTS_SPEAKING_RATE=1.05

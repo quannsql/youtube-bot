@@ -151,6 +151,14 @@ def test_settings_accepts_25_second_duration(monkeypatch):
     assert bot.Settings.from_env().duration == 25
 
 
+def test_settings_reads_scheduled_daily_limit(monkeypatch):
+    monkeypatch.setenv("POLLINATIONS_GROK_API_KEY", "grok")
+    monkeypatch.setenv("POLLINATIONS_VIDEO_API_KEY", "video")
+    monkeypatch.setenv("SCHEDULED_DAILY_LIMIT", "6")
+
+    assert bot.Settings.from_env().scheduled_daily_limit == 6
+
+
 def test_ltx_scene_prompt_adds_animation_style_guardrails():
     prompt = bot.ltx_scene_prompt("A fossil leaf drifts across ancient continents.")
 

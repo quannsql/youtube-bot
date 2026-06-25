@@ -345,23 +345,33 @@ class GeminiClient:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
         self.client = genai.Client(api_key=settings.gemini_api_key)
-        self.model_name = "gemini-3.1-flash-lite"
+        self.model_name = "gemini-2.5-flash-lite"
 
     def chat(self, prompt: str, temperature: float = 0.55) -> str:
-        LOG.info(f"Generating content plan with {self.model_name}...")
-        try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=temperature,
-                    tools=[{"google_search": {}}],
-                    system_instruction="You return only valid JSON when asked.",
-                ),
-            )
-            return response.text
-        except Exception as exc:
-            raise BotError(f"Lỗi Gemini API: {exc}") from exc
+        models = [self.model_name, "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        for attempt, model in enumerate(models):
+            LOG.info(f"Generating content plan with {model}...")
+            try:
+                response = self.client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        tools=[{"google_search": {}}],
+                        system_instruction="You return only valid JSON when asked.",
+                    ),
+                )
+                if not response.text:
+                    raise BotError("Gemini trả về chuỗi rỗng.")
+                return response.text
+            except Exception as exc:
+                err_str = str(exc)
+                if "429" in err_str and attempt < len(models) - 1:
+                    LOG.warning(f"Model {model} bị lỗi 429 Quota, thử fallback sang {models[attempt+1]}...")
+                    time.sleep(3)
+                    continue
+                if attempt == len(models) - 1:
+                    raise BotError(f"Lỗi Gemini API sau khi thử tất cả model fallback: {exc}") from exc
 
 
 class Pollinations:

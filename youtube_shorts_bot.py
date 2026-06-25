@@ -35,8 +35,8 @@ load_dotenv(ROOT / ".env")
 _configured_data_dir = Path(os.getenv("BOT_DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or ROOT)
 DATA_DIR = _configured_data_dir if _configured_data_dir.is_absolute() else ROOT / _configured_data_dir
 LOG = logging.getLogger("shorts_bot")
-MIN_SHORT_DURATION_SECONDS = 10
-MAX_SHORT_DURATION_SECONDS = 25
+MIN_SHORT_DURATION_SECONDS = 30
+MAX_SHORT_DURATION_SECONDS = 35
 
 # Windows PowerShell sessions can still inherit cp1252. Keep CLI output
 # deterministic instead of failing on non-ASCII text in paths or user themes.
@@ -131,7 +131,7 @@ class Settings:
     duration: int = 20
     scheduled_daily_limit: int = 3
     text_model: str = "grok-large"
-    video_model: str = "ltx-2"
+    image_model: str = "gptimage"
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
     google_tts_voice: str = "en-US-Chirp3-HD-Achernar"
     google_tts_speaking_rate: float = 1.05
@@ -161,7 +161,7 @@ class Settings:
             raise BotError("Thiếu GEMINI_API_KEY.")
         if not video_api_key:
             raise BotError("Thiếu POLLINATIONS_VIDEO_API_KEY.")
-        duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "25"))
+        duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "35"))
         if not MIN_SHORT_DURATION_SECONDS <= duration <= MAX_SHORT_DURATION_SECONDS:
             raise BotError(
                 f"SHORT_DURATION_SECONDS phải nằm trong "
@@ -401,66 +401,52 @@ class Pollinations:
             raise BotError(f"Pollinations {response.status_code}: {detail}")
         return response
 
-    def video(self, prompt: str, duration: float, destination: Path, seed: int) -> None:
-        params = {"model": self.s.video_model, "duration": round(duration, 2), "aspectRatio": "9:16", "width": 720, "height": 1280, "seed": seed, "safe": "true"}
+    def image(self, prompt: str, destination: Path, seed: int) -> None:
+        params = {"model": self.s.image_model, "width": 720, "height": 1280, "seed": seed, "nologo": "true"}
         partial = destination.with_name(f"{destination.name}.part")
-        key_candidates = [("video key", self.video_headers)]
-        if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key != self.s.video_api_key:
-            key_candidates.append(("grok key fallback", self.grok_headers))
         last_error: Exception | None = None
         for attempt in range(1, self.s.video_scene_attempts + 1):
             if partial.exists():
                 partial.unlink()
-            for key_label, headers in key_candidates:
-                LOG.info(
-                    "Requesting LTX-2 scene (%ss): %s with %s (attempt %d/%d)",
-                    duration,
-                    destination.name,
-                    key_label,
-                    attempt,
-                    self.s.video_scene_attempts,
+            LOG.info(
+                "Requesting Image scene: %s (attempt %d/%d)",
+                destination.name,
+                attempt,
+                self.s.video_scene_attempts,
+            )
+            try:
+                response = self._request(
+                    "GET",
+                    f"https://image.pollinations.ai/prompt/{quote(prompt, safe='')}",
+                    headers={},
+                    params=params,
+                    stream=True,
                 )
-                try:
-                    response = self._request(
-                        "GET",
-                        f"{self.s.base_url}/video/{quote(prompt, safe='')}",
-                        headers=headers,
-                        params=params,
-                        stream=True,
-                    )
-                    bytes_written = 0
-                    with partial.open("wb") as handle:
-                        for chunk in response.iter_content(1024 * 1024):
-                            if chunk:
-                                handle.write(chunk)
-                                bytes_written += len(chunk)
-                    if bytes_written < 1024:
-                        raise PollinationsTransientError(f"LTX-2 returned only {bytes_written} bytes for {destination.name}")
-                    partial.replace(destination)
-                    LOG.info("Downloaded %s (%.1f MB)", destination.name, bytes_written / (1024 * 1024))
-                    return
-                except PollinationsQuotaError as exc:
-                    last_error = exc
-                    LOG.warning("LTX-2 %s is out of quota or rate-limited: %s", key_label, exc)
-                    if partial.exists():
-                        partial.unlink()
-                    continue
-                except PollinationsTransientError as exc:
-                    last_error = exc
-                    LOG.warning("LTX-2 scene failed: %s", exc)
-                    break
-                except requests.RequestException as exc:
-                    last_error = exc
-                    LOG.warning("LTX-2 scene stream failed: %s", exc)
-                    break
-                finally:
-                    if partial.exists():
-                        partial.unlink()
+                bytes_written = 0
+                with partial.open("wb") as handle:
+                    for chunk in response.iter_content(1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+                            bytes_written += len(chunk)
+                if bytes_written < 1024:
+                    raise PollinationsTransientError(f"Image API returned only {bytes_written} bytes for {destination.name}")
+                partial.replace(destination)
+                LOG.info("Downloaded %s (%.1f MB)", destination.name, bytes_written / (1024 * 1024))
+                return
+            except PollinationsTransientError as exc:
+                last_error = exc
+                LOG.warning("Image scene failed: %s", exc)
+            except requests.RequestException as exc:
+                last_error = exc
+                LOG.warning("Image scene stream failed: %s", exc)
+            finally:
+                if partial.exists():
+                    partial.unlink()
             if attempt < self.s.video_scene_attempts:
                 sleep_for = self.s.video_scene_retry_backoff_seconds * attempt
                 LOG.info("Retrying %s in %ss…", destination.name, sleep_for)
                 time.sleep(sleep_for)
-        raise BotError(f"LTX-2 failed after {self.s.video_scene_attempts} attempts for {destination.name}: {last_error}")
+        raise BotError(f"Image generation failed after {self.s.video_scene_attempts} attempts for {destination.name}: {last_error}")
 
 
 class GoogleChirpTTS:
@@ -506,13 +492,13 @@ class GoogleChirpTTS:
 
 
 VISUAL_STYLE_RULES = (
-    "Use highly cinematic, photorealistic documentary B-roll footage. "
-    "Each visual_prompt must describe a visually stunning, realistic scene: sweeping drone shots, "
+    "Use highly cinematic, photorealistic documentary-style illustrative images. "
+    "Each visual_prompt must describe a visually stunning, realistic static scene: sweeping drone views, "
     "macro photography, atmospheric lighting, high-end VFX, or dramatic nature landscapes. "
-    "CRITICAL: ABSOLUTELY NO text, typography, letters, papers, documents, or readable signs inside the video. "
+    "CRITICAL: ABSOLUTELY NO text, typography, letters, papers, documents, or readable signs in the image. "
     "CRITICAL: ABSOLUTELY NO human faces, people, or crowds to avoid uncanny AI artifacts. "
     "Focus on environments, objects, forces of nature, space, and animals. "
-    "Keep camera motion slow, smooth, and cinematic (e.g., slow pan, subtle zoom)."
+    "Ensure consistent aspect ratio and cohesive lighting across all prompts."
 )
 
 CURIOSITY_TOPIC_RULES = (
@@ -530,7 +516,7 @@ PLAN_SCHEMA = '''{
   "description":"English description with #Shorts", "tags":["shorts","history"],
   "hook":"first spoken sentence, <=12 words", "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=14 words",
-  "scenes":[{"duration":4,"visual_prompt":"English animated documentary illustration prompt, no text/logos/photorealism"}],
+  "scenes":[{"duration":5.5,"visual_prompt":"English photorealistic documentary illustration prompt, no text/logos/documents"}],
   "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"]
 }'''
 
@@ -602,7 +588,7 @@ Ensure the narration flows logically and is highly accessible to a general audie
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
-Split scenes into 3 to 5 scenes whose total duration is exactly {duration}; each scene must be 3–6 seconds. For a 25-second Short, use 5 scenes. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
+Split scenes into 5 to 7 scenes whose total duration is exactly {duration}; each scene must be 5-6 seconds. For a 35-second Short, use 6 or 7 scenes. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, fact_note, and source_hints.
 The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
@@ -685,7 +671,7 @@ def choose_novel_plan(
     return None
 
 
-def ltx_scene_prompt(visual_prompt: str) -> str:
+def image_scene_prompt(visual_prompt: str) -> str:
     return f"{visual_prompt}\n\nStyle guardrails: {VISUAL_STYLE_RULES}"
 
 
@@ -850,12 +836,25 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
     LOG.info("Rendering %d scenes into %s", len(plan.scenes), output_dir)
     clips: list[Path] = []
     for index, scene in enumerate(plan.scenes, start=1):
+        image_file = output_dir / f"scene_{index}.jpg"
         clip = output_dir / f"scene_{index}.mp4"
-        client.video(ltx_scene_prompt(scene.visual_prompt), scene.duration, clip, seed=int(time.time()) + index)
-        if clip.stat().st_size < 1024:
-            raise BotError(f"Cảnh {index} không phải video hợp lệ.")
+        client.image(image_scene_prompt(scene.visual_prompt), image_file, seed=int(time.time()) + index)
+        if image_file.stat().st_size < 1024:
+            raise BotError(f"Cảnh {index} không phải hình ảnh hợp lệ.")
+        
+        LOG.info("Image %d ready. Converting to video clip with Ken Burns effect...", index)
+        frames = int(scene.duration * 30)
+        zoom_filter = f"scale=8000:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x1280,fps=30"
+        run([
+            "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
+            "-t", str(scene.duration),
+            "-vf", zoom_filter,
+            "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
+            str(clip)
+        ])
+        
         clip_seconds = media_duration(clip)
-        LOG.info("Scene %d ready: %.2fs, %.1f MB", index, clip_seconds, clip.stat().st_size / (1024 * 1024))
+        LOG.info("Scene %d video ready: %.2fs, %.1f MB", index, clip_seconds, clip.stat().st_size / (1024 * 1024))
         clips.append(clip)
 
     concat = output_dir / "clips.txt"

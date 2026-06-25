@@ -479,24 +479,22 @@ class GoogleChirpTTS:
 
 
 VISUAL_STYLE_RULES = (
-    "Use stylized animated documentary explainer visuals, not photorealistic or live-action footage. "
-    "Each visual_prompt must describe a polished educational illustration: painterly 2D/3D hybrid, "
-    "cel-shaded or paper-textured surfaces, simplified silhouettes instead of realistic faces, "
-    "clear maps, timelines, museum cutaways, diagrams, fossil/object close-ups, and slow cinematic motion. "
-    "Avoid realism cues such as DSLR footage, real actors, lifelike skin, news footage, handheld camera, "
-    "uncanny faces, text, logos, watermarks, or readable signs inside the video."
+    "Use highly cinematic, photorealistic documentary B-roll footage. "
+    "Each visual_prompt must describe a visually stunning, realistic scene: sweeping drone shots, "
+    "macro photography, atmospheric lighting, high-end VFX, or dramatic nature landscapes. "
+    "CRITICAL: ABSOLUTELY NO text, typography, letters, papers, documents, or readable signs inside the video. "
+    "CRITICAL: ABSOLUTELY NO human faces, people, or crowds to avoid uncanny AI artifacts. "
+    "Focus on environments, objects, forces of nature, space, and animals. "
+    "Keep camera motion slow, smooth, and cinematic (e.g., slow pan, subtle zoom)."
 )
 
 CURIOSITY_TOPIC_RULES = (
-    "Choose topics with immediate mass curiosity, not dry textbook or back-office science. "
-    "Prefer a big viewer question, mystery, danger, disappearance, collapse, disaster, impossible limit, "
-    "hidden mechanism, or grounded what-if scenario. Useful patterns include: what really caused a famous "
-    "extinction/collapse/disaster; whether a lost city, empire, artifact, or legend had a real basis; "
-    "the largest or strangest event of its kind; what would happen if a familiar system vanished or changed; "
-    "why humans cannot cross a scientific or engineering limit; or a familiar story with a surprising evidence-based reversal. "
-    "Do not pick narrow measurement cleanups, routine satellite/data-processing details, institutional methods, "
-    "or low-stakes technical corrections unless they can be reframed around a famous mystery or dramatic consequence. "
-    "The patterns are guidance, not a fixed list: infer fresh adjacent topics and avoid merely copying examples."
+    "Choose topics with immediate viral curiosity, categorized into: "
+    "1. Great Discoveries & Mysteries: e.g., 'What really killed the dinosaurs?', 'Which empire vanished most mysteriously?', 'Did Atlantis exist?'. "
+    "2. Major Historical Events: e.g., 'The biggest tsunami in history', 'The most destructive volcanic eruption'. "
+    "3. Mind-Bending 'What If' Scenarios: e.g., 'What if the internet disappeared for 30 days?', 'What if we lost all electricity for 1 year?', 'What if sea levels rose 100 meters?', 'What if humans stopped reproducing today?'. "
+    "4. Scientific Secrets & Limits: e.g., 'Why can't we drill to the Earth's core?'. "
+    "Use these as inspiration for Grok to search, reason, and generate novel, fascinating questions. Do not hardcode these exact examples, but generate similarly captivating concepts."
 )
 
 
@@ -569,6 +567,7 @@ Audience: curious global English-speaking viewers. Topics may cover discovery, h
 Topic strategy: {CURIOSITY_TOPIC_RULES}
 Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel like a mystery or high-stakes explanation, not a neutral encyclopedia entry.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
+CRITICAL NARRATIVE RULE: The story must have a clear beginning, middle, and end. Do not jump straight into the mystery without context. Always establish the basic facts first (Who, Where, When, What happened) before exploring the "Why" or the "What if". Ensure the narration flows logically and is easy to understand for a general audience.
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.

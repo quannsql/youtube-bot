@@ -20,6 +20,8 @@ import sys
 import time
 import unicodedata
 from dataclasses import asdict, dataclass
+from google import genai
+from google.genai import types
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -116,6 +118,7 @@ def materialize_railway_credentials() -> None:
 
 @dataclass(frozen=True)
 class Settings:
+    gemini_api_key: str
     grok_api_key: str
     video_api_key: str
     base_url: str = "https://gen.pollinations.ai"
@@ -151,10 +154,13 @@ class Settings:
 
     @classmethod
     def from_env(cls, duration_override: int | None = None) -> "Settings":
+        gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
         grok_api_key = os.getenv("POLLINATIONS_GROK_API_KEY", "").strip()
         video_api_key = os.getenv("POLLINATIONS_VIDEO_API_KEY", "").strip()
-        if not grok_api_key or not video_api_key:
-            raise BotError("Thiếu POLLINATIONS_GROK_API_KEY hoặc POLLINATIONS_VIDEO_API_KEY.")
+        if not gemini_api_key:
+            raise BotError("Thiếu GEMINI_API_KEY.")
+        if not video_api_key:
+            raise BotError("Thiếu POLLINATIONS_VIDEO_API_KEY.")
         duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "25"))
         if not MIN_SHORT_DURATION_SECONDS <= duration <= MAX_SHORT_DURATION_SECONDS:
             raise BotError(
@@ -162,6 +168,7 @@ class Settings:
                 f"{MIN_SHORT_DURATION_SECONDS}–{MAX_SHORT_DURATION_SECONDS} giây."
             )
         return cls(
+            gemini_api_key=gemini_api_key,
             grok_api_key=grok_api_key,
             video_api_key=video_api_key,
             base_url=os.getenv("POLLINATIONS_BASE_URL", "https://gen.pollinations.ai").rstrip("/"),
@@ -199,7 +206,6 @@ class Settings:
 class Scene:
     duration: float
     visual_prompt: str
-    on_screen_text: str = ""
 
 
 @dataclass
@@ -335,6 +341,29 @@ class Archive:
         return int(row["count"])
 
 
+class GeminiClient:
+    def __init__(self, settings: Settings) -> None:
+        self.s = settings
+        self.client = genai.Client(api_key=settings.gemini_api_key)
+        self.model_name = "gemini-3.1-flash-lite"
+
+    def chat(self, prompt: str, temperature: float = 0.55) -> str:
+        LOG.info(f"Generating content plan with {self.model_name}...")
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    tools=[{"google_search": {}}],
+                    system_instruction="You return only valid JSON when asked.",
+                ),
+            )
+            return response.text
+        except Exception as exc:
+            raise BotError(f"Lỗi Gemini API: {exc}") from exc
+
+
 class Pollinations:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
@@ -361,18 +390,6 @@ class Pollinations:
                 raise PollinationsTransientError(f"Pollinations {response.status_code}: {detail}", response.status_code)
             raise BotError(f"Pollinations {response.status_code}: {detail}")
         return response
-
-    def chat(self, prompt: str, temperature: float = 0.55) -> str:
-        LOG.info("Generating the English content plan with Grok Large…")
-        response = self._request("POST", f"{self.s.base_url}/v1/chat/completions", headers=self.grok_headers, json={
-            "model": self.s.text_model,
-            "messages": [{"role": "system", "content": "You return only valid JSON when asked."}, {"role": "user", "content": prompt}],
-            "temperature": temperature,
-        }).json()
-        try:
-            return response["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise BotError(f"Phản hồi Grok không đúng định dạng: {response}") from exc
 
     def video(self, prompt: str, duration: float, destination: Path, seed: int) -> None:
         params = {"model": self.s.video_model, "duration": round(duration, 2), "aspectRatio": "9:16", "width": 720, "height": 1280, "seed": seed, "safe": "true"}
@@ -503,7 +520,7 @@ PLAN_SCHEMA = '''{
   "description":"English description with #Shorts", "tags":["shorts","history"],
   "hook":"first spoken sentence, <=12 words", "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=14 words",
-  "scenes":[{"duration":4,"visual_prompt":"English animated documentary illustration prompt, no text/logos/photorealism","on_screen_text":"<=5 English words"}],
+  "scenes":[{"duration":4,"visual_prompt":"English animated documentary illustration prompt, no text/logos/photorealism"}],
   "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"]
 }'''
 
@@ -522,15 +539,15 @@ def extract_json(text: str) -> dict[str, Any]:
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I)
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start < 0 or end < start:
-        raise BotError(f"Grok không trả JSON: {text[:400]}")
+        raise BotError(f"Gemini không trả JSON: {text[:400]}")
     try:
         return json.loads(cleaned[start:end + 1])
     except json.JSONDecodeError as exc:
-        raise BotError(f"Grok trả JSON lỗi: {exc}") from exc
+        raise BotError(f"Gemini trả JSON lỗi: {exc}") from exc
 
 
 def research_brief(
-    client: Pollinations,
+    llm: GeminiClient,
     theme: str,
     past: list[dict[str, str]] | None = None,
     rejected: list[dict[str, str]] | None = None,
@@ -548,11 +565,11 @@ Novelty rule: The topic and fresh_angle must be materially different from every 
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     LOG.info("Research pass: selecting a defensible, novel story angle…")
-    return extract_json(client.chat(prompt, temperature=0.35))
+    return extract_json(llm.chat(prompt, temperature=0.35))
 
 
 def plan_short(
-    client: Pollinations,
+    llm: GeminiClient,
     archive: Archive,
     theme: str,
     duration: int,
@@ -560,27 +577,30 @@ def plan_short(
 ) -> ShortPlan:
     past = archive.recent_context()
     rejected = rejected or []
-    brief = research_brief(client, theme, past, rejected)
+    brief = research_brief(llm, theme, past, rejected)
     prompt = f'''Act as a senior documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
 Audience: curious global English-speaking viewers. Topics may cover discovery, history, geography, science, or technology.
 Topic strategy: {CURIOSITY_TOPIC_RULES}
 Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel like a mystery or high-stakes explanation, not a neutral encyclopedia entry.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
-CRITICAL NARRATIVE RULE: The story must have a clear beginning, middle, and end. Do not jump straight into the mystery without context. Always establish the basic facts first (Who, Where, When, What happened) before exploring the "Why" or the "What if". Ensure the narration flows logically and is easy to understand for a general audience.
+CRITICAL NARRATIVE RULE: The story must strictly follow a 3-part structure:
+1. BEGINNING (Context): Immediately establish the facts: Who? Where? When? What happened? Never jump straight into a mystery without setting the scene.
+2. MIDDLE (Deep Dive): Explain the mystery, scientific cause, or "What if" scenario in clear, simple terms.
+3. ENDING (Conclusion): Provide a satisfying conclusion or a haunting open question.
+Ensure the narration flows logically and is highly accessible to a general audience.
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
-On-screen text: each scene's on_screen_text must be 3-5 strong words that match the part of the narration spoken during that scene; do not invent extra claims.
 Split scenes into 3 to 5 scenes whose total duration is exactly {duration}; each scene must be 3–6 seconds. For a 25-second Short, use 5 scenes. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
-Every string in the returned JSON must be English, including topic, title, description, tags, narration, on_screen_text, fact_note, and source_hints.
+Every string in the returned JSON must be English, including topic, title, description, tags, narration, fact_note, and source_hints.
 The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     LOG.info("Writing pass: turning the research brief into a short-form story…")
-    draft = ShortPlan.from_dict(extract_json(client.chat(prompt, temperature=0.65)))
+    draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.65)))
     review_prompt = f'''Act as the final fact and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
 {{"quality_check":{{"hook_score":1,"clarity_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
@@ -588,16 +608,16 @@ The plan must retain only claims supported by the editorial brief. Reject hype, 
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
-    reviewed = extract_json(client.chat(review_prompt, temperature=0.25))
+    reviewed = extract_json(llm.chat(review_prompt, temperature=0.25))
     if not isinstance(reviewed.get("plan"), dict):
-        raise BotError("Grok quality pass thiếu trường plan.")
+        raise BotError("Gemini quality pass thiếu trường plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
     quality = reviewed.get("quality_check", {})
     LOG.info("Quality pass complete — hook %s/10, clarity %s/10.", quality.get("hook_score", "?"), quality.get("clarity_score", "?"))
     scene_total = sum(scene.duration for scene in plan.scenes)
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if abs(scene_total - duration) > 0.1:
-        raise BotError(f"Grok chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
+        raise BotError(f"Gemini chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
     minimum_words, maximum_words = narration_word_bounds(duration)
     if not minimum_words <= words <= maximum_words:
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
@@ -607,7 +627,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     return plan
 
 
-def plan_social_vietnamese(client: Pollinations, plan: ShortPlan, duration: int) -> SocialPlan:
+def plan_social_vietnamese(llm: GeminiClient, plan: ShortPlan, duration: int) -> SocialPlan:
     prompt = f'''Translate and adapt this English YouTube Short plan into Vietnamese for Facebook and TikTok.
 Return raw JSON only with this schema:
 {{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with 3-6 relevant hashtags","tags":["short Vietnamese or English hashtag without #"],"narration":"Vietnamese voice-over"}}
@@ -618,7 +638,7 @@ Rules:
 - The caption should disclose that the video is AI-assisted when appropriate.
 English plan: {json.dumps(plan.to_dict(), ensure_ascii=False)}'''
     LOG.info("Creating Vietnamese social caption and narration…")
-    social = SocialPlan.from_dict(extract_json(client.chat(prompt, temperature=0.35)))
+    social = SocialPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.35)))
     words = len(re.findall(r"\b\w+\b", social.narration, flags=re.UNICODE))
     if words < max(20, round(duration * 1.2)):
         raise BotError(f"Kịch bản tiếng Việt có {words} từ, quá ngắn cho Short {duration}s.")
@@ -638,7 +658,7 @@ def rejection_context(plan: ShortPlan, duplicate: sqlite3.Row) -> dict[str, str]
 
 
 def choose_novel_plan(
-    client: Pollinations,
+    llm: GeminiClient,
     archive: Archive,
     theme: str,
     duration: int,
@@ -646,12 +666,12 @@ def choose_novel_plan(
 ) -> ShortPlan | None:
     rejected: list[dict[str, str]] = []
     for _attempt in range(1, max_attempts + 1):
-        plan = plan_short(client, archive, theme, duration, rejected)
+        plan = plan_short(llm, archive, theme, duration, rejected)
         duplicate = archive.duplicate_of(plan)
         if not duplicate:
             return plan
         rejected.append(rejection_context(plan, duplicate))
-        print(f"Ý tưởng trùng ({duplicate['title']!r}); yêu cầu Grok tạo góc khác…")
+        print(f"Ý tưởng trùng ({duplicate['title']!r}); yêu cầu Gemini tạo góc khác…")
     return None
 
 
@@ -1202,12 +1222,12 @@ def social_publish_enabled(settings: Settings) -> bool:
     return settings.publish_facebook or settings.publish_tiktok
 
 
-def prepare_social_video(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
+def prepare_social_video(plan: ShortPlan, llm: GeminiClient, tts: GoogleChirpTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
     social_file = output_dir / "social_vi.json"
     if social_file.is_file():
         social = SocialPlan.from_dict(json.loads(social_file.read_text(encoding="utf-8")))
     else:
-        social = plan_social_vietnamese(client, plan, settings.duration)
+        social = plan_social_vietnamese(llm, plan, settings.duration)
         social_file.write_text(json.dumps(social.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     social_video = output_dir / "short_vi.mp4"
     if not social_video.is_file():
@@ -1250,7 +1270,10 @@ def main() -> int:
     configure_logging(args.log_level)
     materialize_railway_credentials()
     settings = Settings.from_env(args.duration)
-    archive, client, tts = Archive(), Pollinations(settings), GoogleChirpTTS(settings)
+    archive = Archive()
+    pollinations = Pollinations(settings)
+    gemini = GeminiClient(settings)
+    tts = GoogleChirpTTS(settings)
     if args.upload_file:
         if not args.publish:
             parser.error("--upload-file requires --publish")
@@ -1262,7 +1285,7 @@ def main() -> int:
         youtube_id = upload_to_youtube(video, plan, settings, args.privacy_status or settings.youtube_privacy)
         print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
         if social_publish_enabled(settings):
-            social_video, social = prepare_social_video(plan, client, tts, video.parent, settings)
+            social_video, social = prepare_social_video(plan, gemini, tts, video.parent, settings)
             social_results = publish_social_video(social_video, social, settings)
             if social_results:
                 print(f"Đã publish social: {social_results}")
@@ -1276,7 +1299,7 @@ def main() -> int:
                 settings.scheduled_daily_limit,
             )
             return 0
-    plan = choose_novel_plan(client, archive, args.theme, settings.duration)
+    plan = choose_novel_plan(gemini, archive, args.theme, settings.duration)
     if plan is None:
         message = "Không tìm được ý tưởng đủ mới sau 4 lần."
         if args.scheduled:
@@ -1294,7 +1317,7 @@ def main() -> int:
     record_id = archive.reserve(plan, output_dir)
     rendered = False
     try:
-        video = render(plan, client, tts, output_dir, settings.duration)
+        video = render(plan, pollinations, tts, output_dir, settings.duration)
         rendered = True
         archive.mark(record_id, "rendered")
         print(f"Đã render: {video}")
@@ -1303,7 +1326,7 @@ def main() -> int:
             archive.mark(record_id, "published", youtube_id)
             print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
             if social_publish_enabled(settings):
-                social_video, social = prepare_social_video(plan, client, tts, output_dir, settings)
+                social_video, social = prepare_social_video(plan, gemini, tts, output_dir, settings)
                 social_results = publish_social_video(social_video, social, settings)
                 if social_results:
                     print(f"Đã publish social: {social_results}")

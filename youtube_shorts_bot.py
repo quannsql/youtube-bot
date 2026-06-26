@@ -35,8 +35,8 @@ load_dotenv(ROOT / ".env")
 _configured_data_dir = Path(os.getenv("BOT_DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or ROOT)
 DATA_DIR = _configured_data_dir if _configured_data_dir.is_absolute() else ROOT / _configured_data_dir
 LOG = logging.getLogger("shorts_bot")
-MIN_SHORT_DURATION_SECONDS = 30
-MAX_SHORT_DURATION_SECONDS = 35
+MIN_SHORT_DURATION_SECONDS = 45
+MAX_SHORT_DURATION_SECONDS = 60
 
 # Windows PowerShell sessions can still inherit cp1252. Keep CLI output
 # deterministic instead of failing on non-ASCII text in paths or user themes.
@@ -131,7 +131,7 @@ class Settings:
     duration: int = 20
     scheduled_daily_limit: int = 3
     text_model: str = "grok-large"
-    image_model: str = "gptimage"
+    image_model: str = "klein"
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
     google_tts_voice: str = "en-US-Chirp3-HD-Achernar"
     google_tts_speaking_rate: float = 1.05
@@ -161,7 +161,7 @@ class Settings:
             raise BotError("Thiếu GEMINI_API_KEY.")
         if not video_api_key:
             raise BotError("Thiếu POLLINATIONS_VIDEO_API_KEY.")
-        duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "35"))
+        duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "60"))
         if not MIN_SHORT_DURATION_SECONDS <= duration <= MAX_SHORT_DURATION_SECONDS:
             raise BotError(
                 f"SHORT_DURATION_SECONDS phải nằm trong "
@@ -402,7 +402,7 @@ class Pollinations:
         return response
 
     def image(self, prompt: str, destination: Path, seed: int) -> None:
-        params = {"model": self.s.image_model, "width": 720, "height": 1280, "seed": seed, "nologo": "true"}
+        params = {"model": self.s.image_model, "width": 1080, "height": 1920, "seed": seed, "nologo": "true"}
         partial = destination.with_name(f"{destination.name}.part")
         key_candidates = [("video key", self.video_headers)]
         if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key != self.s.video_api_key:
@@ -505,7 +505,7 @@ class GoogleChirpTTS:
 
 
 VISUAL_STYLE_RULES = (
-    "Use highly cinematic, photorealistic documentary-style illustrative images. "
+    "Use highly cinematic, photorealistic documentary-style illustrative images. 8k resolution, ultra-detailed, sharp focus, masterpiece. "
     "Each visual_prompt must describe a visually stunning, realistic static scene: sweeping drone views, "
     "macro photography, atmospheric lighting, high-end VFX, or dramatic nature landscapes. "
     "CRITICAL: ABSOLUTELY NO text, typography, letters, papers, documents, or readable signs in the image. "
@@ -520,7 +520,9 @@ CURIOSITY_TOPIC_RULES = (
     "2. Major Historical Events: e.g., 'The biggest tsunami in history', 'The most destructive volcanic eruption'. "
     "3. Mind-Bending 'What If' Scenarios: e.g., 'What if the internet disappeared for 30 days?', 'What if we lost all electricity for 1 year?', 'What if sea levels rose 100 meters?', 'What if humans stopped reproducing today?'. "
     "4. Scientific Secrets & Limits: e.g., 'Why can't we drill to the Earth's core?'. "
-    "Use these as inspiration for Grok to search, reason, and generate novel, fascinating questions. Do not hardcode these exact examples, but generate similarly captivating concepts."
+    "5. Fascinating & Unusual Figures: Strange habits, brilliant but bizarre tactics, or mind-bending realities of prominent figures (e.g., Napoleon, Genghis Khan, Elon Musk, Trump, Putin). "
+    "Use these as inspiration for Grok to search, reason, and generate novel, fascinating questions. Do not hardcode these exact examples, but generate similarly captivating concepts. "
+    "Rotate themes randomly to ensure broad content diversity across different domains (history, space, prominent figures, science, disasters)."
 )
 
 
@@ -601,7 +603,7 @@ Ensure the narration flows logically and is highly accessible to a general audie
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
-Split scenes into 5 to 7 scenes whose total duration is exactly {duration}; each scene must be 5-6 seconds. For a 35-second Short, use 6 or 7 scenes. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
+Split scenes into 7 to 10 scenes whose total duration is exactly {duration}; each scene must be 6-7 seconds. For a 60-second Short, use 9 or 10 scenes. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, fact_note, and source_hints.
 The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
@@ -771,14 +773,14 @@ def caption_ass_text(text: str, max_line_chars: int = 24) -> str:
 def write_ass_captions(cues: list[CaptionCue], destination: Path) -> None:
     header = """[Script Info]
 ScriptType: v4.00+
-PlayResX: 720
-PlayResY: 1280
+PlayResX: 1080
+PlayResY: 1920
 WrapStyle: 2
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,DejaVu Sans,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H66000000,-1,0,0,0,100,100,0,0,1,4,1,2,48,48,185,1
+Style: Caption,DejaVu Sans,86,&H00FFFFFF,&H00FFFFFF,&H00000000,&H66000000,-1,0,0,0,100,100,0,0,1,6,1,2,72,72,275,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -857,7 +859,7 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         
         LOG.info("Image %d ready. Converting to video clip with Ken Burns effect...", index)
         frames = int(scene.duration * 30)
-        zoom_filter = f"scale=8000:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=720x1280,fps=30"
+        zoom_filter = f"scale=12000:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
         run([
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
@@ -875,8 +877,8 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
     visuals = output_dir / "visuals.mp4"
     # Re-encode each output so APIs returning different codecs/FPS still concatenate correctly.
     video_filter = (
-        "scale=720:1280:force_original_aspect_ratio=increase,"
-        "crop=720:1280,fps=30,"
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,fps=30,"
         f"tpad=stop_mode=clone:stop_duration={target_duration},"
         f"trim=duration={target_duration},setpts=PTS-STARTPTS,format=yuv420p"
     )

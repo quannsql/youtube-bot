@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -235,7 +236,7 @@ class ShortPlan:
         sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", narration) if part.strip()]
         return cls(
             topic=str(value["topic"]), angle=str(value["angle"]), title=str(value["title"])[:100],
-            description=str(value["description"])[:5000], tags=[str(x).lstrip("#") for x in value["tags"]][:15],
+            description=str(value["description"])[:5000], tags=[str(x).lstrip("#") for x in value["tags"]][:2],
             hook=str(value.get("hook") or sentences[0]), narration=narration,
             closing_line=str(value.get("closing_line") or sentences[-1]), scenes=scenes,
             fact_note=str(value["fact_note"]), source_hints=[str(x) for x in value["source_hints"]][:4],
@@ -261,7 +262,7 @@ class SocialPlan:
         return cls(
             title=str(value["title"])[:100],
             description=str(value["description"])[:2200],
-            tags=[str(tag).lstrip("#") for tag in value["tags"]][:15],
+            tags=[str(tag).lstrip("#") for tag in value["tags"]][:2],
             narration=str(value["narration"]),
         )
 
@@ -402,7 +403,9 @@ class Pollinations:
         return response
 
     def image(self, prompt: str, destination: Path, seed: int) -> None:
-        params = {"model": self.s.image_model, "width": 1080, "height": 1920, "seed": seed, "nologo": "true"}
+        # Tăng chất lượng hình ảnh bằng cách thêm keyword và bật tính năng enhance của Pollinations
+        enhanced_prompt = f"{prompt}, masterpiece, highly detailed, sharp focus, 4k resolution"
+        params = {"model": self.s.image_model, "width": 1080, "height": 1920, "seed": seed, "nologo": "true", "enhance": "true"}
         partial = destination.with_name(f"{destination.name}.part")
         key_candidates = [("video key", self.video_headers)]
         if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key != self.s.video_api_key:
@@ -422,7 +425,7 @@ class Pollinations:
                 try:
                     response = self._request(
                         "GET",
-                        f"https://image.pollinations.ai/prompt/{quote(prompt, safe='')}",
+                        f"https://image.pollinations.ai/prompt/{quote(enhanced_prompt, safe='')}",
                         headers=headers,
                         params=params,
                         stream=True,
@@ -514,21 +517,31 @@ VISUAL_STYLE_RULES = (
     "Ensure consistent aspect ratio and cohesive lighting across all prompts."
 )
 
-CURIOSITY_TOPIC_RULES = (
-    "Choose topics with immediate viral curiosity, categorized into: "
-    "1. Great Discoveries & Mysteries: e.g., 'What really killed the dinosaurs?', 'Which empire vanished most mysteriously?', 'Did Atlantis exist?'. "
-    "2. Major Historical Events: e.g., 'The biggest tsunami in history', 'The most destructive volcanic eruption'. "
-    "3. Mind-Bending 'What If' Scenarios: e.g., 'What if the internet disappeared for 30 days?', 'What if we lost all electricity for 1 year?', 'What if sea levels rose 100 meters?', 'What if humans stopped reproducing today?'. "
-    "4. Scientific Secrets & Limits: e.g., 'Why can't we drill to the Earth's core?'. "
-    "5. Fascinating & Unusual Figures: Strange habits, brilliant but bizarre tactics, or mind-bending realities of prominent figures (e.g., Napoleon, Genghis Khan, Elon Musk, Trump, Putin). "
-    "Use these as inspiration for Grok to search, reason, and generate novel, fascinating questions. Do not hardcode these exact examples, but generate similarly captivating concepts. "
-    "Rotate themes randomly to ensure broad content diversity across different domains (history, space, prominent figures, science, disasters)."
-)
+CURIOSITY_TOPIC_CATEGORIES = [
+    "Great Discoveries & Mysteries: e.g., 'What really killed the dinosaurs?', 'Which empire vanished most mysteriously?', 'Did Atlantis exist?'",
+    "Major Historical Events: e.g., 'The biggest tsunami in history', 'The most destructive volcanic eruption'",
+    "Mind-Bending 'What If' Scenarios: e.g., 'What if the internet disappeared for 30 days?', 'What if we lost all electricity for 1 year?', 'What if sea levels rose 100 meters?'",
+    "Scientific Secrets & Limits: e.g., 'Why can't we drill to the Earth's core?'",
+    "Fascinating & Unusual Figures: Strange habits, brilliant but bizarre tactics, or mind-bending realities of prominent figures",
+    "Geography & Extreme Nature: e.g., 'The most dangerous place on earth', 'Unexplained natural phenomena'",
+    "Space & The Universe: e.g., 'What happens if you fall into a black hole?', 'The most terrifying planet discovered'",
+    "Animals & Biology: e.g., 'The immortal jellyfish', 'Animals with mind-control abilities'",
+    "Future & Technology: e.g., 'How AI will change human evolution', 'The most advanced ancient technology'"
+]
+
+def get_random_topic_rule() -> str:
+    category = random.choice(CURIOSITY_TOPIC_CATEGORIES)
+    return (
+        f"CRITICAL INSTRUCTION: For this specific video, you MUST strictly focus ONLY on this sub-category: **{category}**. "
+        "Do not write about anything outside of this category. "
+        "Choose a topic with immediate viral curiosity. "
+        "Do not hardcode the exact examples, but generate similarly captivating concepts."
+    )
 
 
 PLAN_SCHEMA = '''{
   "topic":"short English topic", "angle":"specific surprising angle", "title":"<=100 chars",
-  "description":"English description with #Shorts", "tags":["shorts","history"],
+  "description":"English description with exactly 2 hashtags", "tags":["exactly 2 tags"],
   "hook":"first spoken sentence, <=12 words", "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=14 words",
   "scenes":[{"duration":5.5,"visual_prompt":"English photorealistic documentary illustration prompt, no text/logos/documents"}],
@@ -560,6 +573,7 @@ def extract_json(text: str) -> dict[str, Any]:
 def research_brief(
     llm: GeminiClient,
     theme: str,
+    topic_rule: str,
     past: list[dict[str, str]] | None = None,
     rejected: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
@@ -569,7 +583,7 @@ def research_brief(
 Theme: {theme}
 Use your reasoning internally before responding. Return only JSON using this schema:
 {RESEARCH_SCHEMA}
-Topic strategy: {CURIOSITY_TOPIC_RULES}
+Topic strategy: {topic_rule}
 Rules: Choose one topic that can be explained with established evidence and framed as a question a normal viewer would want answered. Do not invent sources, data, fossil finds, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it. Prefer a surprising, specific angle over a broad textbook summary.
 Clickability filter: before selecting the topic, silently reject candidates that sound like a procedural report, a routine measurement update, a narrow technical footnote, or a low-stakes institutional detail. The final viewer_question should feel like a documentary title someone might click without already caring about the field.
 Novelty rule: The topic and fresh_angle must be materially different from every item in the existing archive and rejected candidates below. Do not choose the same object, event, artifact, site, person, mechanism, or central claim. If a broad theme keeps pointing to the same subject, switch domains within the theme.
@@ -588,11 +602,12 @@ def plan_short(
 ) -> ShortPlan:
     past = archive.recent_context()
     rejected = rejected or []
-    brief = research_brief(llm, theme, past, rejected)
+    topic_rule = get_random_topic_rule()
+    brief = research_brief(llm, theme, topic_rule, past, rejected)
     prompt = f'''Act as a senior documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
 Audience: curious global English-speaking viewers. Topics may cover discovery, history, geography, science, or technology.
-Topic strategy: {CURIOSITY_TOPIC_RULES}
+Topic strategy: {topic_rule}
 Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel like a mystery or high-stakes explanation, not a neutral encyclopedia entry.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
 CRITICAL NARRATIVE RULE: The story must strictly follow a 3-part structure:
@@ -641,7 +656,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
 def plan_social_vietnamese(llm: GeminiClient, plan: ShortPlan, duration: int) -> SocialPlan:
     prompt = f'''Translate and adapt this English YouTube Short plan into Vietnamese for Facebook and TikTok.
 Return raw JSON only with this schema:
-{{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with 3-6 relevant hashtags","tags":["short Vietnamese or English hashtag without #"],"narration":"Vietnamese voice-over"}}
+{{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with exactly 2 relevant hashtags","tags":["exactly 2 short hashtags"],"narration":"Vietnamese voice-over"}}
 Rules:
 - Keep every factual claim equivalent to the English plan; do not add dates, names, statistics, sources, or certainty.
 - Make the Vietnamese narration natural, concise, and suitable for a {duration}-second short video.
@@ -819,7 +834,7 @@ def mux_video_audio_with_captions(
         "-map", "[a]",
         "-t", str(target_duration),
         "-c:v", "libx264",
-        "-preset", "medium",
+        "-preset", "slow",
         "-crf", "18",
         "-c:a", "aac",
         "-movflags", "+faststart",
@@ -864,7 +879,7 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
             "-vf", zoom_filter,
-            "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
             str(clip)
         ])
         
@@ -880,10 +895,11 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         "scale=1080:1920:force_original_aspect_ratio=increase,"
         "crop=1080:1920,fps=30,"
         f"tpad=stop_mode=clone:stop_duration={target_duration},"
-        f"trim=duration={target_duration},setpts=PTS-STARTPTS,format=yuv420p"
+        f"trim=duration={target_duration},setpts=PTS-STARTPTS,format=yuv420p,"
+        "unsharp=5:5:1.0:5:5:0.0"
     )
     LOG.info("Concatenating and normalizing the vertical video…")
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "medium", str(visuals)])
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "slow", "-crf", "18", str(visuals)])
 
     narration = output_dir / "narration.mp3"
     LOG.info("Generating English narration with Google Chirp 3 HD…")

@@ -520,13 +520,9 @@ VISUAL_STYLE_RULES = (
 CURIOSITY_TOPIC_CATEGORIES = [
     "Great Discoveries & Mysteries: e.g., 'What really killed the dinosaurs?', 'Which empire vanished most mysteriously?', 'Did Atlantis exist?'",
     "Major Historical Events: e.g., 'The biggest tsunami in history', 'The most destructive volcanic eruption'",
-    "Mind-Bending 'What If' Scenarios: e.g., 'What if the internet disappeared for 30 days?', 'What if we lost all electricity for 1 year?', 'What if sea levels rose 100 meters?'",
-    "Scientific Secrets & Limits: e.g., 'Why can't we drill to the Earth's core?'",
     "Fascinating & Unusual Figures: Strange habits, brilliant but bizarre tactics, or mind-bending realities of prominent figures",
     "Geography & Extreme Nature: e.g., 'The most dangerous place on earth', 'Unexplained natural phenomena'",
-    "Space & The Universe: e.g., 'What happens if you fall into a black hole?', 'The most terrifying planet discovered'",
     "Animals & Biology: e.g., 'The immortal jellyfish', 'Animals with mind-control abilities'",
-    "Future & Technology: e.g., 'How AI will change human evolution', 'The most advanced ancient technology'"
 ]
 
 def get_random_topic_rule() -> str:

@@ -123,6 +123,7 @@ class Settings:
     grok_api_key: str
     video_api_key: str
     base_url: str = "https://gen.pollinations.ai"
+    image_base_url: str = "https://image.pollinations.ai/prompt"
     pollinations_connect_timeout: int = 30
     pollinations_read_timeout: int = 600
     video_scene_attempts: int = 3
@@ -173,6 +174,7 @@ class Settings:
             grok_api_key=grok_api_key,
             video_api_key=video_api_key,
             base_url=os.getenv("POLLINATIONS_BASE_URL", "https://gen.pollinations.ai").rstrip("/"),
+            image_base_url=os.getenv("POLLINATIONS_IMAGE_BASE_URL", "https://image.pollinations.ai/prompt").rstrip("/"),
             pollinations_connect_timeout=int(os.getenv("POLLINATIONS_CONNECT_TIMEOUT_SECONDS", "30")),
             pollinations_read_timeout=int(os.getenv("POLLINATIONS_READ_TIMEOUT_SECONDS", "600")),
             video_scene_attempts=max(1, int(os.getenv("LTX_SCENE_ATTEMPTS", "3"))),
@@ -425,7 +427,7 @@ class Pollinations:
                 try:
                     response = self._request(
                         "GET",
-                        f"https://image.pollinations.ai/prompt/{quote(enhanced_prompt, safe='')}",
+                        f"{self.s.image_base_url}/{quote(enhanced_prompt, safe='')}",
                         headers=headers,
                         params=params,
                         stream=True,

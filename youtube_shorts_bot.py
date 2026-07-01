@@ -675,11 +675,14 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if abs(scene_total - duration) > 0.1:
         raise BotError(f"Gemini chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
+    minimum_words, maximum_words = narration_word_bounds(duration)
+    if not minimum_words <= words <= maximum_words:
+        raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
     clean_hook = re.sub(r"[\W_]+", "", plan.hook).lower()
     clean_closing = re.sub(r"[\W_]+", "", plan.closing_line).lower()
     if not clean_narration.startswith(clean_hook) or not clean_narration.endswith(clean_closing):
-        LOG.warning("Kịch bản không bắt đầu bằng hook hoặc kết thúc bằng closing_line. Đang tự động điều chỉnh...")
+        LOG.warning("Narration does not match hook/closing_line. Auto-correcting...")
         sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", plan.narration) if part.strip()]
         if sentences:
             if not re.sub(r"[\W_]+", "", sentences[0]).lower().startswith(clean_hook):
@@ -687,7 +690,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
             if not re.sub(r"[\W_]+", "", sentences[-1]).lower().endswith(clean_closing):
                 sentences[-1] = plan.closing_line
             plan.narration = " ".join(sentences)
-            
+
             clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
             if not clean_narration.startswith(clean_hook):
                 plan.narration = plan.hook + " " + plan.narration
@@ -695,7 +698,6 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
                 plan.narration = plan.narration + " " + plan.closing_line
 
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
-    minimum_words, maximum_words = narration_word_bounds(duration)
     if not minimum_words <= words <= maximum_words:
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     LOG.info("Plan ready: %r (%d scenes, %d words)", plan.title, len(plan.scenes), words)
@@ -863,47 +865,22 @@ def ffmpeg_filter_path(path: Path) -> str:
     return path.resolve().as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
-def drawtext_video_filter(cues: list[CaptionCue], font_path: Path, subs_dir: Path) -> str:
-    subs_dir.mkdir(parents=True, exist_ok=True)
-    filters = []
-    for index, cue in enumerate(cues):
-        clean_text = cue.text.replace("\\N", " ").replace("\n", " ").strip()
-        sub_file = subs_dir / f"sub_{index}.txt"
-        sub_file.write_text(clean_text, encoding="utf-8")
-        escaped_sub_path = ffmpeg_filter_path(sub_file)
-        f = (
-            f"drawtext=fontfile='{font_path.resolve().as_posix()}':"
-            f"textfile='{escaped_sub_path}':"
-            f"fontsize=74:"
-            f"fontcolor=white:"
-            f"borderw=6:"
-            f"bordercolor=black:"
-            f"shadowcolor=black@0.4:"
-            f"shadowx=1:"
-            f"shadowy=1:"
-            f"x=(w-text_w)/2:"
-            f"y=h-275-text_h:"
-            f"enable='between(t,{cue.start},{cue.end})'"
-        )
-        filters.append(f)
-    return ",".join(filters)
+def ass_video_filter(captions: Path) -> str:
+    return f"ass='{ffmpeg_filter_path(captions)}',format=yuv420p"
 
 
 def mux_video_audio_with_captions(
     visuals: Path,
     narration: Path,
-    cues: list[CaptionCue],
+    captions: Path,
     output: Path,
     target_duration: int,
 ) -> None:
-    font_path = DATA_DIR / "fonts" / "DejaVuSans.ttf"
-    subs_dir = output.parent / f"{output.stem}_drawtext_subs"
-    video_filter = drawtext_video_filter(cues, font_path, subs_dir) + ",format=yuv420p"
     run([
         "ffmpeg", "-y",
         "-i", str(visuals),
         "-i", str(narration),
-        "-filter_complex", f"[0:v]{video_filter}[v];[1:a]apad=pad_dur={target_duration}[a]",
+        "-filter_complex", f"[0:v]{ass_video_filter(captions)}[v];[1:a]apad=pad_dur={target_duration}[a]",
         "-map", "[v]",
         "-map", "[a]",
         "-t", str(target_duration),
@@ -923,8 +900,12 @@ def require_tools() -> None:
 
 
 def run(command: list[str]) -> None:
+    LOG.debug("Running command: %s", " ".join(command))
     result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode:
+        tail = result.stderr[-3000:] or result.stdout[-3000:] or "(no ffmpeg output captured)"
+        LOG.error("FFmpeg exited with code %s: %s", result.returncode, " ".join(command))
+        LOG.error("FFmpeg output tail: %s", tail)
         raise BotError(f"FFmpeg lỗi: {' '.join(command)}\n{result.stderr[-1500:]}")
 
 
@@ -994,7 +975,7 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
     LOG.info("Generated %d English caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     final_video = output_dir / "short.mp4"
     LOG.info("Muxing narration, captions, and final video…")
-    mux_video_audio_with_captions(visuals, narration, cues, final_video, target_duration)
+    mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration)
     return final_video
 
 
@@ -1019,7 +1000,7 @@ def render_social_video(social: SocialPlan, tts: GoogleChirpTTS, output_dir: Pat
     LOG.info("Generated %d Vietnamese caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     social_video = output_dir / "short_vi.mp4"
     LOG.info("Muxing Vietnamese social video with captions…")
-    mux_video_audio_with_captions(visuals, narration, cues, social_video, target_duration)
+    mux_video_audio_with_captions(visuals, narration, captions, social_video, target_duration)
     return social_video
 
 
@@ -1453,15 +1434,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        raise SystemExit(main())
     except BotError as error:
-        LOG.error(f"LỖI BOT: {error}")
-        sys.stderr.write(f"LỖI: {error}\n")
-        sys.stderr.flush()
-        sys.stdout.flush()
-        sys.exit(1)
-    except Exception as error:
-        LOG.exception("Lỗi hệ thống không xác định:")
-        sys.stderr.flush()
-        sys.stdout.flush()
-        sys.exit(1)
+        print(f"LỖI: {error}", file=sys.stderr)
+        raise SystemExit(1)

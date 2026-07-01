@@ -1004,10 +1004,26 @@ def render_social_video(social: SocialPlan, tts: GoogleChirpTTS, output_dir: Pat
     return social_video
 
 
+def authorize_youtube(settings: Settings) -> None:
+    if not settings.youtube_client_secrets.exists():
+        raise BotError(f"Thieu OAuth client secrets: {settings.youtube_client_secrets}")
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    scope = ["https://www.googleapis.com/auth/youtube.upload"]
+    LOG.info("Opening the browser for YouTube authorization...")
+    credentials = InstalledAppFlow.from_client_secrets_file(
+        str(settings.youtube_client_secrets),
+        scope,
+    ).run_local_server(port=0)
+    settings.youtube_token.write_text(credentials.to_json(), encoding="utf-8")
+    LOG.info("Saved YouTube authorization token to %s", settings.youtube_token)
+
+
 def upload_to_youtube(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> str:
     if not settings.youtube_client_secrets.exists():
         raise BotError(f"Thiếu OAuth client secrets: {settings.youtube_client_secrets}")
     from google.auth.transport.requests import Request
+    from google.auth.exceptions import RefreshError
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
@@ -1022,7 +1038,15 @@ def upload_to_youtube(video: Path, plan: ShortPlan, settings: Settings, privacy:
     if not credentials or not credentials.valid:
         if credentials and credentials.expired and credentials.refresh_token:
             LOG.info("Refreshing the YouTube authorization token…")
-            credentials.refresh(Request())
+            try:
+                credentials.refresh(Request())
+            except RefreshError as exc:
+                raise BotError(
+                    "YouTube OAuth token da het han hoac bi revoke. "
+                    "Tao lai youtube_token.json o local bang: "
+                    "python youtube_shorts_bot.py --authorize-youtube "
+                    "roi cap nhat file/bien YOUTUBE_TOKEN_JSON_B64 tren Railway."
+                ) from exc
         else:
             LOG.info("Opening the browser for YouTube authorization…")
             credentials = InstalledAppFlow.from_client_secrets_file(str(settings.youtube_client_secrets), scope).run_local_server(port=0)
@@ -1357,6 +1381,7 @@ def main() -> int:
     )
     parser.add_argument("--publish", action="store_true", help="Tự upload sau khi render")
     parser.add_argument("--privacy-status", choices=("private", "unlisted", "public"))
+    parser.add_argument("--authorize-youtube", action="store_true", help="Create youtube_token.json using a local browser")
     parser.add_argument("--dry-run", action="store_true", help="Chỉ tạo và in kế hoạch")
     parser.add_argument("--upload-file", type=Path, help="Upload lại MP4 đã render, không tạo nội dung/video mới")
     parser.add_argument("--scheduled", action="store_true", help="Bật giới hạn an toàn theo SCHEDULED_DAILY_LIMIT mỗi ngày UTC")
@@ -1366,6 +1391,10 @@ def main() -> int:
     materialize_railway_credentials()
     ensure_dejavu_font()
     settings = Settings.from_env(args.duration)
+    if args.authorize_youtube:
+        authorize_youtube(settings)
+        print(f"Da tao YouTube token: {settings.youtube_token}")
+        return 0
     archive = Archive()
     pollinations = Pollinations(settings)
     gemini = GeminiClient(settings)

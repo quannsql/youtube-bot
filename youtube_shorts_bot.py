@@ -863,14 +863,17 @@ def ffmpeg_filter_path(path: Path) -> str:
     return path.resolve().as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
-def drawtext_video_filter(cues: list[CaptionCue], font_path: Path) -> str:
+def drawtext_video_filter(cues: list[CaptionCue], font_path: Path, subs_dir: Path) -> str:
+    subs_dir.mkdir(parents=True, exist_ok=True)
     filters = []
-    for cue in cues:
-        clean_text = cue.text.replace("\\N", " ").replace("\n", " ")
-        clean_text = clean_text.replace("'", "\\'").replace(":", "\\:")
+    for index, cue in enumerate(cues):
+        clean_text = cue.text.replace("\\N", " ").replace("\n", " ").strip()
+        sub_file = subs_dir / f"sub_{index}.txt"
+        sub_file.write_text(clean_text, encoding="utf-8")
+        escaped_sub_path = ffmpeg_filter_path(sub_file)
         f = (
             f"drawtext=fontfile='{font_path.resolve().as_posix()}':"
-            f"text='{clean_text}':"
+            f"textfile='{escaped_sub_path}':"
             f"fontsize=74:"
             f"fontcolor=white:"
             f"borderw=6:"
@@ -894,7 +897,8 @@ def mux_video_audio_with_captions(
     target_duration: int,
 ) -> None:
     font_path = DATA_DIR / "fonts" / "DejaVuSans.ttf"
-    video_filter = drawtext_video_filter(cues, font_path) + ",format=yuv420p"
+    subs_dir = output.parent / f"{output.stem}_drawtext_subs"
+    video_filter = drawtext_video_filter(cues, font_path, subs_dir) + ",format=yuv420p"
     run([
         "ffmpeg", "-y",
         "-i", str(visuals),

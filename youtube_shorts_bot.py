@@ -521,10 +521,11 @@ VISUAL_STYLE_RULES = (
 
 CURIOSITY_TOPIC_CATEGORIES = [
     "Great Discoveries & Mysteries: e.g., 'What really killed the dinosaurs?', 'Which empire vanished most mysteriously?', 'Did Atlantis exist?'",
-    "Major Historical Events: e.g., 'The biggest tsunami in history', 'The most destructive volcanic eruption'",
-    "Fascinating & Unusual Figures: Strange habits, brilliant but bizarre tactics, or mind-bending realities of prominent figures",
+    "Historical figures, great people: Great achievements, lives, processes, or incredible facts about these prominent figures, e.g., 'Napoleon', 'Qin Shi Huang', 'Genghis Khan', 'George Washington', 'Albert Einstein', etc. (Note: avoid mentioning figures in Vietnam)",
+    "Historical events: great victories or defeats of an empire or nation, or shocking events in history, e.g., 'the atomic bombing of Hiroshima', 'the fall of the Roman Empire', 'the Battle of Waterloo', etc. (Note: avoid mentioning events in Vietnam).",
     "Geography & Extreme Nature: e.g., 'The most dangerous place on earth', 'Unexplained natural phenomena'",
     "Animals & Biology: e.g., 'The immortal jellyfish', 'Animals with mind-control abilities'",
+    "Great human inventions, both past and present, e.g., 'the printing press', 'the internet', 'the steam engine'."
 ]
 
 def get_random_topic_rule() -> str:

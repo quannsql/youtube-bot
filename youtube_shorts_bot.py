@@ -851,7 +851,7 @@ def mux_video_audio_with_captions(
         "-map", "[a]",
         "-t", str(target_duration),
         "-c:v", "libx264",
-        "-preset", "slow",
+        "-preset", "veryfast",
         "-crf", "18",
         "-c:a", "aac",
         "-movflags", "+faststart",
@@ -891,12 +891,12 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         
         LOG.info("Image %d ready. Converting to video clip with Ken Burns effect...", index)
         frames = int(scene.duration * 30)
-        zoom_filter = f"scale=12000:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
+        zoom_filter = f"scale=3840:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
         run([
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
             "-vf", zoom_filter,
-            "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
             str(clip)
         ])
         
@@ -916,7 +916,7 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         "unsharp=5:5:1.0:5:5:0.0"
     )
     LOG.info("Concatenating and normalizing the vertical video…")
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "slow", "-crf", "18", str(visuals)])
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)])
 
     narration = output_dir / "narration.mp3"
     LOG.info("Generating English narration with Google Chirp 3 HD…")
@@ -1395,7 +1395,15 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        sys.exit(main())
     except BotError as error:
-        print(f"LỖI: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        LOG.error(f"LỖI BOT: {error}")
+        sys.stderr.write(f"LỖI: {error}\n")
+        sys.stderr.flush()
+        sys.stdout.flush()
+        sys.exit(1)
+    except Exception as error:
+        LOG.exception("Lỗi hệ thống không xác định:")
+        sys.stderr.flush()
+        sys.stdout.flush()
+        sys.exit(1)

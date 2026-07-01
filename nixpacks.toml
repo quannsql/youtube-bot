@@ -1,3 +1,3 @@
 # Extend Railway's Python Nixpacks setup with the FFmpeg tools used at runtime.
 [phases.setup]
-nixPkgs = ["...", "ffmpeg"]
+nixPkgs = ["...", "ffmpeg", "dejavu_fonts"]

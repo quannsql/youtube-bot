@@ -867,7 +867,7 @@ def drawtext_video_filter(cues: list[CaptionCue], font_path: Path) -> str:
     filters = []
     for cue in cues:
         clean_text = cue.text.replace("\\N", " ").replace("\n", " ")
-        clean_text = clean_text.replace("'", "'\\\\''").replace(":", "\\:")
+        clean_text = clean_text.replace("'", "\\'").replace(":", "\\:")
         f = (
             f"drawtext=fontfile='{font_path.resolve().as_posix()}':"
             f"text='{clean_text}':"

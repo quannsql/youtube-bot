@@ -514,3 +514,20 @@ def test_plan_short_auto_corrects_hook_closing_line_mismatch(tmp_path):
     assert result.narration.startswith("Twelve thousand years ago, the Sahara was green.")
     assert result.narration.endswith("A desert can be a climate snapshot, not a permanent identity.")
 
+
+def test_ensure_dejavu_font_creates_files(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    
+    # Run the function
+    bot.ensure_dejavu_font()
+    
+    font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
+    config_file = tmp_path / "fonts.conf"
+    
+    assert font_file.is_file()
+    assert config_file.is_file()
+    assert font_file.stat().st_size > 500000
+    assert "FONTCONFIG_FILE" in os.environ
+
+

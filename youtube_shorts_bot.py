@@ -117,6 +117,38 @@ def materialize_railway_credentials() -> None:
     )
 
 
+def ensure_dejavu_font() -> None:
+    font_dir = DATA_DIR / "fonts"
+    font_file = font_dir / "DejaVuSans.ttf"
+    config_file = DATA_DIR / "fonts.conf"
+
+    if not font_file.is_file():
+        LOG.info("DejaVuSans.ttf not found in %s. Downloading...", font_dir)
+        font_dir.mkdir(parents=True, exist_ok=True)
+        url = "https://github.com/prawnpdf/prawn/raw/master/data/fonts/DejaVuSans.ttf"
+        try:
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            font_file.write_bytes(response.content)
+            LOG.info("Successfully downloaded DejaVuSans.ttf.")
+        except Exception as exc:
+            raise BotError(f"Could not download DejaVuSans.ttf: {exc}") from exc
+
+    if not config_file.is_file():
+        LOG.info("Creating custom fonts.conf in %s...", config_file)
+        config_content = f"""<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>{font_dir.resolve().as_posix()}</dir>
+  <cachedir>/tmp/fontcache</cachedir>
+  <config></config>
+</fontconfig>
+"""
+        config_file.write_text(config_content, encoding="utf-8")
+
+    os.environ["FONTCONFIG_FILE"] = str(config_file.resolve())
+
+
 @dataclass(frozen=True)
 class Settings:
     gemini_api_key: str = ""
@@ -1326,6 +1358,7 @@ def main() -> int:
     args = parser.parse_args()
     configure_logging(args.log_level)
     materialize_railway_credentials()
+    ensure_dejavu_font()
     settings = Settings.from_env(args.duration)
     archive = Archive()
     pollinations = Pollinations(settings)

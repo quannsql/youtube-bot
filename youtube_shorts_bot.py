@@ -119,9 +119,9 @@ def materialize_railway_credentials() -> None:
 
 @dataclass(frozen=True)
 class Settings:
-    gemini_api_key: str
-    grok_api_key: str
-    video_api_key: str
+    gemini_api_key: str = ""
+    grok_api_key: str = ""
+    video_api_key: str = ""
     base_url: str = "https://gen.pollinations.ai"
     image_base_url: str = "https://image.pollinations.ai/prompt"
     pollinations_connect_timeout: int = 30
@@ -645,7 +645,10 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     minimum_words, maximum_words = narration_word_bounds(duration)
     if not minimum_words <= words <= maximum_words:
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
-    if not plan.narration.lower().startswith(plan.hook.lower()) or not plan.narration.lower().endswith(plan.closing_line.lower()):
+    clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
+    clean_hook = re.sub(r"[\W_]+", "", plan.hook).lower()
+    clean_closing = re.sub(r"[\W_]+", "", plan.closing_line).lower()
+    if not clean_narration.startswith(clean_hook) or not clean_narration.endswith(clean_closing):
         raise BotError("Kịch bản phải bắt đầu bằng hook và kết thúc bằng closing_line.")
     LOG.info("Plan ready: %r (%d scenes, %d words)", plan.title, len(plan.scenes), words)
     return plan

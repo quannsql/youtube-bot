@@ -22,7 +22,7 @@ def test_plan_parser_accepts_valid_plan():
         "topic": "T", "angle": "A", "title": "Title", "description": "#Shorts", "tags": ["shorts"],
         "hook": "A short script.", "narration": "A short script.", "closing_line": "A short script.",
         "fact_note": "No exaggeration", "source_hints": ["Smithsonian"],
-        "scenes": [{"duration": 4, "visual_prompt": "A scene", "on_screen_text": "A mystery"}],
+        "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
     })
     assert plan.scenes[0].duration == 4
 
@@ -32,7 +32,7 @@ def test_archive_blocks_exactly_repeated_plan(tmp_path):
         "topic": "Sự kiện Tunguska", "angle": "Vụ nổ năm 1908", "title": "Điều gì đã làm rung chuyển Siberia?",
         "description": "#Shorts", "tags": ["shorts"], "narration": "Một kịch bản ngắn.",
         "fact_note": "Không cường điệu", "source_hints": ["NASA"],
-        "scenes": [{"duration": 4, "visual_prompt": "A scene", "on_screen_text": "Bí ẩn"}],
+        "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
     })
     archive = bot.Archive(tmp_path / "shorts.db")
     archive.reserve(plan, tmp_path / "output")
@@ -85,13 +85,12 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "Ancient Gears Predicted Eclipses" in prompts[0]
     assert "Rejected candidates from this run" in prompts[0]
     assert "Ancient Greek Gears That Predicted Eclipses" in prompts[0]
-    assert "immediate mass curiosity" in prompts[0]
+    assert "Clickability filter" in prompts[0]
     assert "viewer_question" in prompts[0]
     assert "procedural report" in prompts[0]
-    assert "low-stakes technical corrections" in prompts[0]
+    assert "low-stakes" in prompts[0]
     assert "viewer_question, stakes, and thumbnail_hint" in prompts[1]
-    assert "not photorealistic" in prompts[1]
-    assert "stylized animated documentary explainer" in prompts[1]
+    assert "photorealistic" in prompts[1]
     assert "Preserve this visual direction" in prompts[2]
     assert "dry topics that lack a strong viewer_question" in prompts[2]
 
@@ -149,12 +148,13 @@ def test_materialize_credential_file_from_base64(tmp_path, monkeypatch):
     assert destination.read_bytes() == b'{"credential": true}'
 
 
-def test_settings_accepts_25_second_duration(monkeypatch):
+def test_settings_accepts_48_second_duration(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini")
     monkeypatch.setenv("POLLINATIONS_GROK_API_KEY", "grok")
     monkeypatch.setenv("POLLINATIONS_VIDEO_API_KEY", "video")
-    monkeypatch.setenv("SHORT_DURATION_SECONDS", "25")
+    monkeypatch.setenv("SHORT_DURATION_SECONDS", "48")
 
-    assert bot.Settings.from_env().duration == 25
+    assert bot.Settings.from_env().duration == 48
 
 
 def test_settings_reads_scheduled_daily_limit(monkeypatch):
@@ -165,13 +165,13 @@ def test_settings_reads_scheduled_daily_limit(monkeypatch):
     assert bot.Settings.from_env().scheduled_daily_limit == 6
 
 
-def test_ltx_scene_prompt_adds_animation_style_guardrails():
-    prompt = bot.ltx_scene_prompt("A fossil leaf drifts across ancient continents.")
+def test_image_scene_prompt_adds_style_guardrails():
+    prompt = bot.image_scene_prompt("A fossil leaf drifts across ancient continents.")
 
     assert prompt.startswith("A fossil leaf")
     assert "Style guardrails" in prompt
-    assert "not photorealistic" in prompt
-    assert "live-action" in prompt
+    assert "photorealistic" in prompt
+    assert "cinematic" in prompt
 
 
 def test_caption_chunks_are_short_and_readable():
@@ -212,7 +212,7 @@ def test_ass_filter_path_escapes_windows_drive():
     assert escaped.endswith("/captions_en.ass")
 
 
-def test_ltx_video_retries_transient_download_failure(tmp_path, monkeypatch):
+def test_pollinations_image_retries_transient_download_failure(tmp_path, monkeypatch):
     calls = {"count": 0}
 
     class FakeResponse:
@@ -234,16 +234,16 @@ def test_ltx_video_retries_transient_download_failure(tmp_path, monkeypatch):
         video_scene_attempts=2,
         video_scene_retry_backoff_seconds=0,
     )
-    destination = tmp_path / "scene_1.mp4"
+    destination = tmp_path / "scene_1.jpg"
 
-    bot.Pollinations(settings).video("a prompt", 4, destination, seed=123)
+    bot.Pollinations(settings).image("a prompt", destination, seed=123)
 
     assert calls["count"] == 2
     assert destination.read_bytes() == b"x" * 2048
-    assert not (tmp_path / "scene_1.mp4.part").exists()
+    assert not (tmp_path / "scene_1.jpg.part").exists()
 
 
-def test_ltx_video_falls_back_to_grok_key_on_quota_error(tmp_path, monkeypatch):
+def test_pollinations_image_falls_back_to_grok_key_on_quota_error(tmp_path, monkeypatch):
     authorizations = []
 
     class FakeQuotaResponse:
@@ -270,9 +270,9 @@ def test_ltx_video_falls_back_to_grok_key_on_quota_error(tmp_path, monkeypatch):
         video_scene_attempts=1,
         video_scene_retry_backoff_seconds=0,
     )
-    destination = tmp_path / "scene_1.mp4"
+    destination = tmp_path / "scene_1.jpg"
 
-    bot.Pollinations(settings).video("a prompt", 4, destination, seed=123)
+    bot.Pollinations(settings).image("a prompt", destination, seed=123)
 
     assert authorizations == ["Bearer video", "Bearer grok"]
     assert destination.read_bytes() == b"y" * 2048

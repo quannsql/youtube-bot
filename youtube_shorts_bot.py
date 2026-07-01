@@ -117,11 +117,43 @@ def materialize_railway_credentials() -> None:
     )
 
 
+def ensure_dejavu_font() -> None:
+    font_dir = DATA_DIR / "fonts"
+    font_file = font_dir / "DejaVuSans.ttf"
+    config_file = DATA_DIR / "fonts.conf"
+
+    if not font_file.is_file():
+        LOG.info("DejaVuSans.ttf not found in %s. Downloading...", font_dir)
+        font_dir.mkdir(parents=True, exist_ok=True)
+        url = "https://github.com/prawnpdf/prawn/raw/master/data/fonts/DejaVuSans.ttf"
+        try:
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            font_file.write_bytes(response.content)
+            LOG.info("Successfully downloaded DejaVuSans.ttf.")
+        except Exception as exc:
+            raise BotError(f"Could not download DejaVuSans.ttf: {exc}") from exc
+
+    if not config_file.is_file():
+        LOG.info("Creating custom fonts.conf in %s...", config_file)
+        config_content = f"""<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>{font_dir.resolve().as_posix()}</dir>
+  <cachedir>/tmp/fontcache</cachedir>
+  <config></config>
+</fontconfig>
+"""
+        config_file.write_text(config_content, encoding="utf-8")
+
+    os.environ["FONTCONFIG_FILE"] = str(config_file.resolve())
+
+
 @dataclass(frozen=True)
 class Settings:
-    gemini_api_key: str
-    grok_api_key: str
-    video_api_key: str
+    gemini_api_key: str = ""
+    grok_api_key: str = ""
+    video_api_key: str = ""
     base_url: str = "https://gen.pollinations.ai"
     image_base_url: str = "https://image.pollinations.ai/prompt"
     pollinations_connect_timeout: int = 30
@@ -521,10 +553,11 @@ VISUAL_STYLE_RULES = (
 
 CURIOSITY_TOPIC_CATEGORIES = [
     "Great Discoveries & Mysteries: e.g., 'What really killed the dinosaurs?', 'Which empire vanished most mysteriously?', 'Did Atlantis exist?'",
-    "Major Historical Events: e.g., 'The biggest tsunami in history', 'The most destructive volcanic eruption'",
-    "Fascinating & Unusual Figures: Strange habits, brilliant but bizarre tactics, or mind-bending realities of prominent figures",
+    "Historical figures, great people: Great achievements, lives, processes, or incredible facts about these prominent figures, e.g., 'Napoleon', 'Qin Shi Huang', 'Genghis Khan', 'George Washington', 'Albert Einstein', etc. (Note: avoid mentioning figures in Vietnam)",
+    "Historical events: great victories or defeats of an empire or nation, or shocking events in history, e.g., 'the atomic bombing of Hiroshima', 'the fall of the Roman Empire', 'the Battle of Waterloo', etc. (Note: avoid mentioning events in Vietnam).",
     "Geography & Extreme Nature: e.g., 'The most dangerous place on earth', 'Unexplained natural phenomena'",
     "Animals & Biology: e.g., 'The immortal jellyfish', 'Animals with mind-control abilities'",
+    "Great human inventions, both past and present, e.g., 'the printing press', 'the internet', 'the steam engine'."
 ]
 
 def get_random_topic_rule() -> str:
@@ -642,11 +675,29 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if abs(scene_total - duration) > 0.1:
         raise BotError(f"Gemini chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
+    clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
+    clean_hook = re.sub(r"[\W_]+", "", plan.hook).lower()
+    clean_closing = re.sub(r"[\W_]+", "", plan.closing_line).lower()
+    if not clean_narration.startswith(clean_hook) or not clean_narration.endswith(clean_closing):
+        LOG.warning("Kịch bản không bắt đầu bằng hook hoặc kết thúc bằng closing_line. Đang tự động điều chỉnh...")
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", plan.narration) if part.strip()]
+        if sentences:
+            if not re.sub(r"[\W_]+", "", sentences[0]).lower().startswith(clean_hook):
+                sentences[0] = plan.hook
+            if not re.sub(r"[\W_]+", "", sentences[-1]).lower().endswith(clean_closing):
+                sentences[-1] = plan.closing_line
+            plan.narration = " ".join(sentences)
+            
+            clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
+            if not clean_narration.startswith(clean_hook):
+                plan.narration = plan.hook + " " + plan.narration
+            if not re.sub(r"[\W_]+", "", plan.narration).lower().endswith(clean_closing):
+                plan.narration = plan.narration + " " + plan.closing_line
+
+    words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     minimum_words, maximum_words = narration_word_bounds(duration)
     if not minimum_words <= words <= maximum_words:
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
-    if not plan.narration.lower().startswith(plan.hook.lower()) or not plan.narration.lower().endswith(plan.closing_line.lower()):
-        raise BotError("Kịch bản phải bắt đầu bằng hook và kết thúc bằng closing_line.")
     LOG.info("Plan ready: %r (%d scenes, %d words)", plan.title, len(plan.scenes), words)
     return plan
 
@@ -812,27 +863,48 @@ def ffmpeg_filter_path(path: Path) -> str:
     return path.resolve().as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
-def ass_video_filter(captions: Path) -> str:
-    return f"ass='{ffmpeg_filter_path(captions)}',format=yuv420p"
+def drawtext_video_filter(cues: list[CaptionCue], font_path: Path) -> str:
+    filters = []
+    for cue in cues:
+        clean_text = cue.text.replace("\\N", " ").replace("\n", " ")
+        clean_text = clean_text.replace("'", "'\\\\''").replace(":", "\\:")
+        f = (
+            f"drawtext=fontfile='{font_path.resolve().as_posix()}':"
+            f"text='{clean_text}':"
+            f"fontsize=74:"
+            f"fontcolor=white:"
+            f"borderw=6:"
+            f"bordercolor=black:"
+            f"shadowcolor=black@0.4:"
+            f"shadowx=1:"
+            f"shadowy=1:"
+            f"x=(w-text_w)/2:"
+            f"y=h-275-text_h:"
+            f"enable='between(t,{cue.start},{cue.end})'"
+        )
+        filters.append(f)
+    return ",".join(filters)
 
 
 def mux_video_audio_with_captions(
     visuals: Path,
     narration: Path,
-    captions: Path,
+    cues: list[CaptionCue],
     output: Path,
     target_duration: int,
 ) -> None:
+    font_path = DATA_DIR / "fonts" / "DejaVuSans.ttf"
+    video_filter = drawtext_video_filter(cues, font_path) + ",format=yuv420p"
     run([
         "ffmpeg", "-y",
         "-i", str(visuals),
         "-i", str(narration),
-        "-filter_complex", f"[0:v]{ass_video_filter(captions)}[v];[1:a]apad=pad_dur={target_duration}[a]",
+        "-filter_complex", f"[0:v]{video_filter}[v];[1:a]apad=pad_dur={target_duration}[a]",
         "-map", "[v]",
         "-map", "[a]",
         "-t", str(target_duration),
         "-c:v", "libx264",
-        "-preset", "slow",
+        "-preset", "veryfast",
         "-crf", "18",
         "-c:a", "aac",
         "-movflags", "+faststart",
@@ -872,12 +944,12 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         
         LOG.info("Image %d ready. Converting to video clip with Ken Burns effect...", index)
         frames = int(scene.duration * 30)
-        zoom_filter = f"scale=12000:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
+        zoom_filter = f"scale=3840:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
         run([
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
             "-vf", zoom_filter,
-            "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
             str(clip)
         ])
         
@@ -897,7 +969,7 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         "unsharp=5:5:1.0:5:5:0.0"
     )
     LOG.info("Concatenating and normalizing the vertical video…")
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "slow", "-crf", "18", str(visuals)])
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)])
 
     narration = output_dir / "narration.mp3"
     LOG.info("Generating English narration with Google Chirp 3 HD…")
@@ -918,7 +990,7 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
     LOG.info("Generated %d English caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     final_video = output_dir / "short.mp4"
     LOG.info("Muxing narration, captions, and final video…")
-    mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration)
+    mux_video_audio_with_captions(visuals, narration, cues, final_video, target_duration)
     return final_video
 
 
@@ -943,7 +1015,7 @@ def render_social_video(social: SocialPlan, tts: GoogleChirpTTS, output_dir: Pat
     LOG.info("Generated %d Vietnamese caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     social_video = output_dir / "short_vi.mp4"
     LOG.info("Muxing Vietnamese social video with captions…")
-    mux_video_audio_with_captions(visuals, narration, captions, social_video, target_duration)
+    mux_video_audio_with_captions(visuals, narration, cues, social_video, target_duration)
     return social_video
 
 
@@ -1307,6 +1379,7 @@ def main() -> int:
     args = parser.parse_args()
     configure_logging(args.log_level)
     materialize_railway_credentials()
+    ensure_dejavu_font()
     settings = Settings.from_env(args.duration)
     archive = Archive()
     pollinations = Pollinations(settings)
@@ -1376,7 +1449,15 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        sys.exit(main())
     except BotError as error:
-        print(f"LỖI: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        LOG.error(f"LỖI BOT: {error}")
+        sys.stderr.write(f"LỖI: {error}\n")
+        sys.stderr.flush()
+        sys.stdout.flush()
+        sys.exit(1)
+    except Exception as error:
+        LOG.exception("Lỗi hệ thống không xác định:")
+        sys.stderr.flush()
+        sys.stdout.flush()
+        sys.exit(1)

@@ -643,14 +643,29 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if abs(scene_total - duration) > 0.1:
         raise BotError(f"Gemini chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
-    minimum_words, maximum_words = narration_word_bounds(duration)
-    if not minimum_words <= words <= maximum_words:
-        raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
     clean_hook = re.sub(r"[\W_]+", "", plan.hook).lower()
     clean_closing = re.sub(r"[\W_]+", "", plan.closing_line).lower()
     if not clean_narration.startswith(clean_hook) or not clean_narration.endswith(clean_closing):
-        raise BotError("Kịch bản phải bắt đầu bằng hook và kết thúc bằng closing_line.")
+        LOG.warning("Kịch bản không bắt đầu bằng hook hoặc kết thúc bằng closing_line. Đang tự động điều chỉnh...")
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", plan.narration) if part.strip()]
+        if sentences:
+            if not re.sub(r"[\W_]+", "", sentences[0]).lower().startswith(clean_hook):
+                sentences[0] = plan.hook
+            if not re.sub(r"[\W_]+", "", sentences[-1]).lower().endswith(clean_closing):
+                sentences[-1] = plan.closing_line
+            plan.narration = " ".join(sentences)
+            
+            clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
+            if not clean_narration.startswith(clean_hook):
+                plan.narration = plan.hook + " " + plan.narration
+            if not re.sub(r"[\W_]+", "", plan.narration).lower().endswith(clean_closing):
+                plan.narration = plan.narration + " " + plan.closing_line
+
+    words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
+    minimum_words, maximum_words = narration_word_bounds(duration)
+    if not minimum_words <= words <= maximum_words:
+        raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     LOG.info("Plan ready: %r (%d scenes, %d words)", plan.title, len(plan.scenes), words)
     return plan
 

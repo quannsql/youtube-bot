@@ -483,3 +483,34 @@ def test_three_pass_planner_returns_a_20_second_story(tmp_path):
     result = bot.plan_short(FakeClient(), bot.Archive(tmp_path / "shorts.db"), "green deserts", 20)
     assert result.hook == plan["hook"]
     assert sum(scene.duration for scene in result.scenes) == 20
+
+
+def test_plan_short_auto_corrects_hook_closing_line_mismatch(tmp_path):
+    mismatched_plan = {
+        "topic": "The Green Sahara", "angle": "A desert shaped by monsoon shifts",
+        "title": "When the Sahara Was Green", "description": "A desert was once a lake country. #Shorts",
+        "tags": ["shorts", "science", "history"],
+        "hook": "Twelve thousand years ago, the Sahara was green.",
+        "narration": "In the distant past, the Sahara was green. Monsoon rains fed lakes across North Africa, supporting grasslands and animals. Sediment and archaeological evidence reveal this African Humid Period, though its timing varied by region. A desert is just a temporary climate snapshot.",
+        "closing_line": "A desert can be a climate snapshot, not a permanent identity.",
+        "scenes": [{"duration": 5, "visual_prompt": "Scene one"}, {"duration": 5, "visual_prompt": "Scene two"}, {"duration": 5, "visual_prompt": "Scene three"}, {"duration": 5, "visual_prompt": "Scene four"}],
+        "fact_note": "Regional timing varied.", "source_hints": ["NOAA"],
+    }
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = [
+                {"central_claim": "The Sahara had wet periods.", "evidence_points": ["lakes", "sediment", "monsoons"], "uncertainty": "regional timing", "fresh_angle": "climate snapshot", "source_leads": ["NOAA"], "avoid": ["exact dates"]},
+                mismatched_plan,
+                {"quality_check": {"hook_score": 9, "clarity_score": 9}, "plan": mismatched_plan},
+            ]
+
+        def chat(self, _prompt, temperature=0.55):
+            return json.dumps(self.responses.pop(0))
+
+    result = bot.plan_short(FakeClient(), bot.Archive(tmp_path / "shorts.db"), "green deserts", 20)
+    
+    # Narration should start with the hook and end with the closing line after auto-correct
+    assert result.narration.startswith("Twelve thousand years ago, the Sahara was green.")
+    assert result.narration.endswith("A desert can be a climate snapshot, not a permanent identity.")
+

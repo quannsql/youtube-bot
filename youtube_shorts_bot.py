@@ -327,53 +327,142 @@ def narration_word_bounds(duration: int) -> tuple[int, int]:
 
 class Archive:
     def __init__(self, path: Path = DATA_DIR / "shorts.db") -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("""CREATE TABLE IF NOT EXISTS shorts (
-            id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, topic TEXT NOT NULL,
-            angle TEXT NOT NULL, title TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL, youtube_id TEXT, output_path TEXT
-        )""")
-        self.conn.commit()
+        self.database_url = os.getenv("DATABASE_URL")
+        self.is_postgres = bool(self.database_url and self.database_url.startswith(("postgres://", "postgresql://")))
+
+        if self.is_postgres:
+            try:
+                import psycopg2
+                from psycopg2.extras import DictCursor
+            except ImportError as exc:
+                raise BotError("DATABASE_URL is set but psycopg2-binary is not installed. Please add it to requirements.") from exc
+            
+            # Fix schema prefix if needed
+            db_url = self.database_url.replace("postgres://", "postgresql://", 1)
+            self.conn = psycopg2.connect(db_url, cursor_factory=DictCursor)
+            with self.conn.cursor() as cur:
+                cur.execute("""CREATE TABLE IF NOT EXISTS shorts (
+                    id SERIAL PRIMARY KEY, created_at TEXT NOT NULL, topic TEXT NOT NULL,
+                    angle TEXT NOT NULL, title TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL, youtube_id TEXT, output_path TEXT
+                )""")
+                cur.execute("""CREATE TABLE IF NOT EXISTS kv_store (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL
+                )""")
+            self.conn.commit()
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(path)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("""CREATE TABLE IF NOT EXISTS shorts (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, topic TEXT NOT NULL,
+                angle TEXT NOT NULL, title TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL, youtube_id TEXT, output_path TEXT
+            )""")
+            self.conn.execute("""CREATE TABLE IF NOT EXISTS kv_store (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
+            )""")
+            self.conn.commit()
+
+    def get_kv(self, key: str) -> str | None:
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT value FROM kv_store WHERE key = %s", (key,))
+                row = cur.fetchone()
+                return row["value"] if row else None
+        else:
+            row = self.conn.execute("SELECT value FROM kv_store WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row else None
+
+    def set_kv(self, key: str, value: str) -> None:
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO kv_store (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    (key, value)
+                )
+            self.conn.commit()
+        else:
+            self.conn.execute(
+                "INSERT INTO kv_store (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value)
+            )
+            self.conn.commit()
 
     def recent_context(self, limit: int = 40) -> list[dict[str, str]]:
-        rows = self.conn.execute(
-            "SELECT topic, angle, title, status FROM shorts ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [dict(row) for row in rows]
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT topic, angle, title, status FROM shorts ORDER BY id DESC LIMIT %s", (limit,))
+                return [dict(row) for row in cur.fetchall()]
+        else:
+            rows = self.conn.execute(
+                "SELECT topic, angle, title, status FROM shorts ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(row) for row in rows]
 
-    def duplicate_of(self, plan: ShortPlan, threshold: float = 0.52) -> sqlite3.Row | None:
+    def duplicate_of(self, plan: ShortPlan, threshold: float = 0.52) -> sqlite3.Row | dict | None:
         candidate = f"{plan.topic} {plan.angle} {plan.title}"
         exact = hashlib.sha256(candidate.lower().encode()).hexdigest()
-        row = self.conn.execute("SELECT * FROM shorts WHERE fingerprint = ?", (exact,)).fetchone()
-        if row:
-            return row
-        for previous in self.conn.execute("SELECT * FROM shorts ORDER BY id DESC LIMIT 150"):
-            previous_text = f"{previous['topic']} {previous['angle']} {previous['title']}"
-            if similarity(candidate, previous_text) >= threshold:
-                return previous
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT * FROM shorts WHERE fingerprint = %s", (exact,))
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+                cur.execute("SELECT * FROM shorts ORDER BY id DESC LIMIT 150")
+                for previous in cur.fetchall():
+                    previous_text = f"{previous['topic']} {previous['angle']} {previous['title']}"
+                    if similarity(candidate, previous_text) >= threshold:
+                        return dict(previous)
+        else:
+            row = self.conn.execute("SELECT * FROM shorts WHERE fingerprint = ?", (exact,)).fetchone()
+            if row:
+                return row
+            for previous in self.conn.execute("SELECT * FROM shorts ORDER BY id DESC LIMIT 150"):
+                previous_text = f"{previous['topic']} {previous['angle']} {previous['title']}"
+                if similarity(candidate, previous_text) >= threshold:
+                    return previous
         return None
 
     def reserve(self, plan: ShortPlan, output_path: Path) -> int:
         fingerprint = hashlib.sha256(f"{plan.topic} {plan.angle} {plan.title}".lower().encode()).hexdigest()
-        cursor = self.conn.execute(
-            "INSERT INTO shorts (created_at, topic, angle, title, fingerprint, status, output_path) VALUES (?, ?, ?, ?, ?, 'rendering', ?)",
-            (datetime.now(UTC).isoformat(), plan.topic, plan.angle, plan.title, fingerprint, str(output_path)),
-        )
-        self.conn.commit()
-        return int(cursor.lastrowid)
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO shorts (created_at, topic, angle, title, fingerprint, status, output_path) VALUES (%s, %s, %s, %s, %s, 'rendering', %s) RETURNING id",
+                    (datetime.now(UTC).isoformat(), plan.topic, plan.angle, plan.title, fingerprint, str(output_path)),
+                )
+                record_id = cur.fetchone()[0]
+            self.conn.commit()
+            return int(record_id)
+        else:
+            cursor = self.conn.execute(
+                "INSERT INTO shorts (created_at, topic, angle, title, fingerprint, status, output_path) VALUES (?, ?, ?, ?, ?, 'rendering', ?)",
+                (datetime.now(UTC).isoformat(), plan.topic, plan.angle, plan.title, fingerprint, str(output_path)),
+            )
+            self.conn.commit()
+            return int(cursor.lastrowid)
 
     def mark(self, record_id: int, status: str, youtube_id: str | None = None) -> None:
-        self.conn.execute("UPDATE shorts SET status = ?, youtube_id = COALESCE(?, youtube_id) WHERE id = ?", (status, youtube_id, record_id))
-        self.conn.commit()
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute("UPDATE shorts SET status = %s, youtube_id = COALESCE(%s, youtube_id) WHERE id = %s", (status, youtube_id, record_id))
+            self.conn.commit()
+        else:
+            self.conn.execute("UPDATE shorts SET status = ?, youtube_id = COALESCE(?, youtube_id) WHERE id = ?", (status, youtube_id, record_id))
+            self.conn.commit()
 
     def jobs_created_today(self) -> int:
         today = datetime.now(UTC).date().isoformat()
-        row = self.conn.execute(
-            "SELECT COUNT(*) AS count FROM shorts WHERE substr(created_at, 1, 10) = ?", (today,)
-        ).fetchone()
-        return int(row["count"])
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS count FROM shorts WHERE created_at LIKE %s", (today + "%",))
+                return int(cur.fetchone()["count"])
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS count FROM shorts WHERE substr(created_at, 1, 10) = ?", (today,)
+            ).fetchone()
+            return int(row["count"])
 
 
 class GeminiClient:
@@ -1396,6 +1485,11 @@ def main() -> int:
         print(f"Da tao YouTube token: {settings.youtube_token}")
         return 0
     archive = Archive()
+    
+    token_db = archive.get_kv("youtube_token")
+    if token_db:
+        settings.youtube_token.write_text(token_db, encoding="utf-8")
+
     pollinations = Pollinations(settings)
     gemini = GeminiClient(settings)
     tts = GoogleChirpTTS(settings)
@@ -1409,11 +1503,22 @@ def main() -> int:
         plan = ShortPlan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
         youtube_id = upload_to_youtube(video, plan, settings, args.privacy_status or settings.youtube_privacy)
         print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
+        if settings.youtube_token.exists():
+            archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
+
         if social_publish_enabled(settings):
             social_video, social = prepare_social_video(plan, gemini, tts, video.parent, settings)
             social_results = publish_social_video(social_video, social, settings)
             if social_results:
                 print(f"Đã publish social: {social_results}")
+        
+        if archive.is_postgres:
+            try:
+                shutil.rmtree(video.parent)
+                LOG.info("Cleaned up output directory: %s", video.parent)
+            except Exception as exc:
+                LOG.warning("Could not clean up %s: %s", video.parent, exc)
+                
         return 0
     if args.scheduled and settings.scheduled_daily_limit > 0:
         jobs_today = archive.jobs_created_today()
@@ -1450,11 +1555,21 @@ def main() -> int:
             youtube_id = upload_to_youtube(video, plan, settings, args.privacy_status or settings.youtube_privacy)
             archive.mark(record_id, "published", youtube_id)
             print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
+            if settings.youtube_token.exists():
+                archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
+
             if social_publish_enabled(settings):
                 social_video, social = prepare_social_video(plan, gemini, tts, output_dir, settings)
                 social_results = publish_social_video(social_video, social, settings)
                 if social_results:
                     print(f"Đã publish social: {social_results}")
+                    
+            if archive.is_postgres:
+                try:
+                    shutil.rmtree(output_dir)
+                    LOG.info("Cleaned up output directory: %s", output_dir)
+                except Exception as exc:
+                    LOG.warning("Could not clean up %s: %s", output_dir, exc)
     except Exception:
         archive.mark(record_id, "upload_failed" if rendered else "failed")
         raise

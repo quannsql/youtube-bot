@@ -51,30 +51,14 @@ Tại Railway, vào Service → **Settings → Cron Schedule** và đặt:
 
 Railway chạy Cron theo UTC. Lịch này chạy vào 00:00, 06:00 và 12:00 UTC, tương ứng 07:00, 13:00 và 19:00 giờ Việt Nam (UTC+7). Mỗi lần chạy tạo/upload một video ngay, miễn là chưa chạm `SCHEDULED_DAILY_LIMIT`. Muốn nhiều hơn 3 video/ngày thì tăng cả Cron Schedule và `SCHEDULED_DAILY_LIMIT`. Video LTX-2 dài 25 giây tốn khoảng `0.125` Pollen trên key video, vẫn có thể tận dụng `LTX_FALLBACK_TO_GROK_KEY=true` khi key video hết quota hoặc bị rate-limit.
 
-## Tạo và dùng Railway Volume
+## Chạy trên Railway KHÔNG dùng Volume (Khuyên dùng)
 
-Volume giữ `shorts.db` (chống trùng), `generated/`, YouTube refresh token và hai Google JSON. Nếu không có Volume, Railway có thể mất các file này sau redeploy hoặc giữa các lần Cron.
+Để tránh tình trạng hết dung lượng (do các video cũ tồn đọng), bot hỗ trợ chạy hoàn toàn trên bộ nhớ tạm của container và lưu trữ dữ liệu vào **PostgreSQL Database**.
 
 1. Deploy repository thành một Railway service.
-2. Trong project canvas, nhấn `Ctrl/Cmd + K` → **New Volume** (hoặc chuột phải vào canvas → **New Volume**).
-3. Chọn service của bot khi Railway hỏi service cần kết nối.
-4. Đặt **Mount Path** là `/app/data`.
-5. Railway tự đặt biến `RAILWAY_VOLUME_MOUNT_PATH`; bot tự phát hiện biến này, nên không cần đặt `BOT_DATA_DIR` trên Railway.
-6. Từ máy local, dùng Railway CLI để upload ba file credential vào Volume:
-
-```powershell
-railway login
-railway link
-railway volume files upload .\google_tts_service_account.json /google_tts_service_account.json
-railway volume files upload .\client_secrets.json /client_secrets.json
-railway volume files upload .\youtube_token.json /youtube_token.json
-```
-
-`youtube_token.json` phải được tạo ở local trước bằng một lần chạy `--publish`, vì OAuth Desktop không thể mở trình duyệt cấp quyền trong Railway Cron headless.
-
-### Khi Railway CLI/SFTP timeout
-
-Nếu `railway volume files upload` không mở được SFTP, không đưa JSON lên GitHub. Thay vào đó, mã nguồn hỗ trợ nhận ba JSON qua Railway Variables dưới dạng Base64 và tự ghi chúng vào Volume lúc Cron bắt đầu.
+2. Trong project canvas, nhấn `Ctrl/Cmd + K` → **Database** → **Add PostgreSQL**.
+3. Kết nối Database vừa tạo vào Service của bot. Railway sẽ tự động tạo biến `DATABASE_URL`. Bot sẽ tự nhận diện và tự động tạo bảng dữ liệu, bạn không cần dùng Volume.
+4. Vì không có Volume, mọi dữ liệu cục bộ sẽ mất khi container restart. Do đó, bạn cần nạp 3 file JSON cấu hình bằng biến môi trường Base64.
 
 Trên máy local, chạy từng lệnh sau. Mỗi lệnh đưa Base64 vào clipboard, không in secret ra màn hình:
 
@@ -84,7 +68,7 @@ Trên máy local, chạy từng lệnh sau. Mỗi lệnh đưa Base64 vào clipb
 [Convert]::ToBase64String([IO.File]::ReadAllBytes('.\youtube_token.json')) | Set-Clipboard
 ```
 
-Sau mỗi lệnh, trong Railway → **Variables**, tạo một variable rồi dán clipboard tương ứng:
+Sau mỗi lệnh, trong Railway → **Variables** của service bot, tạo một variable rồi dán clipboard tương ứng:
 
 ```text
 GOOGLE_TTS_SERVICE_ACCOUNT_JSON_B64
@@ -92,7 +76,7 @@ YOUTUBE_CLIENT_SECRETS_JSON_B64
 YOUTUBE_TOKEN_JSON_B64
 ```
 
-Các biến này chỉ cần để bootstrap credential file; `shorts.db`, video tạo ra và token vẫn nằm ở Volume `/app/data` sau lần chạy đầu tiên.
+> **Lưu ý**: Lần đầu tiên chạy, bot sẽ load token từ `YOUTUBE_TOKEN_JSON_B64`. Khi token được YouTube tự động cấp lại, bot sẽ tự động cập nhật nó vào Database (bảng `kv_store`), nên bạn không cần cập nhật lại biến `YOUTUBE_TOKEN_JSON_B64` nữa! Các thư mục video `generated/` cũng sẽ tự động được xóa đi sau khi đăng thành công để tiết kiệm không gian đĩa.
 
 Trong Railway → **Variables**, thêm:
 

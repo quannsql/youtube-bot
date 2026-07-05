@@ -92,7 +92,7 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "viewer_question, stakes, and thumbnail_hint" in prompts[1]
     assert "photorealistic" in prompts[1]
     assert "Preserve this visual direction" in prompts[2]
-    assert "dry topics that lack a strong viewer_question" in prompts[2]
+    assert "dry topics that lack a strong hook" in prompts[2]
 
 
 def test_choose_novel_plan_passes_duplicate_candidate_to_retry(tmp_path, monkeypatch):
@@ -169,9 +169,11 @@ def test_image_scene_prompt_adds_style_guardrails():
     prompt = bot.image_scene_prompt("A fossil leaf drifts across ancient continents.")
 
     assert prompt.startswith("A fossil leaf")
-    assert "Style guardrails" in prompt
     assert "photorealistic" in prompt
     assert "cinematic" in prompt
+    # Style suffix chỉ chứa token dương — không được nhồi phủ định vào prompt gửi model ảnh.
+    assert "NO " not in prompt
+    assert "must describe" not in prompt
 
 
 def test_caption_chunks_are_short_and_readable():

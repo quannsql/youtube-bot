@@ -166,6 +166,12 @@ class Settings:
     scheduled_daily_limit: int = 3
     text_model: str = "grok-large"
     image_model: str = "klein"
+    image_enhance: bool = False
+    image_negative_prompt: str = (
+        "iron fence, metal railing, chain-link fence, bars, cage, grid, prison bars, "
+        "text, watermark, signature, caption, letters, logo, human face, crowd, "
+        "deformed, blurry, low quality, oversaturated"
+    )
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
     google_tts_voice: str = "en-US-Chirp3-HD-Achernar"
     google_tts_speaking_rate: float = 1.05
@@ -215,6 +221,9 @@ class Settings:
             language=os.getenv("SHORT_LANGUAGE", "en"),
             duration=duration,
             scheduled_daily_limit=max(0, int(os.getenv("SCHEDULED_DAILY_LIMIT", "3"))),
+            image_model=os.getenv("POLLINATIONS_IMAGE_MODEL", "klein").strip() or "klein",
+            image_enhance=env_bool("IMAGE_ENHANCE", False),
+            image_negative_prompt=os.getenv("IMAGE_NEGATIVE_PROMPT", cls.image_negative_prompt).strip(),
             google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
             google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Achernar"),
             google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
@@ -526,9 +535,19 @@ class Pollinations:
         return response
 
     def image(self, prompt: str, destination: Path, seed: int) -> None:
-        # Tăng chất lượng hình ảnh bằng cách thêm keyword và bật tính năng enhance của Pollinations
-        enhanced_prompt = f"{prompt}, masterpiece, highly detailed, sharp focus, 4k resolution"
-        params = {"model": self.s.image_model, "width": 1080, "height": 1920, "seed": seed, "nologo": "true", "enhance": "true"}
+        # Prompt đã kèm sẵn style suffix gọn từ image_scene_prompt; không nối thêm meta/phủ định
+        # vào prompt dương nữa (những phủ định đó bị model hiểu theo nghĩa dương và làm nhiễu ảnh).
+        enhanced_prompt = prompt
+        params = {
+            "model": self.s.image_model,
+            "width": 1080,
+            "height": 1920,
+            "seed": seed,
+            "nologo": "true",
+            "enhance": "true" if self.s.image_enhance else "false",
+        }
+        if self.s.image_negative_prompt:
+            params["negative_prompt"] = self.s.image_negative_prompt
         partial = destination.with_name(f"{destination.name}.part")
         key_candidates = [("video key", self.video_headers)]
         if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key != self.s.video_api_key:
@@ -630,14 +649,24 @@ class GoogleChirpTTS:
         destination.write_bytes(response.audio_content)
 
 
+# Chỉ dẫn dành cho LLM khi VIẾT visual_prompt (không phải để gửi cho model ảnh).
 VISUAL_STYLE_RULES = (
-    "Use highly cinematic, photorealistic documentary-style illustrative images. 8k resolution, ultra-detailed, sharp focus, masterpiece. "
-    "Each visual_prompt must describe a visually stunning, realistic static scene: sweeping drone views, "
-    "macro photography, atmospheric lighting, high-end VFX, or dramatic nature landscapes. "
-    "CRITICAL: ABSOLUTELY NO text, typography, letters, papers, documents, or readable signs in the image. "
-    "CRITICAL: ABSOLUTELY NO human faces, people, or crowds to avoid uncanny AI artifacts. "
-    "Focus on environments, objects, forces of nature, space, and animals. "
-    "Ensure consistent aspect ratio and cohesive lighting across all prompts."
+    "Write each visual_prompt as one concrete, self-contained sentence describing a single clear subject "
+    "and setting for a photorealistic documentary image. "
+    "Vary the shot type and composition from scene to scene across the storyboard: mix wide establishing "
+    "landscapes, aerial/drone views, macro close-ups of objects or textures, cutaway details, and symbolic "
+    "still lifes. Do NOT default to the same framing every time. "
+    "CRITICAL: never place a recurring foreground framing device such as an iron fence, metal railing, bars, "
+    "cage, or grid in the shot unless the topic is literally about one. "
+    "Describe the subject positively and specifically (what IS in frame), not what to avoid. "
+    "Avoid readable text, logos, or documents, and avoid close-up human faces or dense crowds. "
+    "Prefer environments, objects, forces of nature, space, and animals. Keep every scene vertical 9:16."
+)
+
+# Style suffix GỌN gửi kèm cho model ảnh (chỉ token dương, không câu chỉ dẫn, không phủ định).
+IMAGE_STYLE_SUFFIX = (
+    "cinematic photorealistic documentary photograph, natural lighting, "
+    "shallow depth of field, ultra-detailed, sharp focus, 8k, vertical 9:16"
 )
 
 CURIOSITY_TOPIC_CATEGORIES = [
@@ -646,17 +675,70 @@ CURIOSITY_TOPIC_CATEGORIES = [
     "Historical events: great victories or defeats of an empire or nation, or shocking events in history, e.g., 'the atomic bombing of Hiroshima', 'the fall of the Roman Empire', 'the Battle of Waterloo', etc. (Note: avoid mentioning events in Vietnam).",
     "Geography & Extreme Nature: e.g., 'The most dangerous place on earth', 'Unexplained natural phenomena'",
     "Animals & Biology: e.g., 'The immortal jellyfish', 'Animals with mind-control abilities'",
-    "Great human inventions, both past and present, e.g., 'the printing press', 'the internet', 'the steam engine'."
+    "Great human inventions, both past and present, e.g., 'the printing press', 'the internet', 'the steam engine'.",
+    "Space & the Cosmos: e.g., 'What happens inside a black hole?', 'The coldest place in the universe', 'Why Venus turned deadly'.",
+    "Physics & big scientific ideas made simple: e.g., 'Why time slows down near gravity', 'What absolute zero really means', 'How lightning actually forms'.",
+    "The human body & mind: e.g., 'What your brain does while you sleep', 'Why we forget', 'The organ we barely understand'.",
+    "Ancient engineering & lost technology: e.g., 'How Rome made concrete that still stands', 'The 2000-year-old computer', 'Why we can't rebuild some ancient structures'.",
+    "Money, economics & society: e.g., 'How one tulip crashed an economy', 'The most valuable object ever made', 'Why some currencies collapse overnight'.",
+    "Everyday things with a hidden origin or secret: e.g., 'Why keyboards aren't alphabetical', 'The accident that created a common food', 'What's really inside your everyday objects'.",
 ]
+
+# Trục ĐỊNH DẠNG kể chuyện — độc lập với chủ đề, quyết định "kiểu" video để phá thế đơn điệu.
+NARRATIVE_FORMATS = [
+    "MYSTERY: pose a genuine unsolved question and walk through the leading explanation.",
+    "SUPERLATIVE / RECORD: reveal the most extreme example of something (biggest, oldest, deadliest, fastest) and why it holds that record.",
+    "HOW-IT-WORKS: reveal the hidden mechanism behind a familiar phenomenon, object, or process, step by step.",
+    "RISE-AND-FALL: tell the arc of how something great emerged, peaked, and collapsed.",
+    "MYTH-BUSTER: state a widely believed 'fact' and correct it with the real evidence.",
+    "HIDDEN-IN-PLAIN-SIGHT: expose a surprising secret or backstory behind something ordinary the viewer already knows.",
+    "ORIGIN STORY: trace where a world-changing thing, idea, or creature actually came from.",
+    "NUMBER-SHOCK: build the whole video around one staggering, hard-to-believe statistic or scale comparison.",
+    "TRANSFORMATION: show a dramatic before-and-after change in a place, species, or technology over time.",
+    "WHAT-IF / CONSEQUENCE: explore a real turning point and the outsized consequences that followed (or almost did).",
+]
+
+# Trục KIỂU TIÊU ĐỀ — buộc tiêu đề xoay vòng, không phải lúc nào cũng "Why did...".
+TITLE_STYLES = [
+    "a bold declarative statement (NOT a question), e.g. 'This Lake Turns Animals to Stone'",
+    "a curiosity-gap teaser that withholds the payoff, e.g. 'The Metal That Ended an Empire'",
+    "a superlative claim, e.g. 'The Loneliest Tree on Earth'",
+    "a short question — but only occasionally, and vary the opening word (not always 'Why')",
+    "a surprising number or scale hook, e.g. '600 Years, One Unsolved Blueprint'",
+    "a vivid noun phrase naming the subject and its twist, e.g. 'The Library That Erased Itself'",
+]
+
 
 def get_random_topic_rule() -> str:
     category = random.choice(CURIOSITY_TOPIC_CATEGORIES)
+    narrative_format = random.choice(NARRATIVE_FORMATS)
+    title_style = random.choice(TITLE_STYLES)
     return (
         f"CRITICAL INSTRUCTION: For this specific video, you MUST strictly focus ONLY on this sub-category: **{category}**. "
         "Do not write about anything outside of this category. "
+        f"NARRATIVE FORMAT for this video (shape the whole story around it, do not force it into a generic mystery): **{narrative_format}** "
+        f"TITLE STYLE to aim for: **{title_style}**. "
+        "Only about one in three videos should use a question title; prefer confident declarative or teaser titles otherwise, "
+        "and never begin the title with 'Why' unless the narrative format is genuinely MYSTERY. "
         "Choose a topic with immediate viral curiosity. "
         "Do not hardcode the exact examples, but generate similarly captivating concepts."
     )
+
+
+def recent_title_openers(past: list[dict[str, str]], limit: int = 8) -> str:
+    """Trả về các từ mở đầu tiêu đề dùng gần đây (để yêu cầu LLM tránh lặp khuôn)."""
+    openers: list[str] = []
+    for row in past[:limit]:
+        title = (row.get("title") or "").strip()
+        if not title:
+            continue
+        words = re.findall(r"[A-Za-z']+", title)
+        if not words:
+            continue
+        opener = " ".join(words[:2]).lower()
+        if opener and opener not in openers:
+            openers.append(opener)
+    return ", ".join(f"'{o}'" for o in openers)
 
 
 PLAN_SCHEMA = '''{
@@ -664,13 +746,13 @@ PLAN_SCHEMA = '''{
   "description":"English description with exactly 2 hashtags", "tags":["exactly 2 tags"],
   "hook":"first spoken sentence, <=12 words", "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=14 words",
-  "scenes":[{"duration":5.5,"visual_prompt":"English photorealistic documentary illustration prompt, no text/logos/documents"}],
+  "scenes":[{"duration":5.5,"visual_prompt":"English photorealistic documentary image prompt: one concrete subject + setting, describe only what IS in frame; vary the shot type between scenes"}],
   "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"]
 }'''
 
 RESEARCH_SCHEMA = '''{
-  "curiosity_frame":"mystery, catastrophe, what-if, lost civilization, scientific limit, hidden mechanism, or similar",
-  "viewer_question":"the clickable question this Short answers", "stakes":"why a broad viewer should care",
+  "curiosity_frame":"match the assigned narrative format: mystery, record/superlative, hidden mechanism, rise-and-fall, myth correction, hidden origin, staggering number, dramatic transformation, or consequence",
+  "viewer_question":"the single clickable hook this Short delivers — phrase it as a question ONLY if the format is a mystery, otherwise as a bold promise or reveal statement", "stakes":"why a broad viewer should care",
   "thumbnail_hint":"2-4 words for a vivid thumbnail concept",
   "central_claim":"one defensible claim", "evidence_points":["fact 1","fact 2","fact 3"],
   "uncertainty":"what must be qualified or omitted", "fresh_angle":"a non-repetitive narrative angle",
@@ -704,7 +786,7 @@ Theme: {theme}
 Use your reasoning internally before responding. Return only JSON using this schema:
 {RESEARCH_SCHEMA}
 Topic strategy: {topic_rule}
-Rules: Choose one topic that can be explained with established evidence and framed as a question a normal viewer would want answered. Do not invent sources, data, fossil finds, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it. Prefer a surprising, specific angle over a broad textbook summary.
+Rules: Choose one topic that can be explained with established evidence and framed as a compelling hook a normal viewer would want to see paid off — a question, a bold claim, or a surprising reveal, whichever fits the assigned narrative format. Do not invent sources, data, fossil finds, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it. Prefer a surprising, specific angle over a broad textbook summary.
 Clickability filter: before selecting the topic, silently reject candidates that sound like a procedural report, a routine measurement update, a narrow technical footnote, or a low-stakes institutional detail. The final viewer_question should feel like a documentary title someone might click without already caring about the field.
 Novelty rule: The topic and fresh_angle must be materially different from every item in the existing archive and rejected candidates below. Do not choose the same object, event, artifact, site, person, mechanism, or central claim. If a broad theme keeps pointing to the same subject, switch domains within the theme.
 Existing archive: {json.dumps(past, ensure_ascii=False)}
@@ -723,12 +805,20 @@ def plan_short(
     past = archive.recent_context()
     rejected = rejected or []
     topic_rule = get_random_topic_rule()
+    recent_openers = recent_title_openers(past)
+    opener_rule = (
+        f"TITLE VARIETY: recent videos already opened their titles with these words: {recent_openers}. "
+        "Do NOT start this title with any of them; pick a clearly different opening. "
+        if recent_openers
+        else "TITLE VARIETY: vary the opening word of the title; do not default to 'Why'. "
+    )
     brief = research_brief(llm, theme, topic_rule, past, rejected)
     prompt = f'''Act as a senior documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
 Audience: curious global English-speaking viewers. Topics may cover discovery, history, geography, science, or technology.
 Topic strategy: {topic_rule}
-Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel like a mystery or high-stakes explanation, not a neutral encyclopedia entry.
+{opener_rule}
+Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel like a high-stakes, must-watch story in the assigned narrative format — not a neutral encyclopedia entry, and not forced into a generic "mystery" if another format was assigned.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
 CRITICAL NARRATIVE RULE: The story must strictly follow a 3-part structure:
 1. BEGINNING (Context): Immediately establish the facts: Who? Where? When? What happened? Never jump straight into a mystery without setting the scene.
@@ -750,11 +840,11 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     review_prompt = f'''Act as the final fact and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
 {{"quality_check":{{"hook_score":1,"clarity_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, and dry topics that lack a strong viewer_question. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. The title should feel like a big question, mystery, consequence, or reversal without clickbait. The narration must begin with hook and end with closing_line. Keep scene durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, and dry topics that lack a strong hook. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. {opener_rule}The narration must begin with hook and end with closing_line. Keep scene durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
-    reviewed = extract_json(llm.chat(review_prompt, temperature=0.25))
+    reviewed = extract_json(llm.chat(review_prompt, temperature=0.4))
     if not isinstance(reviewed.get("plan"), dict):
         raise BotError("Gemini quality pass thiếu trường plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
@@ -842,7 +932,8 @@ def choose_novel_plan(
 
 
 def image_scene_prompt(visual_prompt: str) -> str:
-    return f"{visual_prompt}\n\nStyle guardrails: {VISUAL_STYLE_RULES}"
+    # Chỉ nối style suffix gọn; các ràng buộc "không được có gì" đi qua negative_prompt, không nhét vào prompt dương.
+    return f"{visual_prompt.strip().rstrip('.')}. {IMAGE_STYLE_SUFFIX}"
 
 
 def spoken_word_count(text: str) -> int:

@@ -177,6 +177,7 @@ class Settings:
     text_model: str = "grok-large"
     image_model: str = "klein"
     image_enhance: bool = False
+    allow_image_fallback_placeholder: bool = False
     image_negative_prompt: str = (
         "iron fence, metal railing, chain-link fence, bars, cage, grid, prison bars, "
         "text, watermark, signature, caption, letters, logo, human face, crowd, "
@@ -241,6 +242,7 @@ class Settings:
             scheduled_daily_limit=max(0, int(os.getenv("SCHEDULED_DAILY_LIMIT", "3"))),
             image_model=os.getenv("POLLINATIONS_IMAGE_MODEL", "klein").strip() or "klein",
             image_enhance=env_bool("IMAGE_ENHANCE", False),
+            allow_image_fallback_placeholder=env_bool("ALLOW_IMAGE_FALLBACK_PLACEHOLDER", False),
             image_negative_prompt=os.getenv("IMAGE_NEGATIVE_PROMPT", cls.image_negative_prompt).strip(),
             google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
             google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Achernar"),
@@ -1426,6 +1428,10 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
         try:
             client.image(image_scene_prompt(scene.visual_prompt), image_file, seed=int(time.time()) + index)
         except PollinationsTransientError as exc:
+            if not client.s.allow_image_fallback_placeholder:
+                raise BotError(
+                    f"Image generation for scene {index} failed and placeholder fallback is disabled: {exc}"
+                ) from exc
             LOG.warning("Image generation for scene %d failed; using fallback image: %s", index, exc)
             create_fallback_scene_image(image_file, previous_image)
         if image_file.stat().st_size < 1024:
@@ -1511,6 +1517,10 @@ def prepare_long_form_images(plan: ShortPlan, client: Pollinations, output_dir: 
                 height=1080,
             )
         except PollinationsTransientError as exc:
+            if not client.s.allow_image_fallback_placeholder:
+                raise BotError(
+                    f"Long-form image {index} failed and placeholder fallback is disabled: {exc}"
+                ) from exc
             LOG.warning("Long-form image %d failed; using fallback image: %s", index, exc)
             create_fallback_scene_image(image_file, previous_image, width=1920, height=1080)
         if image_file.stat().st_size < 1024:
@@ -2160,6 +2170,9 @@ def main() -> int:
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     args = parser.parse_args()
     configure_logging(args.log_level)
+    run_mode = os.getenv("BOT_RUN_MODE", "").strip().lower().replace("_", "-")
+    env_forces_long_form = run_mode in {"long", "long-form", "longform"}
+    LOG.info("Startup args: %s | BOT_RUN_MODE=%s", " ".join(sys.argv[1:]) or "(none)", run_mode or "(unset)")
     materialize_railway_credentials()
     ensure_dejavu_font()
     settings = Settings.from_env(args.duration)
@@ -2176,7 +2189,7 @@ def main() -> int:
     pollinations = Pollinations(settings)
     gemini = GeminiClient(settings)
     tts = GoogleChirpTTS(settings)
-    if args.long_form:
+    if args.long_form or env_forces_long_form:
         return run_long_form_flow(
             mode=args.long_form_mode,
             publish=args.publish,

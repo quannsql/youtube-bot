@@ -458,6 +458,60 @@ def test_prepare_long_form_images_respects_budget(tmp_path):
     assert not (tmp_path / "long_scene_03.jpg").exists()
 
 
+def test_prepare_long_form_images_fails_when_placeholder_fallback_disabled(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic",
+        "angle": "Angle",
+        "title": "Title",
+        "description": "Description #A #B",
+        "tags": ["A", "B"],
+        "hook": "Hook.",
+        "narration": "Hook. Body. Close.",
+        "closing_line": "Close.",
+        "scenes": [{"duration": 10, "visual_prompt": "Scene one"}],
+        "fact_note": "Fact note",
+        "source_hints": ["Source"],
+    })
+
+    class FakePollinations:
+        s = bot.Settings(grok_api_key="grok", video_api_key="video", allow_image_fallback_placeholder=False)
+
+        def image(self, *_args, **_kwargs):
+            raise bot.PollinationsTransientError("quota exhausted")
+
+    with pytest.raises(bot.BotError, match="placeholder fallback is disabled"):
+        bot.prepare_long_form_images(plan, FakePollinations(), tmp_path, image_budget=1)
+
+
+def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
+    called = {}
+
+    monkeypatch.setenv("BOT_RUN_MODE", "long-form")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini")
+    monkeypatch.setenv("POLLINATIONS_VIDEO_API_KEY", "video")
+    monkeypatch.setattr(bot, "materialize_railway_credentials", lambda: None)
+    monkeypatch.setattr(bot, "ensure_dejavu_font", lambda: None)
+    class FakeArchive:
+        def get_kv(self, _key):
+            return None
+
+    monkeypatch.setattr(bot, "Archive", lambda: FakeArchive())
+    monkeypatch.setattr(bot, "Pollinations", lambda settings: object())
+    monkeypatch.setattr(bot, "GeminiClient", lambda settings: object())
+    monkeypatch.setattr(bot, "GoogleChirpTTS", lambda settings: object())
+
+    def fake_run_long_form_flow(**kwargs):
+        called.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(bot, "run_long_form_flow", fake_run_long_form_flow)
+    monkeypatch.setattr(sys, "argv", ["youtube_shorts_bot.py", "--publish", "--scheduled"])
+
+    assert bot.main() == 0
+    assert called["mode"] == "auto"
+    assert called["publish"] is True
+
+
 def test_tts_language_code_supports_english_and_vietnamese_voices():
     assert bot.GoogleChirpTTS.language_code_for_voice("en-US-Chirp3-HD-Achernar") == "en-US"
     assert bot.GoogleChirpTTS.language_code_for_voice("vi-VN-Standard-A") == "vi-VN"

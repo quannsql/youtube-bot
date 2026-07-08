@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from google import genai
 from google.genai import types
@@ -27,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -163,6 +165,14 @@ class Settings:
     ltx_fallback_to_grok_key: bool = True
     language: str = "en"
     duration: int = 20
+    long_form_min_duration_seconds: int = 300
+    long_form_max_duration_seconds: int = 420
+    long_form_image_budget_per_run: int = 10
+    long_form_min_scenes: int = 14
+    long_form_max_scenes: int = 20
+    long_form_finalize_hour: int = 18
+    long_form_timezone: str = "Asia/Bangkok"
+    long_form_daily_limit: int = 1
     scheduled_daily_limit: int = 3
     text_model: str = "grok-large"
     image_model: str = "klein"
@@ -220,6 +230,14 @@ class Settings:
             ltx_fallback_to_grok_key=env_bool("LTX_FALLBACK_TO_GROK_KEY", True),
             language=os.getenv("SHORT_LANGUAGE", "en"),
             duration=duration,
+            long_form_min_duration_seconds=max(60, int(os.getenv("LONG_FORM_MIN_DURATION_SECONDS", "300"))),
+            long_form_max_duration_seconds=max(60, int(os.getenv("LONG_FORM_MAX_DURATION_SECONDS", "420"))),
+            long_form_image_budget_per_run=max(1, int(os.getenv("LONG_FORM_IMAGE_BUDGET_PER_RUN", "10"))),
+            long_form_min_scenes=max(4, int(os.getenv("LONG_FORM_MIN_SCENES", "14"))),
+            long_form_max_scenes=max(4, int(os.getenv("LONG_FORM_MAX_SCENES", "20"))),
+            long_form_finalize_hour=min(23, max(0, int(os.getenv("LONG_FORM_FINALIZE_HOUR", "18")))),
+            long_form_timezone=os.getenv("LONG_FORM_TIMEZONE", "Asia/Bangkok").strip() or "Asia/Bangkok",
+            long_form_daily_limit=max(0, int(os.getenv("LONG_FORM_DAILY_LIMIT", "1"))),
             scheduled_daily_limit=max(0, int(os.getenv("SCHEDULED_DAILY_LIMIT", "3"))),
             image_model=os.getenv("POLLINATIONS_IMAGE_MODEL", "klein").strip() or "klein",
             image_enhance=env_bool("IMAGE_ENHANCE", False),
@@ -473,6 +491,21 @@ class Archive:
             ).fetchone()
             return int(row["count"])
 
+    def long_form_jobs_created_today(self) -> int:
+        today = datetime.now(UTC).date().isoformat()
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS count FROM shorts WHERE created_at LIKE %s AND output_path LIKE %s",
+                    (today + "%", "%long-%"),
+                )
+                return int(cur.fetchone()["count"])
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM shorts WHERE substr(created_at, 1, 10) = ? AND output_path LIKE ?",
+            (today, "%long-%"),
+        ).fetchone()
+        return int(row["count"])
+
 
 class GeminiClient:
     def __init__(self, settings: Settings) -> None:
@@ -535,14 +568,14 @@ class Pollinations:
             raise BotError(f"Pollinations {response.status_code}: {detail}")
         return response
 
-    def image(self, prompt: str, destination: Path, seed: int) -> None:
+    def image(self, prompt: str, destination: Path, seed: int, width: int = 1080, height: int = 1920) -> None:
         # Prompt đã kèm sẵn style suffix gọn từ image_scene_prompt; không nối thêm meta/phủ định
         # vào prompt dương nữa (những phủ định đó bị model hiểu theo nghĩa dương và làm nhiễu ảnh).
         enhanced_prompt = prompt
         params = {
             "model": self.s.image_model,
-            "width": 1080,
-            "height": 1920,
+            "width": width,
+            "height": height,
             "seed": seed,
             "nologo": "true",
             "enhance": "true" if self.s.image_enhance else "false",
@@ -680,6 +713,34 @@ IMAGE_STYLE_SUFFIX = (
     "shallow depth of field, ultra-detailed, sharp focus, 8k, vertical 9:16"
 )
 
+LONG_FORM_IMAGE_STYLE_SUFFIX = (
+    "cinematic photorealistic documentary photograph, natural lighting, "
+    "wide establishing composition, ultra-detailed, sharp focus, 8k, horizontal 16:9"
+)
+
+LONG_FORM_VISUAL_STYLE_RULES = (
+    "Write each visual_prompt as one concrete, self-contained sentence for a horizontal 16:9 documentary image. "
+    "Use broadcast documentary variety: wide establishing shots, maps without readable labels, symbolic still lifes, "
+    "infrastructure details, screens without legible text, satellite-like views, and contextual crowd-free scenes. "
+    "Avoid readable text, logos, graphic injury, close-up human faces, and dense crowds. "
+    "Do not mention Vietnam, Vietnamese people, Vietnamese officials, or Vietnam-related locations."
+)
+
+VIETNAM_BLOCKLIST = (
+    "vietnam", "vietnamese", "viet nam", "hanoi", "ha noi", "ho chi minh", "saigon",
+    "da nang", "nguyen", "pham", "tran ", "vo ", "to lam",
+)
+
+LONG_FORM_TOPIC_DOMAINS = (
+    "war and geopolitics",
+    "global politics outside Vietnam",
+    "sports",
+    "global economy and markets",
+    "technology and AI",
+    "science, climate, and space",
+    "major disasters and infrastructure",
+)
+
 CURIOSITY_TOPIC_CATEGORIES = [
     "Great Discoveries & Mysteries: e.g., 'What really killed the dinosaurs?', 'Which empire vanished most mysteriously?', 'Did Atlantis exist?'",
     "Historical figures, great people: Great achievements, lives, processes, or incredible facts about these prominent figures, e.g., 'Napoleon', 'Qin Shi Huang', 'Genghis Khan', 'George Washington', 'Albert Einstein', etc. (Note: avoid mentioning figures in Vietnam)",
@@ -761,6 +822,20 @@ PLAN_SCHEMA = '''{
   "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"]
 }'''
 
+LONG_FORM_PLAN_SCHEMA = '''{
+  "topic":"specific current global topic, not related to Vietnam",
+  "angle":"specific explanatory angle with broad viewer appeal",
+  "title":"<=100 chars, English, clickable but factual",
+  "description":"English YouTube description with exactly 2 hashtags and a brief AI-assisted disclosure",
+  "tags":["exactly 2 tags"],
+  "hook":"first spoken sentence, <=18 words",
+  "narration":"English narration that begins with hook and ends with closing_line",
+  "closing_line":"last spoken sentence, <=18 words",
+  "scenes":[{"duration":24.0,"visual_prompt":"horizontal 16:9 documentary image prompt for this chapter beat"}],
+  "fact_note":"what uncertainty was preserved or avoided",
+  "source_hints":["headline/source lead used from the supplied news context"]
+}'''
+
 RESEARCH_SCHEMA = '''{
   "curiosity_frame":"match the assigned narrative format: mystery, record/superlative, hidden mechanism, rise-and-fall, myth correction, hidden origin, staggering number, dramatic transformation, or consequence",
   "viewer_question":"the single clickable hook this Short delivers — phrase it as a question ONLY if the format is a mystery, otherwise as a bold promise or reveal statement", "stakes":"why a broad viewer should care",
@@ -781,6 +856,52 @@ def extract_json(text: str) -> dict[str, Any]:
         return json.loads(cleaned[start:end + 1])
     except json.JSONDecodeError as exc:
         raise BotError(f"Gemini trả JSON lỗi: {exc}") from exc
+
+
+def mentions_vietnam(text: str) -> bool:
+    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+    return any(term in normalized for term in VIETNAM_BLOCKLIST)
+
+
+def clean_feed_text(value: str) -> str:
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"&(?:amp|quot|apos|lt|gt);", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def fetch_trending_news_context(limit: int = 28) -> list[dict[str, str]]:
+    feeds = {
+        "top": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+        "world": "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en",
+        "business": "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
+        "technology": "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en",
+        "sports": "https://news.google.com/rss/headlines/section/topic/SPORTS?hl=en-US&gl=US&ceid=US:en",
+        "science": "https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=en-US&gl=US&ceid=US:en",
+    }
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for category, url in feeds.items():
+        try:
+            response = requests.get(url, timeout=(10, 30))
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+        except Exception as exc:
+            LOG.warning("Could not fetch %s news RSS: %s", category, exc)
+            continue
+        for item in root.findall(".//item"):
+            title = clean_feed_text(item.findtext("title") or "")
+            summary = clean_feed_text(item.findtext("description") or "")
+            link = clean_feed_text(item.findtext("link") or "")
+            if not title or mentions_vietnam(f"{title} {summary}"):
+                continue
+            key = re.sub(r"\W+", "", title.lower())[:90]
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"category": category, "title": title[:220], "summary": summary[:320], "link": link[:300]})
+            if len(items) >= limit:
+                return items
+    return items
 
 
 def research_brief(
@@ -892,6 +1013,126 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     LOG.info("Plan ready: %r (%d scenes, %d words)", plan.title, len(plan.scenes), words)
     return plan
+
+
+def long_form_word_bounds(duration: int) -> tuple[int, int]:
+    return round(duration * 1.55), round(duration * 2.75)
+
+
+def image_scene_prompt_horizontal(visual_prompt: str) -> str:
+    return f"{visual_prompt.strip().rstrip('.')}. {LONG_FORM_IMAGE_STYLE_SUFFIX}"
+
+
+def plan_long_form(
+    llm: GeminiClient,
+    archive: Archive,
+    theme: str,
+    duration: int,
+    min_scenes: int,
+    max_scenes: int,
+    news_context: list[dict[str, str]] | None = None,
+    rejected: list[dict[str, str]] | None = None,
+) -> ShortPlan:
+    past = archive.recent_context()
+    rejected = rejected or []
+    news_context = news_context or []
+    min_words, max_words = long_form_word_bounds(duration)
+    scene_count = random.randint(min_scenes, max_scenes)
+    target_scene_duration = round(duration / scene_count, 2)
+    prompt = f'''Act as a senior YouTube documentary producer and factual script editor.
+Create ONE English long-form YouTube video plan for a horizontal 16:9 video.
+Target duration: exactly {duration} seconds, about {duration // 60} to {round(duration / 60, 1)} minutes.
+Theme: {theme}
+Allowed domains: {", ".join(LONG_FORM_TOPIC_DOMAINS)}.
+Fresh news context from public RSS headlines: {json.dumps(news_context, ensure_ascii=False)}
+Existing archive: {json.dumps(past, ensure_ascii=False)}
+Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
+
+Hard rules:
+- Do NOT choose any topic, event, person, location, company, political figure, sports figure, or public controversy related to Vietnam.
+- Use the supplied news context as leads. If the context is thin, choose a globally relevant current topic outside Vietnam and explicitly keep claims broad.
+- Do not invent quotes, casualty numbers, market numbers, scores, dates, or source names not present in the context.
+- The result must feel timely, clickable, and broad-interest, but not sensationalized.
+- Explain the story like a 5-7 minute documentary: hook, context, timeline, what changed, why it matters, competing interpretations, likely next consequences, memorable close.
+- Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
+- Use roughly {min_words}-{max_words} spoken English words.
+- Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
+- Visuals: {LONG_FORM_VISUAL_STYLE_RULES}
+- It is acceptable for later scenes to reuse a visual concept if the narration has moved to a new argument, but still provide a visual_prompt for every scene.
+
+Return raw JSON only using exactly this schema:
+{LONG_FORM_PLAN_SCHEMA}'''
+    LOG.info("Writing long-form current-events documentary plan...")
+    draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.55)))
+    review_prompt = f'''Act as the final long-form fact, structure, and retention editor. Return only JSON.
+Improve the draft below for a {duration}-second horizontal YouTube documentary.
+Return exactly:
+{{"quality_check":{{"timeliness_score":1,"clarity_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{LONG_FORM_PLAN_SCHEMA}}}
+
+Rules:
+- Reject or rewrite any Vietnam-related topic, person, event, or location.
+- Keep only claims supportable by the supplied RSS context or clearly phrased as general background.
+- Keep a strong first 20 seconds, then clear chapters with escalation and explanation.
+- The narration must begin with hook and end with closing_line.
+- The scenes must total exactly {duration} seconds and be horizontal 16:9 visual prompts.
+- Word count must remain roughly {min_words}-{max_words}.
+
+News context: {json.dumps(news_context, ensure_ascii=False)}
+Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
+    LOG.info("Quality pass: checking long-form timeliness, structure, and Vietnam exclusion...")
+    reviewed = extract_json(llm.chat(review_prompt, temperature=0.35))
+    if not isinstance(reviewed.get("plan"), dict):
+        raise BotError("Gemini long-form quality pass thieu truong plan.")
+    plan = ShortPlan.from_dict(reviewed["plan"])
+    combined_text = " ".join([plan.topic, plan.angle, plan.title, plan.description, plan.narration, *plan.source_hints])
+    if mentions_vietnam(combined_text):
+        raise BotError("Long-form plan bi loai vi co noi dung lien quan den Viet Nam.")
+    scene_total = sum(scene.duration for scene in plan.scenes)
+    if abs(scene_total - duration) > 0.1:
+        if abs(scene_total - duration) <= 2 and plan.scenes:
+            plan.scenes[-1].duration = round(plan.scenes[-1].duration + (duration - scene_total), 2)
+        else:
+            raise BotError(f"Gemini chia canh long-form {scene_total:g}s, khong dung muc tieu {duration}s.")
+    words = spoken_word_count(plan.narration)
+    if not min_words <= words <= max_words:
+        raise BotError(f"Kich ban long-form co {words} tu, ngoai khoang {min_words}-{max_words}.")
+    clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
+    clean_hook = re.sub(r"[\W_]+", "", plan.hook).lower()
+    clean_closing = re.sub(r"[\W_]+", "", plan.closing_line).lower()
+    if not clean_narration.startswith(clean_hook):
+        plan.narration = f"{plan.hook} {plan.narration}"
+    if not re.sub(r"[\W_]+", "", plan.narration).lower().endswith(clean_closing):
+        plan.narration = f"{plan.narration} {plan.closing_line}"
+    quality = reviewed.get("quality_check", {})
+    LOG.info(
+        "Long-form plan ready: %r (%d scenes, %d words, timeliness %s/10).",
+        plan.title,
+        len(plan.scenes),
+        spoken_word_count(plan.narration),
+        quality.get("timeliness_score", "?"),
+    )
+    return plan
+
+
+def choose_novel_long_form_plan(
+    llm: GeminiClient,
+    archive: Archive,
+    theme: str,
+    duration: int,
+    min_scenes: int,
+    max_scenes: int,
+    max_attempts: int = 3,
+) -> ShortPlan | None:
+    rejected: list[dict[str, str]] = []
+    news_context = fetch_trending_news_context()
+    for _attempt in range(1, max_attempts + 1):
+        plan = plan_long_form(llm, archive, theme, duration, min_scenes, max_scenes, news_context, rejected)
+        duplicate = archive.duplicate_of(plan, threshold=0.45)
+        if not duplicate:
+            return plan
+        rejected.append(rejection_context(plan, duplicate))
+        print(f"Long-form idea duplicated ({duplicate['title']!r}); requesting a different angle...")
+    return None
 
 
 def plan_social_vietnamese(llm: GeminiClient, plan: ShortPlan, duration: int) -> SocialPlan:
@@ -1027,17 +1268,24 @@ def caption_ass_text(text: str, max_line_chars: int = 24) -> str:
     )
 
 
-def write_ass_captions(cues: list[CaptionCue], destination: Path) -> None:
-    header = """[Script Info]
+def write_ass_captions(
+    cues: list[CaptionCue],
+    destination: Path,
+    play_res_x: int = 1080,
+    play_res_y: int = 1920,
+    font_size: int = 74,
+    margin_v: int = 275,
+) -> None:
+    header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: {play_res_x}
+PlayResY: {play_res_y}
 WrapStyle: 2
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,DejaVu Sans,74,&H00FFFFFF,&H00FFFFFF,&H00000000,&H66000000,-1,0,0,0,100,100,0,0,1,6,1,2,120,120,275,1
+Style: Caption,DejaVu Sans,{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H66000000,-1,0,0,0,100,100,0,0,1,6,1,2,120,120,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1100,7 +1348,12 @@ def run(command: list[str]) -> None:
         raise BotError(f"FFmpeg lỗi: {' '.join(command)}\n{result.stderr[-1500:]}")
 
 
-def create_fallback_scene_image(destination: Path, previous_image: Path | None) -> None:
+def create_fallback_scene_image(
+    destination: Path,
+    previous_image: Path | None,
+    width: int = 1080,
+    height: int = 1920,
+) -> None:
     if previous_image and previous_image.is_file() and previous_image.stat().st_size >= 1024:
         shutil.copyfile(previous_image, destination)
         LOG.warning("Reused previous scene image for %s after image generation failed.", destination.name)
@@ -1110,7 +1363,7 @@ def create_fallback_scene_image(destination: Path, previous_image: Path | None) 
     run([
         "ffmpeg", "-y",
         "-f", "lavfi",
-        "-i", "color=c=0x101820:s=1080x1920",
+        "-i", f"color=c=0x101820:s={width}x{height}",
         "-frames:v", "1",
         "-q:v", "2",
         str(destination),
@@ -1122,6 +1375,44 @@ def media_duration(path: Path) -> float:
     if result.returncode:
         raise BotError(f"Không đọc được thời lượng {path.name}")
     return float(result.stdout.strip())
+
+
+def split_text_for_tts(text: str, max_chars: int = 3800) -> list[str]:
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        candidate = f"{current} {sentence}".strip()
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [text.strip()]
+
+
+def synthesize_narration(
+    tts: GoogleChirpTTS,
+    text: str,
+    destination: Path,
+    output_dir: Path,
+    prefix: str = "narration_part",
+) -> None:
+    chunks = split_text_for_tts(text)
+    if len(chunks) == 1:
+        tts.speech(text, destination)
+        return
+    parts: list[Path] = []
+    for index, chunk in enumerate(chunks, start=1):
+        part = output_dir / f"{prefix}_{index:02d}.mp3"
+        LOG.info("Generating narration chunk %d/%d...", index, len(chunks))
+        tts.speech(chunk, part)
+        parts.append(part)
+    concat = output_dir / f"{prefix}_concat.txt"
+    concat.write_text("".join(f"file '{part.resolve().as_posix()}'\n" for part in parts), encoding="utf-8")
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(destination)])
 
 
 def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_dir: Path, target_duration: int) -> Path:
@@ -1189,6 +1480,100 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
     LOG.info("Generated %d English caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     final_video = output_dir / "short.mp4"
     LOG.info("Muxing narration, captions, and final video…")
+    mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration)
+    return final_video
+
+
+def long_form_image_path(output_dir: Path, index: int) -> Path:
+    return output_dir / f"long_scene_{index:02d}.jpg"
+
+
+def long_form_assets_ready(plan: ShortPlan, output_dir: Path) -> bool:
+    return all(long_form_image_path(output_dir, index).is_file() for index in range(1, len(plan.scenes) + 1))
+
+
+def prepare_long_form_images(plan: ShortPlan, client: Pollinations, output_dir: Path, image_budget: int) -> int:
+    generated = 0
+    previous_image: Path | None = None
+    for index, scene in enumerate(plan.scenes, start=1):
+        image_file = long_form_image_path(output_dir, index)
+        if image_file.is_file() and image_file.stat().st_size >= 1024:
+            previous_image = image_file
+            continue
+        if generated >= image_budget:
+            break
+        try:
+            client.image(
+                image_scene_prompt_horizontal(scene.visual_prompt),
+                image_file,
+                seed=int(time.time()) + index,
+                width=1920,
+                height=1080,
+            )
+        except PollinationsTransientError as exc:
+            LOG.warning("Long-form image %d failed; using fallback image: %s", index, exc)
+            create_fallback_scene_image(image_file, previous_image, width=1920, height=1080)
+        if image_file.stat().st_size < 1024:
+            raise BotError(f"Long-form scene {index} did not produce a valid image.")
+        previous_image = image_file
+        generated += 1
+    LOG.info("Prepared %d long-form image(s); %d/%d ready.", generated, sum(1 for i in range(1, len(plan.scenes) + 1) if long_form_image_path(output_dir, i).is_file()), len(plan.scenes))
+    return generated
+
+
+def render_long_form_from_assets(plan: ShortPlan, tts: GoogleChirpTTS, output_dir: Path, target_duration: int) -> Path:
+    require_tools()
+    if not long_form_assets_ready(plan, output_dir):
+        raise BotError("Long-form images are not complete yet; run --long-form-mode prepare first.")
+    LOG.info("Rendering horizontal long-form video with %d scenes...", len(plan.scenes))
+    clips: list[Path] = []
+    for index, scene in enumerate(plan.scenes, start=1):
+        image_file = long_form_image_path(output_dir, index)
+        clip = output_dir / f"long_scene_{index:02d}.mp4"
+        frames = int(scene.duration * 30)
+        zoom_filter = (
+            "scale=3840:-1,"
+            f"zoompan=z='min(zoom+0.00045,1.18)':d={frames}:"
+            "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080,fps=30"
+        )
+        run([
+            "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
+            "-t", str(scene.duration),
+            "-vf", zoom_filter,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+            str(clip),
+        ])
+        clips.append(clip)
+
+    concat = output_dir / "long_clips.txt"
+    concat.write_text("".join(f"file '{clip.resolve().as_posix()}'\n" for clip in clips), encoding="utf-8")
+    visuals = output_dir / "long_visuals.mp4"
+    video_filter = (
+        "scale=1920:1080:force_original_aspect_ratio=increase,"
+        "crop=1920:1080,fps=30,"
+        f"tpad=stop_mode=clone:stop_duration={target_duration},"
+        f"trim=duration={target_duration},setpts=PTS-STARTPTS,format=yuv420p,"
+        "unsharp=5:5:1.0:5:5:0.0"
+    )
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)])
+
+    narration = output_dir / "long_narration.mp3"
+    LOG.info("Generating long-form English narration...")
+    synthesize_narration(tts, plan.narration, narration, output_dir, prefix="long_narration_part")
+    narration_seconds = media_duration(narration)
+    if narration_seconds > target_duration + 0.4:
+        tempo = min(1.25, narration_seconds / target_duration)
+        adjusted = output_dir / "long_narration_fit.mp3"
+        run(["ffmpeg", "-y", "-i", str(narration), "-filter:a", f"atempo={tempo:.4f}", str(adjusted)])
+        narration = adjusted
+        narration_seconds = media_duration(narration)
+
+    captions = output_dir / "long_captions_en.ass"
+    caption_seconds = min(narration_seconds, target_duration)
+    cues = caption_cues_from_text(plan.narration, caption_seconds)
+    write_ass_captions(cues, captions, play_res_x=1920, play_res_y=1080, font_size=58, margin_v=92)
+    final_video = output_dir / "long.mp4"
+    LOG.info("Muxing horizontal long-form video...")
     mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration)
     return final_video
 
@@ -1568,6 +1953,175 @@ def prepare_social_video(plan: ShortPlan, llm: GeminiClient, tts: GoogleChirpTTS
     return social_video, social
 
 
+def long_form_state_file() -> Path:
+    return DATA_DIR / "generated" / "long_form_current.json"
+
+
+def load_long_form_state() -> dict[str, Any] | None:
+    state_file = long_form_state_file()
+    if not state_file.is_file():
+        return None
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise BotError(f"Long-form state file is invalid JSON: {state_file}") from exc
+    if not isinstance(state, dict):
+        raise BotError(f"Long-form state file has invalid shape: {state_file}")
+    return state
+
+
+def save_long_form_state(state: dict[str, Any]) -> None:
+    state_file = long_form_state_file()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clear_long_form_state() -> None:
+    state_file = long_form_state_file()
+    if state_file.is_file():
+        state_file.unlink()
+
+
+def create_long_form_job(
+    llm: GeminiClient,
+    archive: Archive,
+    theme: str,
+    settings: Settings,
+) -> tuple[dict[str, Any], ShortPlan, Path, int]:
+    min_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
+    max_duration = max(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
+    min_scenes = min(settings.long_form_min_scenes, settings.long_form_max_scenes)
+    max_scenes = max(settings.long_form_min_scenes, settings.long_form_max_scenes)
+    duration = random.randint(min_duration, max_duration)
+    plan = choose_novel_long_form_plan(llm, archive, theme, duration, min_scenes, max_scenes)
+    if plan is None:
+        raise BotError("Could not create a novel long-form plan after retries.")
+    output_dir = DATA_DIR / "generated" / f"long-{datetime.now():%Y%m%d-%H%M%S}-{slug(plan.topic)}"
+    output_dir.mkdir(parents=True)
+    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    record_id = archive.reserve(plan, output_dir)
+    state = {
+        "record_id": record_id,
+        "duration": duration,
+        "output_dir": str(output_dir),
+        "created_at": datetime.now(UTC).isoformat(),
+        "status": "assets_pending",
+    }
+    save_long_form_state(state)
+    LOG.info("Created long-form job: %s (%ds)", output_dir, duration)
+    return state, plan, output_dir, duration
+
+
+def load_long_form_job() -> tuple[dict[str, Any], ShortPlan, Path, int] | None:
+    state = load_long_form_state()
+    if not state:
+        return None
+    output_dir = Path(str(state.get("output_dir") or ""))
+    plan_file = output_dir / "plan.json"
+    if not output_dir.is_dir() or not plan_file.is_file():
+        raise BotError(f"Long-form job points to missing output directory or plan: {output_dir}")
+    plan = ShortPlan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
+    duration = int(state.get("duration") or round(sum(scene.duration for scene in plan.scenes)))
+    return state, plan, output_dir, duration
+
+
+def local_hour_for_long_form(settings: Settings) -> int:
+    try:
+        now = datetime.now(ZoneInfo(settings.long_form_timezone))
+    except Exception:
+        LOG.warning("Invalid LONG_FORM_TIMEZONE=%s; falling back to UTC.", settings.long_form_timezone)
+        now = datetime.now(UTC)
+    return now.hour
+
+
+def publish_long_form_video(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> dict[str, str]:
+    results: dict[str, str] = {}
+    youtube_id = upload_to_youtube(video, plan, settings, privacy)
+    results["youtube"] = youtube_id
+    if settings.publish_facebook:
+        facebook_plan = SocialPlan(
+            title=plan.title,
+            description=plan.description,
+            tags=plan.tags,
+            narration=plan.narration,
+        )
+        results["facebook"] = upload_to_facebook_page(video, facebook_plan, settings)
+    return results
+
+
+def run_long_form_flow(
+    mode: str,
+    publish: bool,
+    privacy: str,
+    theme: str,
+    settings: Settings,
+    archive: Archive,
+    llm: GeminiClient,
+    pollinations: Pollinations,
+    tts: GoogleChirpTTS,
+    force_new: bool = False,
+    image_budget: int | None = None,
+) -> int:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    budget = image_budget or settings.long_form_image_budget_per_run
+    if force_new:
+        clear_long_form_state()
+    loaded = load_long_form_job()
+    if loaded is None:
+        if mode == "finalize":
+            LOG.warning("No long-form job is waiting to finalize.")
+            return 0
+        if settings.long_form_daily_limit > 0 and archive.long_form_jobs_created_today() >= settings.long_form_daily_limit:
+            LOG.warning(
+                "Long-form daily limit reached: %d/%d job(s) already created today.",
+                archive.long_form_jobs_created_today(),
+                settings.long_form_daily_limit,
+            )
+            return 0
+        loaded = create_long_form_job(llm, archive, theme, settings)
+    state, plan, output_dir, duration = loaded
+
+    if mode in {"prepare", "auto"}:
+        prepare_long_form_images(plan, pollinations, output_dir, budget)
+        state["status"] = "assets_ready" if long_form_assets_ready(plan, output_dir) else "assets_pending"
+        save_long_form_state(state)
+
+    ready = long_form_assets_ready(plan, output_dir)
+    should_finalize = mode == "finalize" or (
+        mode == "auto" and ready and local_hour_for_long_form(settings) >= settings.long_form_finalize_hour
+    )
+    if not should_finalize:
+        LOG.info(
+            "Long-form job is %s. Ready=%s. Finalize hour=%s local time.",
+            state.get("status", "assets_pending"),
+            ready,
+            settings.long_form_finalize_hour,
+        )
+        return 0
+    if not ready:
+        LOG.warning("Long-form job is not ready to finalize; run prepare again.")
+        return 0
+
+    record_id = int(state["record_id"])
+    rendered = False
+    try:
+        video = render_long_form_from_assets(plan, tts, output_dir, duration)
+        rendered = True
+        archive.mark(record_id, "rendered")
+        print(f"Rendered long-form video: {video}")
+        if publish:
+            results = publish_long_form_video(video, plan, settings, privacy)
+            archive.mark(record_id, "published", results.get("youtube"))
+            print(f"Published long-form video: {results}")
+            if settings.youtube_token.exists():
+                archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
+        clear_long_form_state()
+    except Exception:
+        archive.mark(record_id, "upload_failed" if rendered else "failed")
+        raise
+    return 0
+
+
 def slug(value: str) -> str:
     simple = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]+", "-", simple).strip("-")[:42] or "short"
@@ -1599,6 +2153,10 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Chỉ tạo và in kế hoạch")
     parser.add_argument("--upload-file", type=Path, help="Upload lại MP4 đã render, không tạo nội dung/video mới")
     parser.add_argument("--scheduled", action="store_true", help="Bật giới hạn an toàn theo SCHEDULED_DAILY_LIMIT mỗi ngày UTC")
+    parser.add_argument("--long-form", action="store_true", help="Run the staged horizontal long-form video pipeline")
+    parser.add_argument("--long-form-mode", choices=("prepare", "finalize", "auto"), default="auto")
+    parser.add_argument("--long-form-image-budget", type=int, help="Max long-form images to create in this run")
+    parser.add_argument("--long-form-force-new", action="store_true", help="Discard the current staged long-form job and start a new one")
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     args = parser.parse_args()
     configure_logging(args.log_level)
@@ -1618,6 +2176,20 @@ def main() -> int:
     pollinations = Pollinations(settings)
     gemini = GeminiClient(settings)
     tts = GoogleChirpTTS(settings)
+    if args.long_form:
+        return run_long_form_flow(
+            mode=args.long_form_mode,
+            publish=args.publish,
+            privacy=args.privacy_status or settings.youtube_privacy,
+            theme=args.theme,
+            settings=settings,
+            archive=archive,
+            llm=gemini,
+            pollinations=pollinations,
+            tts=tts,
+            force_new=args.long_form_force_new,
+            image_budget=args.long_form_image_budget,
+        )
     if args.upload_file:
         if not args.publish:
             parser.error("--upload-file requires --publish")

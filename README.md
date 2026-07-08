@@ -119,3 +119,40 @@ Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload
 Không thêm `BOT_DATA_DIR=.` vào Railway Variables: điều đó sẽ làm bot ghi dữ liệu vào filesystem tạm thay vì Volume. Để kiểm tra file trên Volume, Railway CLI hỗ trợ `railway volume files list /`.
 
 Railway Cron yêu cầu process hoàn tất và thoát; bot đã là one-shot process. Nếu một lần render/upload chưa xong khi lượt Cron kế tiếp đến, Railway sẽ bỏ qua lượt mới. [Railway Cron Jobs](https://docs.railway.com/cron-jobs) · [Railway Volumes](https://docs.railway.com/volumes)
+
+## Long-form horizontal videos
+
+Bot also supports a separate staged pipeline for one 5-7 minute horizontal video per day:
+
+```powershell
+python youtube_shorts_bot.py --long-form --long-form-mode auto --publish
+```
+
+Modes:
+
+- `prepare`: create or resume today's long-form job and generate up to `LONG_FORM_IMAGE_BUDGET_PER_RUN` missing 16:9 images.
+- `finalize`: render/upload only when all images are ready.
+- `auto`: prepare first, then finalize only when all images are ready and local time is at or after `LONG_FORM_FINALIZE_HOUR`.
+
+Recommended Railway Cron for a separate long-form service:
+
+```text
+0 1,5,13 * * *
+```
+
+That maps roughly to 08:00, 12:00, and 20:00 Vietnam time. The morning/noon runs collect images, while the evening run finalizes and uploads if the image set is complete. Avoid scheduling this at the same UTC hours as the Short service so Pollinations quota remains available for Shorts.
+
+Long-form config:
+
+```dotenv
+LONG_FORM_MIN_DURATION_SECONDS=300
+LONG_FORM_MAX_DURATION_SECONDS=420
+LONG_FORM_IMAGE_BUDGET_PER_RUN=10
+LONG_FORM_MIN_SCENES=14
+LONG_FORM_MAX_SCENES=20
+LONG_FORM_FINALIZE_HOUR=18
+LONG_FORM_TIMEZONE=Asia/Bangkok
+LONG_FORM_DAILY_LIMIT=1
+```
+
+Long-form uses public Google News RSS headlines as current-event leads across world news, politics, economy, technology, sports, and science. The planner rejects Vietnam-related topics, people, locations, and events before rendering. Since staged assets must survive between cron runs, use a Railway Volume or another persistent `BOT_DATA_DIR` for the long-form service; the PostgreSQL-only/no-Volume setup is good for Shorts but cannot reliably keep partially generated images across separate cron containers.

@@ -357,6 +357,107 @@ def test_create_fallback_scene_image_reuses_previous_image(tmp_path):
     assert destination.read_bytes() == previous.read_bytes()
 
 
+def test_mentions_vietnam_blocks_related_text():
+    assert bot.mentions_vietnam("A headline about Hanoi politics")
+    assert not bot.mentions_vietnam("A headline about European energy markets")
+
+
+def test_split_text_for_tts_chunks_long_script():
+    text = " ".join(f"Sentence {index} ends here." for index in range(300))
+
+    chunks = bot.split_text_for_tts(text, max_chars=500)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 560 for chunk in chunks)
+
+
+def test_plan_long_form_accepts_current_events_documentary(tmp_path):
+    narration = (
+        "This shipping shock is now bigger than one canal. "
+        + " ".join("Energy prices, insurance costs, rerouted ships, and military risk are changing global trade." for _ in range(60))
+        + " The real story is not one headline, but the fragile map underneath modern commerce."
+    )
+    plan = {
+        "topic": "Red Sea shipping disruption",
+        "angle": "How rerouted ships expose fragile trade networks",
+        "title": "The Shipping Crisis Rewriting Global Trade",
+        "description": "A current-events documentary explainer. AI-assisted production. #Economy #Geopolitics",
+        "tags": ["Economy", "Geopolitics"],
+        "hook": "This shipping shock is now bigger than one canal.",
+        "narration": narration,
+        "closing_line": "The real story is not one headline, but the fragile map underneath modern commerce.",
+        "scenes": [
+            {"duration": 75, "visual_prompt": "A container ship crossing rough open water at sunrise."},
+            {"duration": 75, "visual_prompt": "A port crane silhouetted against a busy global shipping terminal."},
+            {"duration": 75, "visual_prompt": "An abstract insurance ledger beside a nautical chart without readable text."},
+            {"duration": 75, "visual_prompt": "A wide documentary view of stacked containers under storm clouds."},
+        ],
+        "fact_note": "Avoids precise casualty, price, or route claims not in the supplied context.",
+        "source_hints": ["Google News RSS shipping headlines"],
+    }
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = [
+                plan,
+                {"quality_check": {"timeliness_score": 8, "clarity_score": 9}, "plan": plan},
+            ]
+
+        def chat(self, _prompt, temperature=0.55):
+            return json.dumps(self.responses.pop(0))
+
+    result = bot.plan_long_form(
+        FakeClient(),
+        bot.Archive(tmp_path / "shorts.db"),
+        "global current events",
+        300,
+        4,
+        4,
+        [{"category": "world", "title": "Shipping routes face renewed pressure", "summary": "Global route disruptions continue."}],
+    )
+
+    assert result.title == plan["title"]
+    assert sum(scene.duration for scene in result.scenes) == 300
+
+
+def test_prepare_long_form_images_respects_budget(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic",
+        "angle": "Angle",
+        "title": "Title",
+        "description": "Description #A #B",
+        "tags": ["A", "B"],
+        "hook": "Hook.",
+        "narration": "Hook. Body. Close.",
+        "closing_line": "Close.",
+        "scenes": [
+            {"duration": 10, "visual_prompt": "Scene one"},
+            {"duration": 10, "visual_prompt": "Scene two"},
+            {"duration": 10, "visual_prompt": "Scene three"},
+        ],
+        "fact_note": "Fact note",
+        "source_hints": ["Source"],
+    })
+
+    class FakePollinations:
+        def __init__(self):
+            self.calls = []
+
+        def image(self, prompt, destination, seed, width=1080, height=1920):
+            self.calls.append((prompt, destination.name, width, height))
+            destination.write_bytes(b"i" * 2048)
+
+    client = FakePollinations()
+
+    generated = bot.prepare_long_form_images(plan, client, tmp_path, image_budget=2)
+
+    assert generated == 2
+    assert len(client.calls) == 2
+    assert client.calls[0][2:] == (1920, 1080)
+    assert (tmp_path / "long_scene_01.jpg").is_file()
+    assert not (tmp_path / "long_scene_03.jpg").exists()
+
+
 def test_tts_language_code_supports_english_and_vietnamese_voices():
     assert bot.GoogleChirpTTS.language_code_for_voice("en-US-Chirp3-HD-Achernar") == "en-US"
     assert bot.GoogleChirpTTS.language_code_for_voice("vi-VN-Standard-A") == "vi-VN"
@@ -608,4 +709,3 @@ def test_ensure_dejavu_font_creates_files(tmp_path, monkeypatch):
     assert config_file.is_file()
     assert font_file.stat().st_size > 500000
     assert "FONTCONFIG_FILE" in os.environ
-

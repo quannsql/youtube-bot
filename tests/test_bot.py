@@ -280,6 +280,83 @@ def test_pollinations_image_falls_back_to_grok_key_on_quota_error(tmp_path, monk
     assert destination.read_bytes() == b"y" * 2048
 
 
+def test_pollinations_image_skips_exhausted_key_on_retry(tmp_path, monkeypatch):
+    authorizations = []
+    grok_calls = {"count": 0}
+
+    class FakeQuotaResponse:
+        ok = False
+        status_code = 402
+        text = "insufficient balance"
+
+    class FakeImageResponse:
+        ok = True
+
+        def iter_content(self, _chunk_size):
+            yield b"z" * 2048
+
+    def fake_request(*_args, **kwargs):
+        authorization = kwargs["headers"]["Authorization"]
+        authorizations.append(authorization)
+        if authorization == "Bearer video":
+            return FakeQuotaResponse()
+        grok_calls["count"] += 1
+        if grok_calls["count"] == 1:
+            raise requests.Timeout("read timed out")
+        return FakeImageResponse()
+
+    monkeypatch.setattr(bot.requests, "request", fake_request)
+    settings = bot.Settings(
+        grok_api_key="grok",
+        video_api_key="video",
+        video_scene_attempts=2,
+        video_scene_retry_backoff_seconds=0,
+    )
+    destination = tmp_path / "scene_1.jpg"
+
+    bot.Pollinations(settings).image("a prompt", destination, seed=123)
+
+    assert authorizations == ["Bearer video", "Bearer grok", "Bearer grok"]
+    assert destination.read_bytes() == b"z" * 2048
+
+
+def test_pollinations_image_does_not_use_empty_grok_fallback(tmp_path, monkeypatch):
+    authorizations = []
+
+    class FakeQuotaResponse:
+        ok = False
+        status_code = 402
+        text = "insufficient balance"
+
+    def fake_request(*_args, **kwargs):
+        authorizations.append(kwargs["headers"]["Authorization"])
+        return FakeQuotaResponse()
+
+    monkeypatch.setattr(bot.requests, "request", fake_request)
+    settings = bot.Settings(
+        grok_api_key="",
+        video_api_key="video",
+        video_scene_attempts=1,
+        video_scene_retry_backoff_seconds=0,
+    )
+    destination = tmp_path / "scene_1.jpg"
+
+    with pytest.raises(bot.BotError):
+        bot.Pollinations(settings).image("a prompt", destination, seed=123)
+
+    assert authorizations == ["Bearer video"]
+
+
+def test_create_fallback_scene_image_reuses_previous_image(tmp_path):
+    previous = tmp_path / "scene_1.jpg"
+    destination = tmp_path / "scene_2.jpg"
+    previous.write_bytes(b"p" * 2048)
+
+    bot.create_fallback_scene_image(destination, previous)
+
+    assert destination.read_bytes() == previous.read_bytes()
+
+
 def test_tts_language_code_supports_english_and_vietnamese_voices():
     assert bot.GoogleChirpTTS.language_code_for_voice("en-US-Chirp3-HD-Achernar") == "en-US"
     assert bot.GoogleChirpTTS.language_code_for_voice("vi-VN-Standard-A") == "vi-VN"
@@ -531,5 +608,4 @@ def test_ensure_dejavu_font_creates_files(tmp_path, monkeypatch):
     assert config_file.is_file()
     assert font_file.stat().st_size > 500000
     assert "FONTCONFIG_FILE" in os.environ
-
 

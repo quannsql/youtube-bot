@@ -157,7 +157,7 @@ class Settings:
     base_url: str = "https://gen.pollinations.ai"
     image_base_url: str = "https://image.pollinations.ai/prompt"
     pollinations_connect_timeout: int = 30
-    pollinations_read_timeout: int = 600
+    pollinations_read_timeout: int = 180
     video_scene_attempts: int = 3
     video_scene_retry_backoff_seconds: int = 20
     ltx_fallback_to_grok_key: bool = True
@@ -214,7 +214,7 @@ class Settings:
             base_url=os.getenv("POLLINATIONS_BASE_URL", "https://gen.pollinations.ai").rstrip("/"),
             image_base_url=os.getenv("POLLINATIONS_IMAGE_BASE_URL", "https://image.pollinations.ai/prompt").rstrip("/"),
             pollinations_connect_timeout=int(os.getenv("POLLINATIONS_CONNECT_TIMEOUT_SECONDS", "30")),
-            pollinations_read_timeout=int(os.getenv("POLLINATIONS_READ_TIMEOUT_SECONDS", "600")),
+            pollinations_read_timeout=int(os.getenv("POLLINATIONS_READ_TIMEOUT_SECONDS", "180")),
             video_scene_attempts=max(1, int(os.getenv("LTX_SCENE_ATTEMPTS", "3"))),
             video_scene_retry_backoff_seconds=max(0, int(os.getenv("LTX_SCENE_RETRY_BACKOFF_SECONDS", "20"))),
             ltx_fallback_to_grok_key=env_bool("LTX_FALLBACK_TO_GROK_KEY", True),
@@ -512,6 +512,7 @@ class Pollinations:
         self.s = settings
         self.grok_headers = {"Authorization": f"Bearer {settings.grok_api_key}"}
         self.video_headers = {"Authorization": f"Bearer {settings.video_api_key}"}
+        self.exhausted_image_key_labels: set[str] = set()
 
     def _request(self, method: str, url: str, headers: dict[str, str], **kwargs: Any) -> requests.Response:
         LOG.debug("Calling Pollinations %s %s", method, url.split("?", maxsplit=1)[0])
@@ -550,13 +551,20 @@ class Pollinations:
             params["negative_prompt"] = self.s.image_negative_prompt
         partial = destination.with_name(f"{destination.name}.part")
         key_candidates = [("video key", self.video_headers)]
-        if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key != self.s.video_api_key:
+        if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key and self.s.grok_api_key != self.s.video_api_key:
             key_candidates.append(("grok key fallback", self.grok_headers))
         last_error: Exception | None = None
         for attempt in range(1, self.s.video_scene_attempts + 1):
             if partial.exists():
                 partial.unlink()
-            for key_label, headers in key_candidates:
+            available_key_candidates = [
+                (key_label, headers)
+                for key_label, headers in key_candidates
+                if key_label not in self.exhausted_image_key_labels
+            ]
+            if not available_key_candidates:
+                break
+            for key_label, headers in available_key_candidates:
                 LOG.info(
                     "Requesting Image scene: %s with %s (attempt %d/%d)",
                     destination.name,
@@ -585,6 +593,7 @@ class Pollinations:
                     return
                 except PollinationsQuotaError as exc:
                     last_error = exc
+                    self.exhausted_image_key_labels.add(key_label)
                     LOG.warning("Image API %s is out of quota or rate-limited: %s", key_label, exc)
                     if partial.exists():
                         partial.unlink()
@@ -604,7 +613,9 @@ class Pollinations:
                 sleep_for = self.s.video_scene_retry_backoff_seconds * attempt
                 LOG.info("Retrying %s in %ss…", destination.name, sleep_for)
                 time.sleep(sleep_for)
-        raise BotError(f"Image generation failed after {self.s.video_scene_attempts} attempts for {destination.name}: {last_error}")
+        raise PollinationsTransientError(
+            f"Image generation failed after {self.s.video_scene_attempts} attempts for {destination.name}: {last_error}"
+        )
 
 
 class GoogleChirpTTS:
@@ -1089,6 +1100,23 @@ def run(command: list[str]) -> None:
         raise BotError(f"FFmpeg lỗi: {' '.join(command)}\n{result.stderr[-1500:]}")
 
 
+def create_fallback_scene_image(destination: Path, previous_image: Path | None) -> None:
+    if previous_image and previous_image.is_file() and previous_image.stat().st_size >= 1024:
+        shutil.copyfile(previous_image, destination)
+        LOG.warning("Reused previous scene image for %s after image generation failed.", destination.name)
+        return
+
+    LOG.warning("Creating a neutral fallback image for %s after image generation failed.", destination.name)
+    run([
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", "color=c=0x101820:s=1080x1920",
+        "-frames:v", "1",
+        "-q:v", "2",
+        str(destination),
+    ])
+
+
 def media_duration(path: Path) -> float:
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)], text=True, capture_output=True)
     if result.returncode:
@@ -1100,13 +1128,19 @@ def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_di
     require_tools()
     LOG.info("Rendering %d scenes into %s", len(plan.scenes), output_dir)
     clips: list[Path] = []
+    previous_image: Path | None = None
     for index, scene in enumerate(plan.scenes, start=1):
         image_file = output_dir / f"scene_{index}.jpg"
         clip = output_dir / f"scene_{index}.mp4"
-        client.image(image_scene_prompt(scene.visual_prompt), image_file, seed=int(time.time()) + index)
+        try:
+            client.image(image_scene_prompt(scene.visual_prompt), image_file, seed=int(time.time()) + index)
+        except PollinationsTransientError as exc:
+            LOG.warning("Image generation for scene %d failed; using fallback image: %s", index, exc)
+            create_fallback_scene_image(image_file, previous_image)
         if image_file.stat().st_size < 1024:
             raise BotError(f"Cảnh {index} không phải hình ảnh hợp lệ.")
         
+        previous_image = image_file
         LOG.info("Image %d ready. Converting to video clip with Ken Burns effect...", index)
         frames = int(scene.duration * 30)
         zoom_filter = f"scale=3840:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"

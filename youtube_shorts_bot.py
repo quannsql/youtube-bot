@@ -1,4 +1,4 @@
-"""Generate factual, artistic English YouTube Shorts with Pollinations and FFmpeg.
+"""Generate factual, artistic English YouTube videos with OpenAI Images and FFmpeg.
 
 The script intentionally separates planning, rendering, and publishing.  It never
 uploads unless --publish is supplied, but a scheduled task can use that flag.
@@ -22,12 +22,10 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
-from google import genai
-from google.genai import types
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -52,14 +50,10 @@ class BotError(RuntimeError):
     pass
 
 
-class PollinationsTransientError(BotError):
+class ImageGenerationTransientError(BotError):
     def __init__(self, message: str, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
-
-
-class PollinationsQuotaError(PollinationsTransientError):
-    pass
 
 
 class FacebookAPIError(BotError):
@@ -83,12 +77,6 @@ def env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def looks_like_quota_error(status_code: int, detail: str) -> bool:
-    lowered = detail.lower()
-    quota_terms = ("quota", "credit", "balance", "pollen", "limit", "rate", "too many", "insufficient")
-    return status_code in {402, 429} or (status_code in {400, 403} and any(term in lowered for term in quota_terms))
 
 
 def materialize_credential_file(env_name: str, destination: Path) -> None:
@@ -153,36 +141,40 @@ def ensure_dejavu_font() -> None:
 
 @dataclass(frozen=True)
 class Settings:
-    gemini_api_key: str = ""
-    grok_api_key: str = ""
-    video_api_key: str = ""
-    base_url: str = "https://gen.pollinations.ai"
-    image_base_url: str = "https://image.pollinations.ai/prompt"
-    pollinations_connect_timeout: int = 30
-    pollinations_read_timeout: int = 180
-    video_scene_attempts: int = 3
-    video_scene_retry_backoff_seconds: int = 20
-    ltx_fallback_to_grok_key: bool = True
+    openai_api_key: str = ""
+    brave_search_api_key: str = ""
+    openai_text_endpoint: str = "https://api.openai.com/v1/responses"
+    openai_image_endpoint: str = "https://api.openai.com/v1/images/generations"
+    text_model: str = "gpt-5.4-mini"
+    text_reasoning_effort: str = "low"
+    text_long_form_reasoning_effort: str = "medium"
+    text_max_output_tokens: int = 16000
+    text_connect_timeout: int = 30
+    text_read_timeout: int = 300
+    text_attempts: int = 3
+    text_retry_backoff_seconds: int = 5
+    brave_image_search_endpoint: str = "https://api.search.brave.com/res/v1/images/search"
+    image_connect_timeout: int = 30
+    image_read_timeout: int = 180
+    image_attempts: int = 3
+    image_retry_backoff_seconds: int = 10
+    brave_web_images_per_short: int = 2
+    brave_web_images_per_long_form: int = 5
+    long_form_openai_images: int = 10
     language: str = "en"
     duration: int = 20
     long_form_min_duration_seconds: int = 300
     long_form_max_duration_seconds: int = 420
-    long_form_image_budget_per_run: int = 10
-    long_form_min_scenes: int = 14
-    long_form_max_scenes: int = 20
-    long_form_finalize_hour: int = 18
+    long_form_min_scenes: int = 15
+    long_form_max_scenes: int = 15
     long_form_timezone: str = "Asia/Bangkok"
-    long_form_daily_limit: int = 1
-    scheduled_daily_limit: int = 3
-    text_model: str = "grok-large"
-    image_model: str = "klein"
-    image_enhance: bool = False
+    long_form_interval_days: int = 2
+    scheduled_daily_limit: int = 2
+    image_model: str = "gpt-image-2"
+    image_quality: str = "low"
+    image_vertical_size: str = "1024x1536"
+    image_horizontal_size: str = "1536x1024"
     allow_image_fallback_placeholder: bool = False
-    image_negative_prompt: str = (
-        "iron fence, metal railing, chain-link fence, bars, cage, grid, prison bars, "
-        "text, watermark, signature, caption, letters, logo, human face, crowd, "
-        "deformed, blurry, low quality, oversaturated"
-    )
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
     google_tts_voice: str = "en-US-Chirp3-HD-Achernar"
     google_tts_speaking_rate: float = 1.05
@@ -205,45 +197,52 @@ class Settings:
 
     @classmethod
     def from_env(cls, duration_override: int | None = None) -> "Settings":
-        gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
-        grok_api_key = os.getenv("POLLINATIONS_GROK_API_KEY", "").strip()
-        video_api_key = os.getenv("POLLINATIONS_VIDEO_API_KEY", "").strip()
-        if not gemini_api_key:
-            raise BotError("Thiếu GEMINI_API_KEY.")
-        if not video_api_key:
-            raise BotError("Thiếu POLLINATIONS_VIDEO_API_KEY.")
+        openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        brave_long_form_images = min(10, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "5"))))
+        if not openai_api_key:
+            raise BotError("Thiếu OPENAI_API_KEY cho OpenAI text và GPT Image 2.")
         duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "60"))
         if not MIN_SHORT_DURATION_SECONDS <= duration <= MAX_SHORT_DURATION_SECONDS:
             raise BotError(
                 f"SHORT_DURATION_SECONDS phải nằm trong "
                 f"{MIN_SHORT_DURATION_SECONDS}–{MAX_SHORT_DURATION_SECONDS} giây."
             )
+        text_reasoning_effort = os.getenv("OPENAI_TEXT_REASONING_EFFORT", "low").strip() or "low"
+        text_long_form_reasoning_effort = (
+            os.getenv("OPENAI_TEXT_LONG_FORM_REASONING_EFFORT", "medium").strip() or "medium"
+        )
+        allowed_reasoning_efforts = {"none", "low", "medium", "high", "xhigh"}
+        if text_reasoning_effort not in allowed_reasoning_efforts:
+            raise BotError("OPENAI_TEXT_REASONING_EFFORT phải là none, low, medium, high hoặc xhigh.")
+        if text_long_form_reasoning_effort not in allowed_reasoning_efforts:
+            raise BotError("OPENAI_TEXT_LONG_FORM_REASONING_EFFORT phải là none, low, medium, high hoặc xhigh.")
         return cls(
-            gemini_api_key=gemini_api_key,
-            grok_api_key=grok_api_key,
-            video_api_key=video_api_key,
-            base_url=os.getenv("POLLINATIONS_BASE_URL", "https://gen.pollinations.ai").rstrip("/"),
-            image_base_url=os.getenv("POLLINATIONS_IMAGE_BASE_URL", "https://image.pollinations.ai/prompt").rstrip("/"),
-            pollinations_connect_timeout=int(os.getenv("POLLINATIONS_CONNECT_TIMEOUT_SECONDS", "30")),
-            pollinations_read_timeout=int(os.getenv("POLLINATIONS_READ_TIMEOUT_SECONDS", "180")),
-            video_scene_attempts=max(1, int(os.getenv("LTX_SCENE_ATTEMPTS", "3"))),
-            video_scene_retry_backoff_seconds=max(0, int(os.getenv("LTX_SCENE_RETRY_BACKOFF_SECONDS", "20"))),
-            ltx_fallback_to_grok_key=env_bool("LTX_FALLBACK_TO_GROK_KEY", True),
+            openai_api_key=openai_api_key,
+            brave_search_api_key=os.getenv("BRAVE_SEARCH_API_KEY", "").strip(),
+            text_model=os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini",
+            text_reasoning_effort=text_reasoning_effort,
+            text_long_form_reasoning_effort=text_long_form_reasoning_effort,
+            text_max_output_tokens=max(1024, int(os.getenv("OPENAI_TEXT_MAX_OUTPUT_TOKENS", "16000"))),
+            text_connect_timeout=max(1, int(os.getenv("OPENAI_TEXT_CONNECT_TIMEOUT_SECONDS", "30"))),
+            text_read_timeout=max(1, int(os.getenv("OPENAI_TEXT_READ_TIMEOUT_SECONDS", "300"))),
+            text_attempts=max(1, int(os.getenv("OPENAI_TEXT_ATTEMPTS", "3"))),
+            text_retry_backoff_seconds=max(0, int(os.getenv("OPENAI_TEXT_RETRY_BACKOFF_SECONDS", "5"))),
+            image_connect_timeout=int(os.getenv("IMAGE_CONNECT_TIMEOUT_SECONDS", "30")),
+            image_read_timeout=int(os.getenv("IMAGE_READ_TIMEOUT_SECONDS", "180")),
+            image_attempts=max(1, int(os.getenv("OPENAI_IMAGE_ATTEMPTS", "3"))),
+            image_retry_backoff_seconds=max(0, int(os.getenv("OPENAI_IMAGE_RETRY_BACKOFF_SECONDS", "10"))),
+            brave_web_images_per_short=min(6, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_SHORT", "2")))),
+            brave_web_images_per_long_form=brave_long_form_images,
             language=os.getenv("SHORT_LANGUAGE", "en"),
             duration=duration,
             long_form_min_duration_seconds=max(60, int(os.getenv("LONG_FORM_MIN_DURATION_SECONDS", "300"))),
             long_form_max_duration_seconds=max(60, int(os.getenv("LONG_FORM_MAX_DURATION_SECONDS", "420"))),
-            long_form_image_budget_per_run=max(1, int(os.getenv("LONG_FORM_IMAGE_BUDGET_PER_RUN", "10"))),
-            long_form_min_scenes=max(4, int(os.getenv("LONG_FORM_MIN_SCENES", "14"))),
-            long_form_max_scenes=max(4, int(os.getenv("LONG_FORM_MAX_SCENES", "20"))),
-            long_form_finalize_hour=min(23, max(0, int(os.getenv("LONG_FORM_FINALIZE_HOUR", "18")))),
+            long_form_min_scenes=cls.long_form_openai_images + brave_long_form_images,
+            long_form_max_scenes=cls.long_form_openai_images + brave_long_form_images,
             long_form_timezone=os.getenv("LONG_FORM_TIMEZONE", "Asia/Bangkok").strip() or "Asia/Bangkok",
-            long_form_daily_limit=max(0, int(os.getenv("LONG_FORM_DAILY_LIMIT", "1"))),
-            scheduled_daily_limit=max(0, int(os.getenv("SCHEDULED_DAILY_LIMIT", "3"))),
-            image_model=os.getenv("POLLINATIONS_IMAGE_MODEL", "klein").strip() or "klein",
-            image_enhance=env_bool("IMAGE_ENHANCE", False),
+            long_form_interval_days=max(1, int(os.getenv("LONG_FORM_INTERVAL_DAYS", "2"))),
+            scheduled_daily_limit=max(0, int(os.getenv("SCHEDULED_DAILY_LIMIT", "2"))),
             allow_image_fallback_placeholder=env_bool("ALLOW_IMAGE_FALLBACK_PLACEHOLDER", False),
-            image_negative_prompt=os.getenv("IMAGE_NEGATIVE_PROMPT", cls.image_negative_prompt).strip(),
             google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
             google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Achernar"),
             google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
@@ -485,11 +484,16 @@ class Archive:
         today = datetime.now(UTC).date().isoformat()
         if self.is_postgres:
             with self.conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS count FROM shorts WHERE created_at LIKE %s", (today + "%",))
+                cur.execute(
+                    "SELECT COUNT(*) AS count FROM shorts WHERE created_at LIKE %s AND output_path NOT LIKE %s",
+                    (today + "%", "%long-%"),
+                )
                 return int(cur.fetchone()["count"])
         else:
             row = self.conn.execute(
-                "SELECT COUNT(*) AS count FROM shorts WHERE substr(created_at, 1, 10) = ?", (today,)
+                "SELECT COUNT(*) AS count FROM shorts "
+                "WHERE substr(created_at, 1, 10) = ? AND output_path NOT LIKE ?",
+                (today, "%long-%"),
             ).fetchone()
             return int(row["count"])
 
@@ -508,153 +512,354 @@ class Archive:
         ).fetchone()
         return int(row["count"])
 
-
-class GeminiClient:
-    def __init__(self, settings: Settings) -> None:
-        self.s = settings
-        self.client = genai.Client(api_key=settings.gemini_api_key)
-        self.model_name = "gemini-3.1-flash-lite"
-
-    def chat(self, prompt: str, temperature: float = 0.55) -> str:
-        models = [self.model_name, "gemini-2.5-flash", "gemini-2.5-flash-lite"]
-        for attempt, model in enumerate(models):
-            LOG.info(f"Generating content plan with {model}...")
-            try:
-                response = self.client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=temperature,
-                        # tools=[{"google_search": {}}], # Tạm thời tắt Search Tool
-                        system_instruction="You return only valid JSON when asked.",
-                    ),
+    def latest_long_form_created_at(self) -> datetime | None:
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT created_at FROM shorts WHERE output_path LIKE %s "
+                    "AND status IN ('rendered', 'published') ORDER BY created_at DESC LIMIT 1",
+                    ("%long-%",),
                 )
-                if not response.text:
-                    raise BotError("Gemini trả về chuỗi rỗng.")
-                return response.text
-            except Exception as exc:
-                err_str = str(exc)
-                if "429" in err_str and attempt < len(models) - 1:
-                    LOG.warning(f"Model {model} bị lỗi 429 Quota, thử fallback sang {models[attempt+1]}...")
-                    time.sleep(3)
-                    continue
-                if attempt == len(models) - 1:
-                    raise BotError(f"Lỗi Gemini API sau khi thử tất cả model fallback: {exc}") from exc
+                row = cur.fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT created_at FROM shorts WHERE output_path LIKE ? "
+                "AND status IN ('rendered', 'published') ORDER BY created_at DESC LIMIT 1",
+                ("%long-%",),
+            ).fetchone()
+        if not row:
+            return None
+        value = str(row["created_at"])
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-class Pollinations:
+class OpenAITextClient:
+    """Generate JSON planning content through the official OpenAI Responses API."""
+
     def __init__(self, settings: Settings) -> None:
         self.s = settings
-        self.grok_headers = {"Authorization": f"Bearer {settings.grok_api_key}"}
-        self.video_headers = {"Authorization": f"Bearer {settings.video_api_key}"}
-        self.exhausted_image_key_labels: set[str] = set()
-
-    def _request(self, method: str, url: str, headers: dict[str, str], **kwargs: Any) -> requests.Response:
-        LOG.debug("Calling Pollinations %s %s", method, url.split("?", maxsplit=1)[0])
-        try:
-            response = requests.request(
-                method,
-                url,
-                headers=headers,
-                timeout=(self.s.pollinations_connect_timeout, self.s.pollinations_read_timeout),
-                **kwargs,
-            )
-        except requests.RequestException as exc:
-            raise PollinationsTransientError(f"Pollinations request failed: {exc}") from exc
-        if not response.ok:
-            detail = response.text[:800]
-            if looks_like_quota_error(response.status_code, detail):
-                raise PollinationsQuotaError(f"Pollinations {response.status_code}: {detail}", response.status_code)
-            if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
-                raise PollinationsTransientError(f"Pollinations {response.status_code}: {detail}", response.status_code)
-            raise BotError(f"Pollinations {response.status_code}: {detail}")
-        return response
-
-    def image(self, prompt: str, destination: Path, seed: int, width: int = 1080, height: int = 1920) -> None:
-        # Prompt đã kèm sẵn style suffix gọn từ image_scene_prompt; không nối thêm meta/phủ định
-        # vào prompt dương nữa (những phủ định đó bị model hiểu theo nghĩa dương và làm nhiễu ảnh).
-        enhanced_prompt = prompt
-        params = {
-            "model": self.s.image_model,
-            "width": width,
-            "height": height,
-            "seed": seed,
-            "nologo": "true",
-            "enhance": "true" if self.s.image_enhance else "false",
+        self.long_form_reasoning_effort = settings.text_long_form_reasoning_effort
+        self.headers = {
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
         }
-        if self.s.image_negative_prompt:
-            params["negative_prompt"] = self.s.image_negative_prompt
-        partial = destination.with_name(f"{destination.name}.part")
-        key_candidates = [("video key", self.video_headers)]
-        if self.s.ltx_fallback_to_grok_key and self.s.grok_api_key and self.s.grok_api_key != self.s.video_api_key:
-            key_candidates.append(("grok key fallback", self.grok_headers))
+
+    @staticmethod
+    def _error_detail(response: requests.Response) -> str:
+        try:
+            payload = response.json()
+        except (ValueError, requests.JSONDecodeError):
+            return response.text[:500] or "unknown error"
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("code") or error)[:500]
+        return str(payload)[:500]
+
+    @staticmethod
+    def _output_text(payload: dict[str, Any]) -> str:
+        direct = payload.get("output_text")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+
+        parts: list[str] = []
+        for item in payload.get("output", []):
+            if not isinstance(item, dict):
+                continue
+            for content in item.get("content", []):
+                if not isinstance(content, dict):
+                    continue
+                if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                    parts.append(content["text"])
+        return "\n".join(parts).strip()
+
+    def chat(
+        self,
+        prompt: str,
+        temperature: float = 0.55,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        # Keep temperature in the public method for compatibility with the planner.
+        # GPT-5.4 mini uses reasoning effort; temperature is intentionally omitted.
+        del temperature
+        effort = reasoning_effort or self.s.text_reasoning_effort
+        payload = {
+            "model": self.s.text_model,
+            "instructions": "Return only valid JSON. Do not use Markdown fences or add commentary outside the JSON.",
+            "input": prompt,
+            "reasoning": {"effort": effort},
+            "max_output_tokens": self.s.text_max_output_tokens,
+        }
+        retryable_statuses = {408, 409, 429, 500, 502, 503, 504}
         last_error: Exception | None = None
-        for attempt in range(1, self.s.video_scene_attempts + 1):
+        for attempt in range(1, self.s.text_attempts + 1):
+            LOG.info(
+                "Generating content plan with %s (reasoning=%s, attempt %d/%d)...",
+                self.s.text_model,
+                effort,
+                attempt,
+                self.s.text_attempts,
+            )
+            try:
+                response = requests.post(
+                    self.s.openai_text_endpoint,
+                    headers=self.headers,
+                    json=payload,
+                    timeout=(self.s.text_connect_timeout, self.s.text_read_timeout),
+                )
+                if not response.ok:
+                    detail = self._error_detail(response)
+                    error = BotError(f"OpenAI Responses API {response.status_code}: {detail}")
+                    if response.status_code not in retryable_statuses:
+                        raise error
+                    last_error = error
+                else:
+                    try:
+                        response_payload = response.json()
+                    except ValueError as exc:
+                        last_error = BotError("OpenAI Responses API trả về dữ liệu không phải JSON.")
+                        last_error.__cause__ = exc
+                    else:
+                        if response_payload.get("status") == "incomplete":
+                            reason = response_payload.get("incomplete_details", {}).get("reason", "unknown")
+                            last_error = BotError(f"OpenAI text response chưa hoàn tất: {reason}")
+                        else:
+                            text = self._output_text(response_payload)
+                            if text:
+                                return text
+                            last_error = BotError("OpenAI text response không có output_text.")
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+            except BotError:
+                raise
+
+            if attempt < self.s.text_attempts:
+                delay = self.s.text_retry_backoff_seconds * attempt
+                LOG.warning("OpenAI text request failed temporarily: %s; retrying in %ss.", last_error, delay)
+                if delay:
+                    time.sleep(delay)
+
+        raise BotError(
+            f"OpenAI text generation failed after {self.s.text_attempts} attempts: {last_error}"
+        ) from last_error
+
+
+class OpenAIImageClient:
+    """Generate low-cost stills through the official OpenAI Image API."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.s = settings
+        self.headers = {
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def image(self, prompt: str, destination: Path, width: int = 1080, height: int = 1920) -> None:
+        # These two low-quality sizes are the documented ~$0.005 output-price tier for GPT Image 2.
+        size = self.s.image_vertical_size if height > width else self.s.image_horizontal_size
+        payload = {
+            "model": self.s.image_model,
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
+            "quality": self.s.image_quality,
+            "output_format": "jpeg",
+            "output_compression": 90,
+        }
+        partial = destination.with_name(f"{destination.name}.part")
+        last_error: Exception | None = None
+        for attempt in range(1, self.s.image_attempts + 1):
             if partial.exists():
                 partial.unlink()
-            available_key_candidates = [
-                (key_label, headers)
-                for key_label, headers in key_candidates
-                if key_label not in self.exhausted_image_key_labels
-            ]
-            if not available_key_candidates:
-                break
-            for key_label, headers in available_key_candidates:
-                LOG.info(
-                    "Requesting Image scene: %s with %s (attempt %d/%d)",
-                    destination.name,
-                    key_label,
-                    attempt,
-                    self.s.video_scene_attempts,
+            LOG.info(
+                "Requesting GPT Image 2 scene %s at %s/%s (attempt %d/%d; estimated output ~$0.005)",
+                destination.name,
+                size,
+                self.s.image_quality,
+                attempt,
+                self.s.image_attempts,
+            )
+            try:
+                response = requests.post(
+                    self.s.openai_image_endpoint,
+                    headers=self.headers,
+                    json=payload,
+                    timeout=(self.s.image_connect_timeout, self.s.image_read_timeout),
                 )
+                if not response.ok:
+                    detail = response.text[:800]
+                    if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
+                        raise ImageGenerationTransientError(
+                            f"OpenAI Image API {response.status_code}: {detail}", response.status_code
+                        )
+                    raise BotError(f"OpenAI Image API {response.status_code}: {detail}")
+                data = response_json(response)
+                images = data.get("data")
+                encoded = images[0].get("b64_json") if isinstance(images, list) and images else None
+                if not isinstance(encoded, str) or not encoded:
+                    raise ImageGenerationTransientError("OpenAI Image API response is missing data[0].b64_json")
                 try:
-                    response = self._request(
-                        "GET",
-                        f"{self.s.image_base_url}/{quote(enhanced_prompt, safe='')}",
-                        headers=headers,
-                        params=params,
-                        stream=True,
+                    image_bytes = base64.b64decode(encoded, validate=True)
+                except ValueError as exc:
+                    raise ImageGenerationTransientError("OpenAI Image API returned invalid base64 image data") from exc
+                if len(image_bytes) < 1024:
+                    raise ImageGenerationTransientError(
+                        f"OpenAI Image API returned only {len(image_bytes)} bytes for {destination.name}"
                     )
-                    bytes_written = 0
-                    with partial.open("wb") as handle:
-                        for chunk in response.iter_content(1024 * 1024):
-                            if chunk:
-                                handle.write(chunk)
-                                bytes_written += len(chunk)
-                    if bytes_written < 1024:
-                        raise PollinationsTransientError(f"Image API returned only {bytes_written} bytes for {destination.name}")
-                    partial.replace(destination)
-                    LOG.info("Downloaded %s (%.1f MB)", destination.name, bytes_written / (1024 * 1024))
-                    return
-                except PollinationsQuotaError as exc:
-                    last_error = exc
-                    self.exhausted_image_key_labels.add(key_label)
-                    LOG.warning("Image API %s is out of quota or rate-limited: %s", key_label, exc)
-                    if partial.exists():
-                        partial.unlink()
-                    continue
-                except PollinationsTransientError as exc:
-                    last_error = exc
-                    LOG.warning("Image scene failed: %s", exc)
-                    break
-                except requests.RequestException as exc:
-                    last_error = exc
-                    LOG.warning("Image scene stream failed: %s", exc)
-                    break
-                finally:
-                    if partial.exists():
-                        partial.unlink()
-            if attempt < self.s.video_scene_attempts:
-                sleep_for = self.s.video_scene_retry_backoff_seconds * attempt
+                partial.write_bytes(image_bytes)
+                partial.replace(destination)
+                LOG.info("Saved %s from OpenAI (%.1f MB)", destination.name, len(image_bytes) / (1024 * 1024))
+                return
+            except requests.RequestException as exc:
+                last_error = exc
+                LOG.warning("OpenAI image request failed: %s", exc)
+            except ImageGenerationTransientError as exc:
+                last_error = exc
+                LOG.warning("OpenAI image generation failed temporarily: %s", exc)
+            finally:
+                if partial.exists():
+                    partial.unlink()
+            if attempt < self.s.image_attempts:
+                sleep_for = self.s.image_retry_backoff_seconds * attempt
                 LOG.info("Retrying %s in %ss…", destination.name, sleep_for)
                 time.sleep(sleep_for)
-        raise PollinationsTransientError(
-            f"Image generation failed after {self.s.video_scene_attempts} attempts for {destination.name}: {last_error}"
+        raise ImageGenerationTransientError(
+            f"OpenAI image generation failed after {self.s.image_attempts} attempts for {destination.name}: {last_error}"
         )
 
 
+WEB_IMAGE_SOURCE_HOSTS = (
+    "unsplash.com",
+    "pexels.com",
+    "pixabay.com",
+    "wikimedia.org",
+    "wikipedia.org",
+    "nasa.gov",
+    "loc.gov",
+    "si.edu",
+)
+
+
+class BraveImageSearch:
+    """Find optional trusted-source web visuals and retain source pages for attribution."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.s = settings
+        self.used_source_pages: set[str] = set()
+        self.sources: list[dict[str, str]] = []
+
+    @staticmethod
+    def _allowed_url(value: str) -> bool:
+        try:
+            host = (urlparse(value).hostname or "").lower()
+        except ValueError:
+            return False
+        return any(host == allowed or host.endswith(f".{allowed}") for allowed in WEB_IMAGE_SOURCE_HOSTS)
+
+    @staticmethod
+    def _matches_orientation(properties: dict[str, Any], width: int, height: int) -> bool:
+        result_width = properties.get("width")
+        result_height = properties.get("height")
+        if not isinstance(result_width, (int, float)) or not isinstance(result_height, (int, float)):
+            return True
+        return (result_height > result_width) == (height > width)
+
+    def image(self, query: str, destination: Path, width: int, height: int) -> bool:
+        if not self.s.brave_search_api_key:
+            return False
+        try:
+            response = requests.get(
+                self.s.brave_image_search_endpoint,
+                headers={
+                    "Accept": "application/json",
+                    "X-Subscription-Token": self.s.brave_search_api_key,
+                    "User-Agent": "youtube-documentary-bot/1.0",
+                },
+                params={
+                    "q": query[:400],
+                    "count": 20,
+                    "country": "ALL",
+                    "search_lang": "en",
+                    "safesearch": "strict",
+                    "spellcheck": "true",
+                },
+                timeout=(self.s.image_connect_timeout, 30),
+            )
+            response.raise_for_status()
+            results = response_json(response).get("results", [])
+        except Exception as exc:
+            LOG.warning("Brave image search failed; falling back to OpenAI: %s", exc)
+            return False
+
+        for result in results if isinstance(results, list) else []:
+            if not isinstance(result, dict):
+                continue
+            properties = result.get("properties") if isinstance(result.get("properties"), dict) else {}
+            image_url = str(properties.get("url") or "")
+            source_page = str(result.get("url") or result.get("source") or "")
+            if not image_url or source_page in self.used_source_pages:
+                continue
+            if not self._allowed_url(image_url) or not self._allowed_url(source_page):
+                continue
+            if not self._matches_orientation(properties, width, height):
+                continue
+            try:
+                image_response = requests.get(
+                    image_url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; youtube-documentary-bot/1.0)"},
+                    timeout=(self.s.image_connect_timeout, 45),
+                )
+                image_response.raise_for_status()
+                content_type = image_response.headers.get("Content-Type", "").lower()
+                image_bytes = image_response.content
+                if not content_type.startswith("image/") or not 10_000 <= len(image_bytes) <= 25_000_000:
+                    continue
+                destination.write_bytes(image_bytes)
+            except Exception as exc:
+                LOG.debug("Could not download Brave image result %s: %s", image_url, exc)
+                continue
+            self.used_source_pages.add(source_page)
+            self.sources.append({
+                "title": str(result.get("title") or "Web image")[:200],
+                "source_page": source_page,
+                "image_url": image_url,
+            })
+            LOG.info("Downloaded trusted-source web image for %s via Brave Search.", destination.name)
+            return True
+        LOG.info("No suitable trusted Brave image result for %s; using OpenAI.", destination.name)
+        return False
+
+
+class VisualAssetProvider:
+    def __init__(self, settings: Settings) -> None:
+        self.s = settings
+        self.openai = OpenAIImageClient(settings)
+        self.brave = BraveImageSearch(settings)
+
+    @property
+    def web_sources(self) -> list[dict[str, str]]:
+        return self.brave.sources
+
+    def image(
+        self,
+        search_query: str,
+        generation_prompt: str,
+        destination: Path,
+        width: int,
+        height: int,
+        prefer_web: bool,
+        web_only: bool = False,
+    ) -> str:
+        if prefer_web and self.brave.image(search_query, destination, width, height):
+            return "web"
+        if prefer_web and web_only:
+            return "missing"
+        self.openai.image(generation_prompt, destination, width=width, height=height)
+        return "openai"
+
+
 class GoogleChirpTTS:
-    """Google Cloud Chirp 3 HD narration; independent from the Pollinations key."""
+    """Google Cloud Chirp 3 HD narration; independent from the image provider."""
 
     def __init__(self, settings: Settings) -> None:
         self.s = settings
@@ -750,6 +955,7 @@ CURIOSITY_TOPIC_CATEGORIES = [
     "Geography & Extreme Nature: e.g., 'The most dangerous place on earth', 'Unexplained natural phenomena'",
     "Animals & Biology: e.g., 'The immortal jellyfish', 'Animals with mind-control abilities'",
     "Great human inventions, both past and present, e.g., 'the printing press', 'the internet', 'the steam engine'.",
+    "World wonders and architecture, ancient and modern: reveal the engineering, symbolism, construction, or hidden trade-offs behind landmarks such as the Statue of Liberty, the Great Wall, the Three Gorges Dam, temples, bridges, towers, and megaprojects.",
     "Space & the Cosmos: e.g., 'What happens inside a black hole?', 'The coldest place in the universe', 'Why Venus turned deadly'.",
     "Physics & big scientific ideas made simple: e.g., 'Why time slows down near gravity', 'What absolute zero really means', 'How lightning actually forms'.",
     "The human body & mind: e.g., 'What your brain does while you sleep', 'Why we forget', 'The organ we barely understand'.",
@@ -853,11 +1059,11 @@ def extract_json(text: str) -> dict[str, Any]:
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I)
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start < 0 or end < start:
-        raise BotError(f"Gemini không trả JSON: {text[:400]}")
+        raise BotError(f"OpenAI không trả JSON: {text[:400]}")
     try:
         return json.loads(cleaned[start:end + 1])
     except json.JSONDecodeError as exc:
-        raise BotError(f"Gemini trả JSON lỗi: {exc}") from exc
+        raise BotError(f"OpenAI trả JSON lỗi: {exc}") from exc
 
 
 def mentions_vietnam(text: str) -> bool:
@@ -907,7 +1113,7 @@ def fetch_trending_news_context(limit: int = 28) -> list[dict[str, str]]:
 
 
 def research_brief(
-    llm: GeminiClient,
+    llm: OpenAITextClient,
     theme: str,
     topic_rule: str,
     past: list[dict[str, str]] | None = None,
@@ -930,7 +1136,7 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
 
 
 def plan_short(
-    llm: GeminiClient,
+    llm: OpenAITextClient,
     archive: Archive,
     theme: str,
     duration: int,
@@ -959,10 +1165,11 @@ CRITICAL NARRATIVE RULE: The story must strictly follow a 3-part structure:
 2. MIDDLE (Deep Dive): Explain the mystery, scientific cause, or "What if" scenario in clear, simple terms.
 3. ENDING (Conclusion): Provide a satisfying conclusion or a haunting open question.
 Ensure the narration flows logically and is highly accessible to a general audience.
+Use plain spoken language, define any necessary technical term immediately, keep one main idea per sentence, and replace abstract filler with concrete cause-and-effect or scale comparisons. Fully pay off the opening hook before the closing line.
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
-Split scenes into 7 to 10 scenes whose total duration is exactly {duration}; each scene must be 6-7 seconds. For a 60-second Short, use 9 or 10 scenes. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
+Split the story into exactly 6 scenes whose total duration is exactly {duration}. Reusing a visual concept is acceptable when it helps continuity, but every scene still needs a concrete visual_prompt. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, fact_note, and source_hints.
 The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
@@ -974,20 +1181,21 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     review_prompt = f'''Act as the final fact and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
 {{"quality_check":{{"hook_score":1,"clarity_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, and dry topics that lack a strong hook. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. {opener_rule}The narration must begin with hook and end with closing_line. Keep scene durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, and dry topics that lack a strong hook. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. Use plain spoken English and ensure the narration clearly pays off the hook. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
     reviewed = extract_json(llm.chat(review_prompt, temperature=0.4))
     if not isinstance(reviewed.get("plan"), dict):
-        raise BotError("Gemini quality pass thiếu trường plan.")
+        raise BotError("OpenAI quality pass thiếu trường plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
+    normalize_scene_count(plan, 6)
     quality = reviewed.get("quality_check", {})
     LOG.info("Quality pass complete — hook %s/10, clarity %s/10.", quality.get("hook_score", "?"), quality.get("clarity_score", "?"))
     scene_total = sum(scene.duration for scene in plan.scenes)
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if abs(scene_total - duration) > 0.1:
-        raise BotError(f"Gemini chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
+        raise BotError(f"OpenAI chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
     minimum_words, maximum_words = narration_word_bounds(duration)
     if not minimum_words <= words <= maximum_words:
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
@@ -1025,8 +1233,97 @@ def image_scene_prompt_horizontal(visual_prompt: str) -> str:
     return f"{visual_prompt.strip().rstrip('.')}. {LONG_FORM_IMAGE_STYLE_SUFFIX}"
 
 
+def normalize_scene_count(plan: ShortPlan, target_count: int) -> None:
+    """Keep the same timeline while enforcing the visual budget, reusing concepts when needed."""
+    while len(plan.scenes) < target_count:
+        index = max(range(len(plan.scenes)), key=lambda item: plan.scenes[item].duration)
+        scene = plan.scenes[index]
+        first_duration = round(scene.duration / 2, 2)
+        second_duration = round(scene.duration - first_duration, 2)
+        scene.duration = first_duration
+        plan.scenes.insert(index + 1, Scene(duration=second_duration, visual_prompt=scene.visual_prompt))
+    while len(plan.scenes) > target_count:
+        extra = plan.scenes.pop()
+        plan.scenes[-1].duration = round(plan.scenes[-1].duration + extra.duration, 2)
+
+
+def validate_long_form_plan(
+    plan: ShortPlan,
+    duration: int,
+    min_words: int,
+    max_words: int,
+    expected_scene_count: int,
+) -> None:
+    combined_text = " ".join([plan.topic, plan.angle, plan.title, plan.description, plan.narration, *plan.source_hints])
+    if mentions_vietnam(combined_text):
+        raise BotError("Long-form plan bi loai vi co noi dung lien quan den Viet Nam.")
+    scene_total = sum(scene.duration for scene in plan.scenes)
+    if abs(scene_total - duration) > 0.1:
+        if abs(scene_total - duration) <= 2 and plan.scenes:
+            plan.scenes[-1].duration = round(plan.scenes[-1].duration + (duration - scene_total), 2)
+        else:
+            raise BotError(f"OpenAI chia canh long-form {scene_total:g}s, khong dung muc tieu {duration}s.")
+    if len(plan.scenes) != expected_scene_count:
+        raise BotError(
+            f"OpenAI tao {len(plan.scenes)} canh long-form; bot yeu cau dung {expected_scene_count} canh."
+        )
+    words = spoken_word_count(plan.narration)
+    if not min_words <= words <= max_words:
+        raise BotError(f"Kich ban long-form co {words} tu, ngoai khoang {min_words}-{max_words}.")
+
+
+def ensure_long_form_hook_and_closing(plan: ShortPlan) -> None:
+    clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
+    clean_hook = re.sub(r"[\W_]+", "", plan.hook).lower()
+    clean_closing = re.sub(r"[\W_]+", "", plan.closing_line).lower()
+    if not clean_narration.startswith(clean_hook):
+        plan.narration = f"{plan.hook} {plan.narration}"
+    if not re.sub(r"[\W_]+", "", plan.narration).lower().endswith(clean_closing):
+        plan.narration = f"{plan.narration} {plan.closing_line}"
+
+
+def expand_long_form_plan(
+    llm: OpenAITextClient,
+    plan: ShortPlan,
+    duration: int,
+    min_words: int,
+    max_words: int,
+    news_context: list[dict[str, str]],
+) -> ShortPlan:
+    current_words = spoken_word_count(plan.narration)
+    expand_prompt = f'''Act as a senior long-form documentary script doctor. Return only JSON.
+The current plan is too short for a {duration}-second horizontal YouTube video: it has {current_words} words, but it must have {min_words}-{max_words} spoken English words.
+
+Expand ONLY the narration, hook if needed, closing_line if needed, and scene visual prompts if they need to match the expanded chapters. Keep the same topic, title, tags, description, scene count, and scene durations.
+
+Expansion requirements:
+- Write natural spoken documentary prose, not bullet points.
+- Add context, timeline, explanation, stakes, uncertainty, and likely next consequences.
+- Do not invent precise numbers, quotes, dates, casualty figures, scores, or market data not present in the supplied context.
+- Do not mention Vietnam or any Vietnam-related person, place, or event.
+- The narration must begin with hook and end with closing_line.
+- Final narration word count must be {min_words}-{max_words}.
+
+News context: {json.dumps(news_context, ensure_ascii=False)}
+Plan to expand: {json.dumps(plan.to_dict(), ensure_ascii=False)}
+
+Return exactly:
+{{"plan":{LONG_FORM_PLAN_SCHEMA}}}'''
+    LOG.info("Long-form script was too short (%d words). Requesting expansion pass...", current_words)
+    expanded = extract_json(
+        llm.chat(
+            expand_prompt,
+            temperature=0.45,
+            reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+        )
+    )
+    if not isinstance(expanded.get("plan"), dict):
+        raise BotError("OpenAI long-form expansion pass thieu truong plan.")
+    return ShortPlan.from_dict(expanded["plan"])
+
+
 def plan_long_form(
-    llm: GeminiClient,
+    llm: OpenAITextClient,
     archive: Archive,
     theme: str,
     duration: int,
@@ -1065,7 +1362,15 @@ Hard rules:
 Return raw JSON only using exactly this schema:
 {LONG_FORM_PLAN_SCHEMA}'''
     LOG.info("Writing long-form current-events documentary plan...")
-    draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.55)))
+    draft = ShortPlan.from_dict(
+        extract_json(
+            llm.chat(
+                prompt,
+                temperature=0.55,
+                reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+            )
+        )
+    )
     review_prompt = f'''Act as the final long-form fact, structure, and retention editor. Return only JSON.
 Improve the draft below for a {duration}-second horizontal YouTube documentary.
 Return exactly:
@@ -1082,29 +1387,26 @@ Rules:
 News context: {json.dumps(news_context, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking long-form timeliness, structure, and Vietnam exclusion...")
-    reviewed = extract_json(llm.chat(review_prompt, temperature=0.35))
+    reviewed = extract_json(
+        llm.chat(
+            review_prompt,
+            temperature=0.35,
+            reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+        )
+    )
     if not isinstance(reviewed.get("plan"), dict):
-        raise BotError("Gemini long-form quality pass thieu truong plan.")
+        raise BotError("OpenAI long-form quality pass thieu truong plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
-    combined_text = " ".join([plan.topic, plan.angle, plan.title, plan.description, plan.narration, *plan.source_hints])
-    if mentions_vietnam(combined_text):
-        raise BotError("Long-form plan bi loai vi co noi dung lien quan den Viet Nam.")
-    scene_total = sum(scene.duration for scene in plan.scenes)
-    if abs(scene_total - duration) > 0.1:
-        if abs(scene_total - duration) <= 2 and plan.scenes:
-            plan.scenes[-1].duration = round(plan.scenes[-1].duration + (duration - scene_total), 2)
-        else:
-            raise BotError(f"Gemini chia canh long-form {scene_total:g}s, khong dung muc tieu {duration}s.")
-    words = spoken_word_count(plan.narration)
-    if not min_words <= words <= max_words:
-        raise BotError(f"Kich ban long-form co {words} tu, ngoai khoang {min_words}-{max_words}.")
-    clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
-    clean_hook = re.sub(r"[\W_]+", "", plan.hook).lower()
-    clean_closing = re.sub(r"[\W_]+", "", plan.closing_line).lower()
-    if not clean_narration.startswith(clean_hook):
-        plan.narration = f"{plan.hook} {plan.narration}"
-    if not re.sub(r"[\W_]+", "", plan.narration).lower().endswith(clean_closing):
-        plan.narration = f"{plan.narration} {plan.closing_line}"
+    ensure_long_form_hook_and_closing(plan)
+    for expansion_attempt in range(2):
+        words = spoken_word_count(plan.narration)
+        if words >= min_words:
+            break
+        plan = expand_long_form_plan(llm, plan, duration, min_words, max_words, news_context)
+        ensure_long_form_hook_and_closing(plan)
+        LOG.info("Expansion pass %d produced %d words.", expansion_attempt + 1, spoken_word_count(plan.narration))
+    normalize_scene_count(plan, scene_count)
+    validate_long_form_plan(plan, duration, min_words, max_words, scene_count)
     quality = reviewed.get("quality_check", {})
     LOG.info(
         "Long-form plan ready: %r (%d scenes, %d words, timeliness %s/10).",
@@ -1117,7 +1419,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
 
 
 def choose_novel_long_form_plan(
-    llm: GeminiClient,
+    llm: OpenAITextClient,
     archive: Archive,
     theme: str,
     duration: int,
@@ -1137,7 +1439,7 @@ def choose_novel_long_form_plan(
     return None
 
 
-def plan_social_vietnamese(llm: GeminiClient, plan: ShortPlan, duration: int) -> SocialPlan:
+def plan_social_vietnamese(llm: OpenAITextClient, plan: ShortPlan, duration: int) -> SocialPlan:
     prompt = f'''Translate and adapt this English YouTube Short plan into Vietnamese for Facebook and TikTok.
 Return raw JSON only with this schema:
 {{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with exactly 2 relevant hashtags","tags":["exactly 2 short hashtags"],"narration":"Vietnamese voice-over"}}
@@ -1168,7 +1470,7 @@ def rejection_context(plan: ShortPlan, duplicate: sqlite3.Row) -> dict[str, str]
 
 
 def choose_novel_plan(
-    llm: GeminiClient,
+    llm: OpenAITextClient,
     archive: Archive,
     theme: str,
     duration: int,
@@ -1181,12 +1483,12 @@ def choose_novel_plan(
         if not duplicate:
             return plan
         rejected.append(rejection_context(plan, duplicate))
-        print(f"Ý tưởng trùng ({duplicate['title']!r}); yêu cầu Gemini tạo góc khác…")
+        print(f"Ý tưởng trùng ({duplicate['title']!r}); yêu cầu OpenAI tạo góc khác…")
     return None
 
 
 def image_scene_prompt(visual_prompt: str) -> str:
-    # Chỉ nối style suffix gọn; các ràng buộc "không được có gì" đi qua negative_prompt, không nhét vào prompt dương.
+    # Keep the generation prompt concise; scene exclusions are enforced by the storyboard instructions.
     return f"{visual_prompt.strip().rstrip('.')}. {IMAGE_STYLE_SUFFIX}"
 
 
@@ -1417,17 +1719,52 @@ def synthesize_narration(
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(destination)])
 
 
-def render(plan: ShortPlan, client: Pollinations, tts: GoogleChirpTTS, output_dir: Path, target_duration: int) -> Path:
+def distributed_web_image_indexes(scene_count: int, requested: int) -> set[int]:
+    count = min(scene_count, max(0, requested))
+    if count == 0:
+        return set()
+    if count == scene_count:
+        return set(range(1, scene_count + 1))
+    return {max(1, min(scene_count, round((index + 1) * (scene_count + 1) / (count + 1)))) for index in range(count)}
+
+
+def append_web_source_credits(plan: ShortPlan, sources: list[dict[str, str]]) -> None:
+    source_pages: list[str] = []
+    for source in sources:
+        page = source.get("source_page", "").strip()
+        if page.startswith(("https://", "http://")) and page not in source_pages:
+            source_pages.append(page)
+    if not source_pages:
+        return
+    credit = "\n\nVisual sources discovered via Brave Search:\n" + "\n".join(f"- {url}" for url in source_pages)
+    plan.description = (plan.description + credit)[:5000]
+
+
+def render(
+    plan: ShortPlan,
+    client: VisualAssetProvider,
+    tts: GoogleChirpTTS,
+    output_dir: Path,
+    target_duration: int,
+) -> Path:
     require_tools()
     LOG.info("Rendering %d scenes into %s", len(plan.scenes), output_dir)
     clips: list[Path] = []
     previous_image: Path | None = None
+    web_indexes = distributed_web_image_indexes(len(plan.scenes), client.s.brave_web_images_per_short)
     for index, scene in enumerate(plan.scenes, start=1):
         image_file = output_dir / f"scene_{index}.jpg"
         clip = output_dir / f"scene_{index}.mp4"
         try:
-            client.image(image_scene_prompt(scene.visual_prompt), image_file, seed=int(time.time()) + index)
-        except PollinationsTransientError as exc:
+            client.image(
+                search_query=scene.visual_prompt,
+                generation_prompt=image_scene_prompt(scene.visual_prompt),
+                destination=image_file,
+                width=1080,
+                height=1920,
+                prefer_web=index in web_indexes,
+            )
+        except ImageGenerationTransientError as exc:
             if not client.s.allow_image_fallback_placeholder:
                 raise BotError(
                     f"Image generation for scene {index} failed and placeholder fallback is disabled: {exc}"
@@ -1498,25 +1835,33 @@ def long_form_assets_ready(plan: ShortPlan, output_dir: Path) -> bool:
     return all(long_form_image_path(output_dir, index).is_file() for index in range(1, len(plan.scenes) + 1))
 
 
-def prepare_long_form_images(plan: ShortPlan, client: Pollinations, output_dir: Path, image_budget: int) -> int:
-    generated = 0
+def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, output_dir: Path) -> int:
+    prepared = 0
     previous_image: Path | None = None
+    web_indexes = distributed_web_image_indexes(len(plan.scenes), client.s.brave_web_images_per_long_form)
     for index, scene in enumerate(plan.scenes, start=1):
         image_file = long_form_image_path(output_dir, index)
         if image_file.is_file() and image_file.stat().st_size >= 1024:
             previous_image = image_file
             continue
-        if generated >= image_budget:
-            break
         try:
-            client.image(
-                image_scene_prompt_horizontal(scene.visual_prompt),
-                image_file,
-                seed=int(time.time()) + index,
+            prefer_web = index in web_indexes
+            source = client.image(
+                search_query=scene.visual_prompt,
+                generation_prompt=image_scene_prompt_horizontal(scene.visual_prompt),
+                destination=image_file,
                 width=1920,
                 height=1080,
+                prefer_web=prefer_web,
+                web_only=prefer_web,
             )
-        except PollinationsTransientError as exc:
+            if source == "missing":
+                LOG.warning(
+                    "Brave did not provide long-form image %d; reusing the previous visual to preserve the 10-image OpenAI cap.",
+                    index,
+                )
+                create_fallback_scene_image(image_file, previous_image, width=1920, height=1080)
+        except ImageGenerationTransientError as exc:
             if not client.s.allow_image_fallback_placeholder:
                 raise BotError(
                     f"Long-form image {index} failed and placeholder fallback is disabled: {exc}"
@@ -1526,15 +1871,15 @@ def prepare_long_form_images(plan: ShortPlan, client: Pollinations, output_dir: 
         if image_file.stat().st_size < 1024:
             raise BotError(f"Long-form scene {index} did not produce a valid image.")
         previous_image = image_file
-        generated += 1
-    LOG.info("Prepared %d long-form image(s); %d/%d ready.", generated, sum(1 for i in range(1, len(plan.scenes) + 1) if long_form_image_path(output_dir, i).is_file()), len(plan.scenes))
-    return generated
+        prepared += 1
+    LOG.info("Prepared all %d long-form image(s) in this run.", prepared)
+    return prepared
 
 
 def render_long_form_from_assets(plan: ShortPlan, tts: GoogleChirpTTS, output_dir: Path, target_duration: int) -> Path:
     require_tools()
     if not long_form_assets_ready(plan, output_dir):
-        raise BotError("Long-form images are not complete yet; run --long-form-mode prepare first.")
+        raise BotError("Long-form images are incomplete; the one-shot run cannot continue.")
     LOG.info("Rendering horizontal long-form video with %d scenes...", len(plan.scenes))
     clips: list[Path] = []
     for index, scene in enumerate(plan.scenes, start=1):
@@ -1950,7 +2295,7 @@ def social_publish_enabled(settings: Settings) -> bool:
     return settings.publish_facebook or settings.publish_tiktok
 
 
-def prepare_social_video(plan: ShortPlan, llm: GeminiClient, tts: GoogleChirpTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
+def prepare_social_video(plan: ShortPlan, llm: OpenAITextClient, tts: GoogleChirpTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
     social_file = output_dir / "social_vi.json"
     if social_file.is_file():
         social = SocialPlan.from_dict(json.loads(social_file.read_text(encoding="utf-8")))
@@ -1963,41 +2308,12 @@ def prepare_social_video(plan: ShortPlan, llm: GeminiClient, tts: GoogleChirpTTS
     return social_video, social
 
 
-def long_form_state_file() -> Path:
-    return DATA_DIR / "generated" / "long_form_current.json"
-
-
-def load_long_form_state() -> dict[str, Any] | None:
-    state_file = long_form_state_file()
-    if not state_file.is_file():
-        return None
-    try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise BotError(f"Long-form state file is invalid JSON: {state_file}") from exc
-    if not isinstance(state, dict):
-        raise BotError(f"Long-form state file has invalid shape: {state_file}")
-    return state
-
-
-def save_long_form_state(state: dict[str, Any]) -> None:
-    state_file = long_form_state_file()
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def clear_long_form_state() -> None:
-    state_file = long_form_state_file()
-    if state_file.is_file():
-        state_file.unlink()
-
-
 def create_long_form_job(
-    llm: GeminiClient,
+    llm: OpenAITextClient,
     archive: Archive,
     theme: str,
     settings: Settings,
-) -> tuple[dict[str, Any], ShortPlan, Path, int]:
+) -> tuple[ShortPlan, Path, int, int]:
     min_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
     max_duration = max(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
     min_scenes = min(settings.long_form_min_scenes, settings.long_form_max_scenes)
@@ -2010,38 +2326,29 @@ def create_long_form_job(
     output_dir.mkdir(parents=True)
     (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     record_id = archive.reserve(plan, output_dir)
-    state = {
-        "record_id": record_id,
-        "duration": duration,
-        "output_dir": str(output_dir),
-        "created_at": datetime.now(UTC).isoformat(),
-        "status": "assets_pending",
-    }
-    save_long_form_state(state)
     LOG.info("Created long-form job: %s (%ds)", output_dir, duration)
-    return state, plan, output_dir, duration
+    return plan, output_dir, duration, record_id
 
 
-def load_long_form_job() -> tuple[dict[str, Any], ShortPlan, Path, int] | None:
-    state = load_long_form_state()
-    if not state:
-        return None
-    output_dir = Path(str(state.get("output_dir") or ""))
-    plan_file = output_dir / "plan.json"
-    if not output_dir.is_dir() or not plan_file.is_file():
-        raise BotError(f"Long-form job points to missing output directory or plan: {output_dir}")
-    plan = ShortPlan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
-    duration = int(state.get("duration") or round(sum(scene.duration for scene in plan.scenes)))
-    return state, plan, output_dir, duration
-
-
-def local_hour_for_long_form(settings: Settings) -> int:
+def long_form_is_due(
+    archive: Archive,
+    settings: Settings,
+    now: datetime | None = None,
+) -> tuple[bool, int | None]:
     try:
-        now = datetime.now(ZoneInfo(settings.long_form_timezone))
+        timezone = ZoneInfo(settings.long_form_timezone)
     except Exception:
         LOG.warning("Invalid LONG_FORM_TIMEZONE=%s; falling back to UTC.", settings.long_form_timezone)
-        now = datetime.now(UTC)
-    return now.hour
+        timezone = UTC
+    current = now or datetime.now(timezone)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone)
+    current_date = current.astimezone(timezone).date()
+    latest = archive.latest_long_form_created_at()
+    if latest is None:
+        return True, None
+    days_since = (current_date - latest.astimezone(timezone).date()).days
+    return days_since >= settings.long_form_interval_days, days_since
 
 
 def publish_long_form_video(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> dict[str, str]:
@@ -2060,62 +2367,38 @@ def publish_long_form_video(video: Path, plan: ShortPlan, settings: Settings, pr
 
 
 def run_long_form_flow(
-    mode: str,
     publish: bool,
     privacy: str,
     theme: str,
     settings: Settings,
     archive: Archive,
-    llm: GeminiClient,
-    pollinations: Pollinations,
+    llm: OpenAITextClient,
+    images: VisualAssetProvider,
     tts: GoogleChirpTTS,
     force_new: bool = False,
-    image_budget: int | None = None,
 ) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    budget = image_budget or settings.long_form_image_budget_per_run
-    if force_new:
-        clear_long_form_state()
-    loaded = load_long_form_job()
-    if loaded is None:
-        if mode == "finalize":
-            LOG.warning("No long-form job is waiting to finalize.")
-            return 0
-        if settings.long_form_daily_limit > 0 and archive.long_form_jobs_created_today() >= settings.long_form_daily_limit:
-            LOG.warning(
-                "Long-form daily limit reached: %d/%d job(s) already created today.",
-                archive.long_form_jobs_created_today(),
-                settings.long_form_daily_limit,
-            )
-            return 0
-        loaded = create_long_form_job(llm, archive, theme, settings)
-    state, plan, output_dir, duration = loaded
-
-    if mode in {"prepare", "auto"}:
-        prepare_long_form_images(plan, pollinations, output_dir, budget)
-        state["status"] = "assets_ready" if long_form_assets_ready(plan, output_dir) else "assets_pending"
-        save_long_form_state(state)
-
-    ready = long_form_assets_ready(plan, output_dir)
-    should_finalize = mode == "finalize" or (
-        mode == "auto" and ready and local_hour_for_long_form(settings) >= settings.long_form_finalize_hour
-    )
-    if not should_finalize:
+    due, days_since = long_form_is_due(archive, settings)
+    if not force_new and not due:
         LOG.info(
-            "Long-form job is %s. Ready=%s. Finalize hour=%s local time.",
-            state.get("status", "assets_pending"),
-            ready,
-            settings.long_form_finalize_hour,
+            "Long-form is not due yet: last job was %s local day(s) ago; interval is %d days.",
+            days_since,
+            settings.long_form_interval_days,
         )
         return 0
-    if not ready:
-        LOG.warning("Long-form job is not ready to finalize; run prepare again.")
-        return 0
-
-    record_id = int(state["record_id"])
+    plan, output_dir, duration, record_id = create_long_form_job(llm, archive, theme, settings)
     rendered = False
     try:
+        prepare_long_form_images(plan, images, output_dir)
         video = render_long_form_from_assets(plan, tts, output_dir, duration)
+        append_web_source_credits(plan, images.web_sources)
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if images.web_sources:
+            (output_dir / "web_sources.json").write_text(
+                json.dumps(images.web_sources, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         rendered = True
         archive.mark(record_id, "rendered")
         print(f"Rendered long-form video: {video}")
@@ -2125,7 +2408,6 @@ def run_long_form_flow(
             print(f"Published long-form video: {results}")
             if settings.youtube_token.exists():
                 archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
-        clear_long_form_state()
     except Exception:
         archive.mark(record_id, "upload_failed" if rendered else "failed")
         raise
@@ -2149,7 +2431,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--theme",
-        default="high-curiosity mysteries, disasters, lost civilizations, scientific limits, and grounded what-if questions",
+        default="high-curiosity mysteries, disasters, lost civilizations, world wonders, architecture, scientific limits, and grounded what-if questions",
     )
     parser.add_argument(
         "--duration",
@@ -2163,10 +2445,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Chỉ tạo và in kế hoạch")
     parser.add_argument("--upload-file", type=Path, help="Upload lại MP4 đã render, không tạo nội dung/video mới")
     parser.add_argument("--scheduled", action="store_true", help="Bật giới hạn an toàn theo SCHEDULED_DAILY_LIMIT mỗi ngày UTC")
-    parser.add_argument("--long-form", action="store_true", help="Run the staged horizontal long-form video pipeline")
-    parser.add_argument("--long-form-mode", choices=("prepare", "finalize", "auto"), default="auto")
-    parser.add_argument("--long-form-image-budget", type=int, help="Max long-form images to create in this run")
-    parser.add_argument("--long-form-force-new", action="store_true", help="Discard the current staged long-form job and start a new one")
+    parser.add_argument("--long-form", action="store_true", help="Create, render, and optionally publish one horizontal video")
+    # Accepted temporarily so existing Railway commands do not fail; the pipeline is now always one-shot.
+    parser.add_argument("--long-form-mode", choices=("prepare", "finalize", "auto"), default="auto", help=argparse.SUPPRESS)
+    parser.add_argument("--long-form-image-budget", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--long-form-force-new", action="store_true", help="Bypass the two-day long-form schedule gate")
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     args = parser.parse_args()
     configure_logging(args.log_level)
@@ -2186,22 +2469,20 @@ def main() -> int:
     if token_db:
         settings.youtube_token.write_text(token_db, encoding="utf-8")
 
-    pollinations = Pollinations(settings)
-    gemini = GeminiClient(settings)
+    images = VisualAssetProvider(settings)
+    llm = OpenAITextClient(settings)
     tts = GoogleChirpTTS(settings)
     if args.long_form or env_forces_long_form:
         return run_long_form_flow(
-            mode=args.long_form_mode,
             publish=args.publish,
             privacy=args.privacy_status or settings.youtube_privacy,
             theme=args.theme,
             settings=settings,
             archive=archive,
-            llm=gemini,
-            pollinations=pollinations,
+            llm=llm,
+            images=images,
             tts=tts,
             force_new=args.long_form_force_new,
-            image_budget=args.long_form_image_budget,
         )
     if args.upload_file:
         if not args.publish:
@@ -2217,7 +2498,7 @@ def main() -> int:
             archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
 
         if social_publish_enabled(settings):
-            social_video, social = prepare_social_video(plan, gemini, tts, video.parent, settings)
+            social_video, social = prepare_social_video(plan, llm, tts, video.parent, settings)
             social_results = publish_social_video(social_video, social, settings)
             if social_results:
                 print(f"Đã publish social: {social_results}")
@@ -2239,7 +2520,7 @@ def main() -> int:
                 settings.scheduled_daily_limit,
             )
             return 0
-    plan = choose_novel_plan(gemini, archive, args.theme, settings.duration)
+    plan = choose_novel_plan(llm, archive, args.theme, settings.duration)
     if plan is None:
         message = "Không tìm được ý tưởng đủ mới sau 4 lần."
         if args.scheduled:
@@ -2257,7 +2538,15 @@ def main() -> int:
     record_id = archive.reserve(plan, output_dir)
     rendered = False
     try:
-        video = render(plan, pollinations, tts, output_dir, settings.duration)
+        video = render(plan, images, tts, output_dir, settings.duration)
+        append_web_source_credits(plan, images.web_sources)
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if images.web_sources:
+            (output_dir / "web_sources.json").write_text(
+                json.dumps(images.web_sources, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         rendered = True
         archive.mark(record_id, "rendered")
         print(f"Đã render: {video}")
@@ -2269,7 +2558,7 @@ def main() -> int:
                 archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
 
             if social_publish_enabled(settings):
-                social_video, social = prepare_social_video(plan, gemini, tts, output_dir, settings)
+                social_video, social = prepare_social_video(plan, llm, tts, output_dir, settings)
                 social_results = publish_social_video(social_video, social, settings)
                 if social_results:
                     print(f"Đã publish social: {social_results}")

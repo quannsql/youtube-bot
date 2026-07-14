@@ -16,8 +16,6 @@ def test_facebook_token():
     try:
         token = resolve_facebook_page_access_token(
             Settings(
-                grok_api_key="unused",
-                video_api_key="unused",
                 facebook_page_id=page_id,
                 facebook_page_access_token=page_token,
                 facebook_user_access_token=user_token,

@@ -1,14 +1,18 @@
 # YouTube Shorts documentary bot
 
-Python bot tạo và đăng YouTube Shorts tiếng Anh 10–25 giây. Mỗi lượt chạy hoàn thành toàn bộ chu trình: Grok nghiên cứu/kịch bản → LTX-2 tạo video → Google Chirp 3 HD tạo narration → FFmpeg ghép → YouTube upload.
+Python bot tạo và đăng YouTube Shorts tiếng Anh cùng video dài 5–7 phút. Mỗi lượt chạy hoàn thành toàn bộ chu trình: GPT-5.4 mini nghiên cứu/kịch bản → GPT Image 2 và Brave Images tạo visual → Google Chirp 3 HD tạo narration → FFmpeg ghép → YouTube upload.
 
-Grok dùng `POLLINATIONS_GROK_API_KEY`; LTX-2 dùng `POLLINATIONS_VIDEO_API_KEY`. Hai key độc lập giúp chi phí reasoning không ăn vào quota video.
+Phần text gọi OpenAI Responses API bằng `gpt-5.4-mini`: reasoning `low` cho Shorts và `medium` cho video dài. Khi bật chia sẻ input/output cho đúng OpenAI Project, lưu lượng đủ điều kiện sẽ tự dùng hạn mức token miễn phí hằng ngày; không đưa bí mật hoặc dữ liệu riêng tư vào prompt. Phần tạo ảnh vẫn tính phí riêng và giữ `gpt-image-2` chất lượng `low`.
 
-Visual prompt mặc định đi theo hướng animated documentary explainer: minh họa 2D/3D, cel-shaded/paper texture, bản đồ, diagram, cutaway bảo tàng và cận cảnh hiện vật/fossil; tránh photorealistic/live-action để giảm cảm giác video AI giả thật.
+Ảnh AI được gọi trực tiếp từ OpenAI Platform bằng `OPENAI_API_KEY`, model `gpt-image-2`. Bot khóa cứng `quality=low` và dùng `1024x1536` cho dọc hoặc `1536x1024` cho ngang — hai cấu hình có giá đầu ra khoảng `$0.005/ảnh` theo bảng giá chính thức. Bot không còn dùng Pollinations.
+
+Mỗi Short dùng đúng 6 visual. Mỗi video dài dùng 15 visual: tối đa 5 ảnh Brave và 10 ảnh GPT Image 2. Nếu Brave thiếu ảnh cho video dài, bot lặp lại visual đã có thay vì gọi quá 10 ảnh OpenAI. Các trang nguồn đã sử dụng được lưu trong `web_sources.json` và thêm vào mô tả video.
+
+Brave chỉ giúp tìm ảnh, không tự cấp bản quyền sử dụng. Bot giới hạn kết quả vào Wikimedia, Unsplash, Pexels, Pixabay, NASA, Library of Congress và Smithsonian, đồng thời lưu nguồn; người vận hành vẫn cần kiểm tra giấy phép cụ thể nếu kênh có yêu cầu thương mại nghiêm ngặt.
 
 Caption được burn-in bằng FFmpeg/ASS sau khi TTS tạo audio, không nhờ model video vẽ chữ. Bot chia narration thành cụm 3-6 từ, canh timing theo duration thực tế của MP3 sau bước chỉnh tempo, rồi lưu `captions_en.ass` và `captions_vi.ass` trong thư mục `generated/...` để dễ kiểm tra.
 
-Topic prompt mặc định ưu tiên nội dung có sức tò mò đại chúng: bí ẩn, thảm họa, biến mất, sụp đổ, thành phố/đế chế thất lạc, câu hỏi "what if", giới hạn khoa học, hoặc một câu chuyện quen thuộc có cú đảo dựa trên bằng chứng. Đây là pattern định hướng để Grok tự suy luận topic mới, không phải danh sách chủ đề cố định.
+Topic Short mặc định ưu tiên nội dung có sức tò mò đại chúng: bí ẩn, thảm họa, thành phố/đế chế thất lạc, khoa học, phát minh, các kỳ quan và kiến trúc xưa–nay. Video dài vẫn tập trung tin tức thế giới, chính trị, quân sự, kinh tế, công nghệ, thể thao và khoa học.
 
 ## Local setup
 
@@ -19,7 +23,7 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Điền hai key Pollinations và các file Google credential. Xem `.env.example` để biết biến cần thiết. Các JSON credential và `.env` không được commit Git.
+Điền `OPENAI_API_KEY`, tùy chọn `BRAVE_SEARCH_API_KEY`, và các file Google credential. Một OpenAI key dùng chung cho text và ảnh; bot không còn cần `GEMINI_API_KEY`. Xem `.env.example` để biết biến cần thiết. Các JSON credential và `.env` không được commit Git.
 
 Chạy một video ngay:
 
@@ -27,7 +31,7 @@ Chạy một video ngay:
 python youtube_shorts_bot.py --publish --duration 25
 ```
 
-`--scheduled` bật chốt an toàn theo `SCHEDULED_DAILY_LIMIT` trong một ngày UTC. Mặc định là `3`; đặt `0` nếu muốn tắt giới hạn này.
+`--scheduled` bật chốt an toàn theo `SCHEDULED_DAILY_LIMIT` trong một ngày UTC. Mặc định là `2`; đặt `0` nếu muốn tắt giới hạn này.
 
 ```powershell
 python youtube_shorts_bot.py --publish --scheduled
@@ -41,15 +45,15 @@ File `railway.toml` đã đặt start command cho Railway:
 python youtube_shorts_bot.py --publish --scheduled
 ```
 
-`nixpacks.toml` cài `ffmpeg` và `ffprobe` vào container Railway. Hai công cụ này là bắt buộc để nối các cảnh LTX-2 và ghép voice-over.
+`nixpacks.toml` cài `ffmpeg` và `ffprobe` vào container Railway. Hai công cụ này là bắt buộc để tạo chuyển động Ken Burns, nối cảnh và ghép voice-over.
 
 Tại Railway, vào Service → **Settings → Cron Schedule** và đặt:
 
 ```text
-0 0,6,12 * * *
+0 0,12 * * *
 ```
 
-Railway chạy Cron theo UTC. Lịch này chạy vào 00:00, 06:00 và 12:00 UTC, tương ứng 07:00, 13:00 và 19:00 giờ Việt Nam (UTC+7). Mỗi lần chạy tạo/upload một video ngay, miễn là chưa chạm `SCHEDULED_DAILY_LIMIT`. Muốn nhiều hơn 3 video/ngày thì tăng cả Cron Schedule và `SCHEDULED_DAILY_LIMIT`. Video LTX-2 dài 25 giây tốn khoảng `0.125` Pollen trên key video, vẫn có thể tận dụng `LTX_FALLBACK_TO_GROK_KEY=true` khi key video hết quota hoặc bị rate-limit.
+Railway chạy Cron theo UTC. Lịch này chạy vào 00:00 và 12:00 UTC, tương ứng 07:00 và 19:00 giờ Việt Nam (UTC+7), tức 2 Shorts mỗi ngày. Với tối đa 6 ảnh GPT Image 2 `low`, chi phí đầu ra ảnh tối đa khoảng `$0.03/Short`; ảnh Brave thay thế được cảnh nào thì chi phí OpenAI giảm tương ứng.
 
 ## Chạy trên Railway KHÔNG dùng Volume (Khuyên dùng)
 
@@ -81,16 +85,22 @@ YOUTUBE_TOKEN_JSON_B64
 Trong Railway → **Variables**, thêm:
 
 ```dotenv
-POLLINATIONS_GROK_API_KEY=sk_key_for_grok
-POLLINATIONS_VIDEO_API_KEY=sk_key_for_ltx2
-POLLINATIONS_BASE_URL=https://gen.pollinations.ai
-POLLINATIONS_CONNECT_TIMEOUT_SECONDS=30
-POLLINATIONS_READ_TIMEOUT_SECONDS=180
-LTX_SCENE_ATTEMPTS=3
-LTX_SCENE_RETRY_BACKOFF_SECONDS=20
-LTX_FALLBACK_TO_GROK_KEY=true
-SHORT_DURATION_SECONDS=25
-SCHEDULED_DAILY_LIMIT=3
+OPENAI_API_KEY=your_openai_platform_key
+OPENAI_TEXT_MODEL=gpt-5.4-mini
+OPENAI_TEXT_REASONING_EFFORT=low
+OPENAI_TEXT_LONG_FORM_REASONING_EFFORT=medium
+OPENAI_TEXT_MAX_OUTPUT_TOKENS=16000
+OPENAI_TEXT_ATTEMPTS=3
+OPENAI_TEXT_RETRY_BACKOFF_SECONDS=5
+OPENAI_TEXT_CONNECT_TIMEOUT_SECONDS=30
+OPENAI_TEXT_READ_TIMEOUT_SECONDS=300
+BRAVE_SEARCH_API_KEY=your_optional_brave_key
+BRAVE_WEB_IMAGES_PER_SHORT=2
+BRAVE_WEB_IMAGES_PER_LONG_FORM=5
+OPENAI_IMAGE_ATTEMPTS=3
+OPENAI_IMAGE_RETRY_BACKOFF_SECONDS=10
+SHORT_DURATION_SECONDS=60
+SCHEDULED_DAILY_LIMIT=2
 GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json
 GOOGLE_TTS_VOICE=en-US-Chirp3-HD-Achernar
 GOOGLE_TTS_SPEAKING_RATE=1.05
@@ -112,7 +122,7 @@ TIKTOK_DISABLE_COMMENT=false
 TIKTOK_DISABLE_STITCH=false
 ```
 
-`LTX_SCENE_ATTEMPTS` và `LTX_SCENE_RETRY_BACKOFF_SECONDS` giúp cron chịu được lỗi tạm thời từ Pollinations/LTX-2 khi render từng scene. `LTX_FALLBACK_TO_GROK_KEY=true` cho phép LTX-2 thử lại bằng `POLLINATIONS_GROK_API_KEY` khi `POLLINATIONS_VIDEO_API_KEY` hết quota hoặc bị rate-limit. Bot ghi scene vào file `.part` trước, chỉ giữ lại MP4 khi tải xong.
+`OPENAI_TEXT_ATTEMPTS`/`OPENAI_TEXT_RETRY_BACKOFF_SECONDS` và `OPENAI_IMAGE_ATTEMPTS`/`OPENAI_IMAGE_RETRY_BACKOFF_SECONDS` giúp cron chịu được lỗi mạng/rate-limit tạm thời. Chất lượng và kích thước GPT Image 2 không có biến môi trường để nâng lên, tránh vô tình tiêu credits ở mức `medium/high`.
 
 Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. Nếu Page token hết hạn hoặc bạn muốn bot tự lấy token Page mỗi lần chạy, đặt thêm `FACEBOOK_USER_ACCESS_TOKEN` là long-lived user token có quyền quản lý Page; bot sẽ gọi `/me/accounts` để lấy Page token khớp `FACEBOOK_PAGE_ID`. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
 
@@ -122,37 +132,28 @@ Railway Cron yêu cầu process hoàn tất và thoát; bot đã là one-shot pr
 
 ## Long-form horizontal videos
 
-Bot also supports a separate staged pipeline for one 5-7 minute horizontal video per day:
+Video dài chạy end-to-end trong một lượt: lập kế hoạch → chuẩn bị 15 visual (5 Brave + 10 OpenAI) → render → upload. Không còn chế độ `prepare/finalize`, không cần Volume để giữ ảnh tạo dần:
 
 ```powershell
-python youtube_shorts_bot.py --long-form --long-form-mode auto --publish
+python youtube_shorts_bot.py --long-form --publish
 ```
 
-Modes:
-
-- `prepare`: create or resume today's long-form job and generate up to `LONG_FORM_IMAGE_BUDGET_PER_RUN` missing 16:9 images.
-- `finalize`: render/upload only when all images are ready.
-- `auto`: prepare first, then finalize only when all images are ready and local time is at or after `LONG_FORM_FINALIZE_HOUR`.
-
-Recommended Railway Cron for a separate long-form service:
+Cron khuyến nghị cho service Railway riêng:
 
 ```text
-0 1,5,13 * * *
+0 13 * * *
 ```
 
-That maps roughly to 08:00, 12:00, and 20:00 Vietnam time. The morning/noon runs collect images, while the evening run finalizes and uploads if the image set is complete. Avoid scheduling this at the same UTC hours as the Short service so Pollinations quota remains available for Shorts.
+Cron gọi service mỗi ngày lúc 20:00 Việt Nam. Bot kiểm tra ngày local trong PostgreSQL và chỉ tạo khi video dài gần nhất đã cách ít nhất `LONG_FORM_INTERVAL_DAYS=2` ngày: ví dụ tạo thứ Hai thì thứ Tư mới tạo tiếp. Dùng `--long-form-force-new` chỉ khi muốn chạy thủ công và bỏ qua chốt này.
 
 Long-form config:
 
 ```dotenv
 LONG_FORM_MIN_DURATION_SECONDS=300
 LONG_FORM_MAX_DURATION_SECONDS=420
-LONG_FORM_IMAGE_BUDGET_PER_RUN=10
-LONG_FORM_MIN_SCENES=14
-LONG_FORM_MAX_SCENES=20
-LONG_FORM_FINALIZE_HOUR=18
 LONG_FORM_TIMEZONE=Asia/Bangkok
-LONG_FORM_DAILY_LIMIT=1
+LONG_FORM_INTERVAL_DAYS=2
+BRAVE_WEB_IMAGES_PER_LONG_FORM=5
 ```
 
-Long-form uses public Google News RSS headlines as current-event leads across world news, politics, economy, technology, sports, and science. The planner rejects Vietnam-related topics, people, locations, and events before rendering. Since staged assets must survive between cron runs, use a Railway Volume or another persistent `BOT_DATA_DIR` for the long-form service; the PostgreSQL-only/no-Volume setup is good for Shorts but cannot reliably keep partially generated images across separate cron containers.
+Nội dung video dài vẫn dùng Google News RSS làm lead cho tin thế giới, chính trị/quân sự, kinh tế, công nghệ, thể thao và khoa học; planner tiếp tục loại nội dung liên quan Việt Nam. Mười ảnh OpenAI `low` có chi phí đầu ra khoảng `$0.05/video dài`; Brave không tìm đủ thì visual được lặp lại nên mức OpenAI này không tăng. PostgreSQL lưu lịch và archive, còn toàn bộ media được tạo và hoàn tất trong cùng một lượt chạy.

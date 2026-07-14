@@ -141,6 +141,42 @@ def test_archive_counts_jobs_created_today(tmp_path):
     assert archive.jobs_created_today() == 3
 
 
+def test_long_form_schedule_waits_two_local_calendar_days(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Global shipping", "angle": "Trade routes", "title": "Trade Routes",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "narration": "A short script.", "fact_note": "No exaggeration", "source_hints": ["News"],
+        "scenes": [{"duration": 50, "visual_prompt": "A ship"}],
+    })
+    archive = bot.Archive(tmp_path / "shorts.db")
+    record_id = archive.reserve(plan, tmp_path / "long-20260713-trade-routes")
+    archive.mark(record_id, "rendered")
+    archive.conn.execute(
+        "UPDATE shorts SET created_at = ? WHERE id = ?",
+        ("2026-07-13T01:00:00+00:00", record_id),
+    )
+    archive.conn.commit()
+    settings = bot.Settings(long_form_interval_days=2, long_form_timezone="Asia/Bangkok")
+
+    tuesday = bot.datetime.fromisoformat("2026-07-14T20:00:00+07:00")
+    wednesday = bot.datetime.fromisoformat("2026-07-15T20:00:00+07:00")
+
+    assert bot.long_form_is_due(archive, settings, tuesday) == (False, 1)
+    assert bot.long_form_is_due(archive, settings, wednesday) == (True, 2)
+
+
+def test_short_daily_limit_does_not_count_long_form_job(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic", "angle": "Angle", "title": "Title", "description": "#A #B",
+        "tags": ["A", "B"], "narration": "A short script.", "fact_note": "Note",
+        "source_hints": ["Source"], "scenes": [{"duration": 10, "visual_prompt": "Scene"}],
+    })
+    archive = bot.Archive(tmp_path / "shorts.db")
+    archive.reserve(plan, tmp_path / "long-20260714-topic")
+
+    assert archive.jobs_created_today() == 0
+
+
 def test_materialize_credential_file_from_base64(tmp_path, monkeypatch):
     destination = tmp_path / "credential.json"
     monkeypatch.setenv("TEST_CREDENTIAL_B64", base64.b64encode(b'{"credential": true}').decode())
@@ -149,20 +185,116 @@ def test_materialize_credential_file_from_base64(tmp_path, monkeypatch):
 
 
 def test_settings_accepts_48_second_duration(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini")
-    monkeypatch.setenv("POLLINATIONS_GROK_API_KEY", "grok")
-    monkeypatch.setenv("POLLINATIONS_VIDEO_API_KEY", "video")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
     monkeypatch.setenv("SHORT_DURATION_SECONDS", "48")
+    monkeypatch.setenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "5")
 
-    assert bot.Settings.from_env().duration == 48
+    settings = bot.Settings.from_env()
+
+    assert settings.duration == 48
+    assert settings.long_form_min_scenes == 15
+    assert settings.long_form_max_scenes == 15
+    assert settings.long_form_openai_images == 10
+    assert settings.brave_web_images_per_long_form == 5
+    assert settings.text_model == "gpt-5.4-mini"
+    assert settings.text_reasoning_effort == "low"
+    assert settings.text_long_form_reasoning_effort == "medium"
 
 
 def test_settings_reads_scheduled_daily_limit(monkeypatch):
-    monkeypatch.setenv("POLLINATIONS_GROK_API_KEY", "grok")
-    monkeypatch.setenv("POLLINATIONS_VIDEO_API_KEY", "video")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
     monkeypatch.setenv("SCHEDULED_DAILY_LIMIT", "6")
 
     assert bot.Settings.from_env().scheduled_daily_limit == 6
+
+
+def test_openai_text_uses_responses_api_and_extracts_output(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "status": "completed",
+                "output": [
+                    {"type": "reasoning", "content": []},
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"topic":"test"}'}],
+                    },
+                ],
+            }
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(url=url, headers=headers, payload=json, timeout=timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    settings = bot.Settings(openai_api_key="openai", text_attempts=1)
+
+    result = bot.OpenAITextClient(settings).chat("Return a topic", temperature=0.2)
+
+    assert result == '{"topic":"test"}'
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["headers"]["Authorization"] == "Bearer openai"
+    assert captured["payload"]["model"] == "gpt-5.4-mini"
+    assert captured["payload"]["reasoning"] == {"effort": "low"}
+    assert captured["payload"]["max_output_tokens"] == 16000
+    assert "temperature" not in captured["payload"]
+
+
+def test_openai_text_retries_transient_error(monkeypatch):
+    calls = {"count": 0}
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"status": "completed", "output_text": '{"ok":true}'}
+
+    def fake_post(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise requests.Timeout("timed out")
+        return FakeResponse()
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    settings = bot.Settings(
+        openai_api_key="openai",
+        text_attempts=2,
+        text_retry_backoff_seconds=0,
+    )
+
+    assert bot.OpenAITextClient(settings).chat("Return JSON") == '{"ok":true}'
+    assert calls["count"] == 2
+
+
+def test_openai_text_does_not_retry_auth_error(monkeypatch):
+    calls = {"count": 0}
+
+    class FakeResponse:
+        ok = False
+        status_code = 401
+        text = ""
+
+        def json(self):
+            return {"error": {"message": "invalid key"}}
+
+    def fake_post(*_args, **_kwargs):
+        calls["count"] += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    settings = bot.Settings(openai_api_key="bad", text_attempts=3, text_retry_backoff_seconds=0)
+
+    with pytest.raises(bot.BotError, match="401: invalid key"):
+        bot.OpenAITextClient(settings).chat("Return JSON")
+    assert calls["count"] == 1
 
 
 def test_image_scene_prompt_adds_style_guardrails():
@@ -214,137 +346,160 @@ def test_ass_filter_path_escapes_windows_drive():
     assert escaped.endswith("/captions_en.ass")
 
 
-def test_pollinations_image_retries_transient_download_failure(tmp_path, monkeypatch):
+def test_openai_image_retries_transient_failure(tmp_path, monkeypatch):
     calls = {"count": 0}
+    encoded = base64.b64encode(b"x" * 2048).decode()
 
     class FakeResponse:
         ok = True
+        status_code = 200
+        text = ""
 
-        def iter_content(self, _chunk_size):
-            yield b"x" * 2048
+        def json(self):
+            return {"data": [{"b64_json": encoded}]}
 
-    def fake_request(*_args, **_kwargs):
+    def fake_post(*_args, **_kwargs):
         calls["count"] += 1
         if calls["count"] == 1:
             raise requests.Timeout("read timed out")
         return FakeResponse()
 
-    monkeypatch.setattr(bot.requests, "request", fake_request)
+    monkeypatch.setattr(bot.requests, "post", fake_post)
     settings = bot.Settings(
-        grok_api_key="grok",
-        video_api_key="video",
-        video_scene_attempts=2,
-        video_scene_retry_backoff_seconds=0,
+        openai_api_key="openai",
+        image_attempts=2,
+        image_retry_backoff_seconds=0,
     )
     destination = tmp_path / "scene_1.jpg"
 
-    bot.Pollinations(settings).image("a prompt", destination, seed=123)
+    bot.OpenAIImageClient(settings).image("a prompt", destination)
 
     assert calls["count"] == 2
     assert destination.read_bytes() == b"x" * 2048
     assert not (tmp_path / "scene_1.jpg.part").exists()
 
 
-def test_pollinations_image_falls_back_to_grok_key_on_quota_error(tmp_path, monkeypatch):
-    authorizations = []
+def test_openai_image_locks_portrait_to_low_cost_payload(tmp_path, monkeypatch):
+    captured = {}
+    encoded = base64.b64encode(b"y" * 2048).decode()
 
-    class FakeQuotaResponse:
-        ok = False
-        status_code = 429
-        text = "quota exceeded"
-
-    class FakeVideoResponse:
+    class FakeResponse:
         ok = True
+        status_code = 200
+        text = ""
 
-        def iter_content(self, _chunk_size):
-            yield b"y" * 2048
+        def json(self):
+            return {"data": [{"b64_json": encoded}]}
 
-    def fake_request(*_args, **kwargs):
-        authorizations.append(kwargs["headers"]["Authorization"])
-        if kwargs["headers"]["Authorization"] == "Bearer video":
-            return FakeQuotaResponse()
-        return FakeVideoResponse()
+    def fake_post(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return FakeResponse()
 
-    monkeypatch.setattr(bot.requests, "request", fake_request)
-    settings = bot.Settings(
-        grok_api_key="grok",
-        video_api_key="video",
-        video_scene_attempts=1,
-        video_scene_retry_backoff_seconds=0,
-    )
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    settings = bot.Settings(openai_api_key="openai", image_attempts=1)
     destination = tmp_path / "scene_1.jpg"
 
-    bot.Pollinations(settings).image("a prompt", destination, seed=123)
+    bot.OpenAIImageClient(settings).image("a prompt", destination, width=1080, height=1920)
 
-    assert authorizations == ["Bearer video", "Bearer grok"]
+    assert captured["url"] == "https://api.openai.com/v1/images/generations"
+    assert captured["headers"]["Authorization"] == "Bearer openai"
+    assert captured["json"]["model"] == "gpt-image-2"
+    assert captured["json"]["quality"] == "low"
+    assert captured["json"]["size"] == "1024x1536"
     assert destination.read_bytes() == b"y" * 2048
 
 
-def test_pollinations_image_skips_exhausted_key_on_retry(tmp_path, monkeypatch):
-    authorizations = []
-    grok_calls = {"count": 0}
+def test_openai_image_uses_low_cost_landscape_size(tmp_path, monkeypatch):
+    payloads = []
+    encoded = base64.b64encode(b"z" * 2048).decode()
 
-    class FakeQuotaResponse:
-        ok = False
-        status_code = 402
-        text = "insufficient balance"
-
-    class FakeImageResponse:
+    class FakeResponse:
         ok = True
+        status_code = 200
+        text = ""
 
-        def iter_content(self, _chunk_size):
-            yield b"z" * 2048
+        def json(self):
+            return {"data": [{"b64_json": encoded}]}
 
-    def fake_request(*_args, **kwargs):
-        authorization = kwargs["headers"]["Authorization"]
-        authorizations.append(authorization)
-        if authorization == "Bearer video":
-            return FakeQuotaResponse()
-        grok_calls["count"] += 1
-        if grok_calls["count"] == 1:
-            raise requests.Timeout("read timed out")
-        return FakeImageResponse()
+    def fake_post(*_args, **kwargs):
+        payloads.append(kwargs["json"])
+        return FakeResponse()
 
-    monkeypatch.setattr(bot.requests, "request", fake_request)
-    settings = bot.Settings(
-        grok_api_key="grok",
-        video_api_key="video",
-        video_scene_attempts=2,
-        video_scene_retry_backoff_seconds=0,
-    )
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    settings = bot.Settings(openai_api_key="openai", image_attempts=1)
     destination = tmp_path / "scene_1.jpg"
 
-    bot.Pollinations(settings).image("a prompt", destination, seed=123)
+    bot.OpenAIImageClient(settings).image("a prompt", destination, width=1920, height=1080)
 
-    assert authorizations == ["Bearer video", "Bearer grok", "Bearer grok"]
+    assert payloads[0]["quality"] == "low"
+    assert payloads[0]["size"] == "1536x1024"
     assert destination.read_bytes() == b"z" * 2048
 
 
-def test_pollinations_image_does_not_use_empty_grok_fallback(tmp_path, monkeypatch):
-    authorizations = []
+def test_openai_image_does_not_retry_permanent_auth_error(tmp_path, monkeypatch):
+    calls = {"count": 0}
 
-    class FakeQuotaResponse:
+    class FakeResponse:
         ok = False
-        status_code = 402
-        text = "insufficient balance"
+        status_code = 401
+        text = "invalid API key"
 
-    def fake_request(*_args, **kwargs):
-        authorizations.append(kwargs["headers"]["Authorization"])
-        return FakeQuotaResponse()
+    def fake_post(*_args, **_kwargs):
+        calls["count"] += 1
+        return FakeResponse()
 
-    monkeypatch.setattr(bot.requests, "request", fake_request)
-    settings = bot.Settings(
-        grok_api_key="",
-        video_api_key="video",
-        video_scene_attempts=1,
-        video_scene_retry_backoff_seconds=0,
-    )
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    settings = bot.Settings(openai_api_key="bad", image_attempts=3, image_retry_backoff_seconds=0)
     destination = tmp_path / "scene_1.jpg"
 
-    with pytest.raises(bot.BotError):
-        bot.Pollinations(settings).image("a prompt", destination, seed=123)
+    with pytest.raises(bot.BotError, match="401"):
+        bot.OpenAIImageClient(settings).image("a prompt", destination)
 
-    assert authorizations == ["Bearer video"]
+    assert calls["count"] == 1
+
+
+def test_brave_image_search_downloads_trusted_portrait_and_records_source(tmp_path, monkeypatch):
+    image_bytes = b"w" * 20_000
+
+    class SearchResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": [{
+                    "title": "Historic tower",
+                    "url": "https://www.pexels.com/photo/historic-tower-123/",
+                    "properties": {
+                        "url": "https://images.pexels.com/photos/123/tower.jpg",
+                        "width": 1000,
+                        "height": 1500,
+                    },
+                }]
+            }
+
+    class ImageResponse:
+        headers = {"Content-Type": "image/jpeg"}
+        content = image_bytes
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, **_kwargs):
+        return SearchResponse() if "brave.com" in url else ImageResponse()
+
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+    client = bot.BraveImageSearch(bot.Settings(brave_search_api_key="brave"))
+    destination = tmp_path / "web.jpg"
+
+    assert client.image("historic tower", destination, width=1080, height=1920)
+    assert destination.read_bytes() == image_bytes
+    assert client.sources[0]["source_page"].startswith("https://www.pexels.com/")
+
+
+def test_distributed_web_images_stay_within_six_visual_budget():
+    assert bot.distributed_web_image_indexes(6, 2) == {2, 5}
+    assert bot.distributed_web_image_indexes(6, 10) == {1, 2, 3, 4, 5, 6}
 
 
 def test_create_fallback_scene_image_reuses_previous_image(tmp_path):
@@ -403,7 +558,7 @@ def test_plan_long_form_accepts_current_events_documentary(tmp_path):
                 {"quality_check": {"timeliness_score": 8, "clarity_score": 9}, "plan": plan},
             ]
 
-        def chat(self, _prompt, temperature=0.55):
+        def chat(self, _prompt, temperature=0.55, reasoning_effort=None):
             return json.dumps(self.responses.pop(0))
 
     result = bot.plan_long_form(
@@ -420,7 +575,62 @@ def test_plan_long_form_accepts_current_events_documentary(tmp_path):
     assert sum(scene.duration for scene in result.scenes) == 300
 
 
-def test_prepare_long_form_images_respects_budget(tmp_path):
+def test_plan_long_form_expands_too_short_script(tmp_path):
+    short_plan = {
+        "topic": "Global chip export controls",
+        "angle": "Why supply chains are adapting",
+        "title": "The Chip Rule Reshaping Tech Supply Chains",
+        "description": "A current-events documentary explainer. AI-assisted production. #Technology #Economy",
+        "tags": ["Technology", "Economy"],
+        "hook": "The chip race is no longer just about faster devices.",
+        "narration": "The chip race is no longer just about faster devices. " + "Supply chains are changing. " * 90 + "The next shortage may begin long before a factory runs out of parts.",
+        "closing_line": "The next shortage may begin long before a factory runs out of parts.",
+        "scenes": [
+            {"duration": 75, "visual_prompt": "A horizontal documentary view of a semiconductor cleanroom corridor."},
+            {"duration": 75, "visual_prompt": "A cargo terminal with sealed electronics containers at dusk."},
+            {"duration": 75, "visual_prompt": "A symbolic circuit board beside a world map without readable labels."},
+            {"duration": 75, "visual_prompt": "A wide shot of industrial machinery under cool light."},
+        ],
+        "fact_note": "Avoids unsupported company-specific claims.",
+        "source_hints": ["Technology RSS headlines"],
+    }
+    expanded_plan = dict(short_plan)
+    expanded_plan["narration"] = (
+        expanded_plan["hook"]
+        + " "
+        + " ".join(
+            "Governments, manufacturers, cloud companies, and equipment suppliers are all adjusting because advanced chips now sit inside military systems, data centers, vehicles, phones, and industrial machines."
+            for _ in range(28)
+        )
+        + " "
+        + expanded_plan["closing_line"]
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = [
+                short_plan,
+                {"quality_check": {"timeliness_score": 8, "clarity_score": 8}, "plan": short_plan},
+                {"plan": expanded_plan},
+            ]
+
+        def chat(self, _prompt, temperature=0.55, reasoning_effort=None):
+            return json.dumps(self.responses.pop(0))
+
+    result = bot.plan_long_form(
+        FakeClient(),
+        bot.Archive(tmp_path / "shorts.db"),
+        "global current events",
+        300,
+        4,
+        4,
+        [{"category": "technology", "title": "Chip rules reshape supply chains", "summary": "Technology companies adapt."}],
+    )
+
+    assert bot.spoken_word_count(result.narration) >= bot.long_form_word_bounds(300)[0]
+
+
+def test_prepare_long_form_images_creates_every_image_in_one_run(tmp_path):
     plan = bot.ShortPlan.from_dict({
         "topic": "Topic",
         "angle": "Angle",
@@ -439,23 +649,25 @@ def test_prepare_long_form_images_respects_budget(tmp_path):
         "source_hints": ["Source"],
     })
 
-    class FakePollinations:
+    class FakeImages:
+        s = bot.Settings(brave_web_images_per_long_form=0)
+
         def __init__(self):
             self.calls = []
 
-        def image(self, prompt, destination, seed, width=1080, height=1920):
-            self.calls.append((prompt, destination.name, width, height))
+        def image(self, search_query, generation_prompt, destination, width, height, prefer_web, web_only=False):
+            self.calls.append((generation_prompt, destination.name, width, height, prefer_web, web_only))
             destination.write_bytes(b"i" * 2048)
 
-    client = FakePollinations()
+    client = FakeImages()
 
-    generated = bot.prepare_long_form_images(plan, client, tmp_path, image_budget=2)
+    generated = bot.prepare_long_form_images(plan, client, tmp_path)
 
-    assert generated == 2
-    assert len(client.calls) == 2
-    assert client.calls[0][2:] == (1920, 1080)
+    assert generated == 3
+    assert len(client.calls) == 3
+    assert client.calls[0][2:4] == (1920, 1080)
     assert (tmp_path / "long_scene_01.jpg").is_file()
-    assert not (tmp_path / "long_scene_03.jpg").exists()
+    assert (tmp_path / "long_scene_03.jpg").is_file()
 
 
 def test_prepare_long_form_images_fails_when_placeholder_fallback_disabled(tmp_path):
@@ -473,22 +685,57 @@ def test_prepare_long_form_images_fails_when_placeholder_fallback_disabled(tmp_p
         "source_hints": ["Source"],
     })
 
-    class FakePollinations:
-        s = bot.Settings(grok_api_key="grok", video_api_key="video", allow_image_fallback_placeholder=False)
+    class FakeImages:
+        s = bot.Settings(brave_web_images_per_long_form=0, allow_image_fallback_placeholder=False)
 
         def image(self, *_args, **_kwargs):
-            raise bot.PollinationsTransientError("quota exhausted")
+            raise bot.ImageGenerationTransientError("quota exhausted")
 
     with pytest.raises(bot.BotError, match="placeholder fallback is disabled"):
-        bot.prepare_long_form_images(plan, FakePollinations(), tmp_path, image_budget=1)
+        bot.prepare_long_form_images(plan, FakeImages(), tmp_path)
+
+
+def test_long_form_uses_five_brave_slots_and_only_ten_openai_slots(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic", "angle": "Angle", "title": "Title",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Body. Close.", "closing_line": "Close.",
+        "scenes": [
+            {"duration": 20, "visual_prompt": f"Scene {index}"}
+            for index in range(1, 16)
+        ],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+
+    class FakeImages:
+        s = bot.Settings(brave_web_images_per_long_form=5)
+
+        def __init__(self):
+            self.openai_calls = 0
+            self.brave_calls = 0
+
+        def image(self, search_query, generation_prompt, destination, width, height, prefer_web, web_only=False):
+            if prefer_web:
+                self.brave_calls += 1
+                return "missing"
+            self.openai_calls += 1
+            destination.write_bytes(b"o" * 2048)
+            return "openai"
+
+    client = FakeImages()
+    prepared = bot.prepare_long_form_images(plan, client, tmp_path)
+
+    assert prepared == 15
+    assert client.brave_calls == 5
+    assert client.openai_calls == 10
+    assert all((tmp_path / f"long_scene_{index:02d}.jpg").is_file() for index in range(1, 16))
 
 
 def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
     called = {}
 
     monkeypatch.setenv("BOT_RUN_MODE", "long-form")
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini")
-    monkeypatch.setenv("POLLINATIONS_VIDEO_API_KEY", "video")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
     monkeypatch.setattr(bot, "materialize_railway_credentials", lambda: None)
     monkeypatch.setattr(bot, "ensure_dejavu_font", lambda: None)
     class FakeArchive:
@@ -496,8 +743,8 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
             return None
 
     monkeypatch.setattr(bot, "Archive", lambda: FakeArchive())
-    monkeypatch.setattr(bot, "Pollinations", lambda settings: object())
-    monkeypatch.setattr(bot, "GeminiClient", lambda settings: object())
+    monkeypatch.setattr(bot, "VisualAssetProvider", lambda settings: object())
+    monkeypatch.setattr(bot, "OpenAITextClient", lambda settings: object())
     monkeypatch.setattr(bot, "GoogleChirpTTS", lambda settings: object())
 
     def fake_run_long_form_flow(**kwargs):
@@ -508,7 +755,6 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["youtube_shorts_bot.py", "--publish", "--scheduled"])
 
     assert bot.main() == 0
-    assert called["mode"] == "auto"
     assert called["publish"] is True
 
 
@@ -537,7 +783,7 @@ def test_facebook_page_upload_posts_video(tmp_path, monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr(bot.requests, "post", fake_post)
-    settings = bot.Settings(grok_api_key="grok", video_api_key="video", facebook_page_id="page1", facebook_page_access_token="token")
+    settings = bot.Settings(facebook_page_id="page1", facebook_page_access_token="token")
     social = bot.SocialPlan(title="Tieu de", description="Mo ta", tags=["tag"], narration="Loi doc")
 
     assert bot.upload_to_facebook_page(video, social, settings) == "fb123"
@@ -584,8 +830,6 @@ def test_facebook_upload_retries_with_user_token_when_page_token_expired(tmp_pat
     monkeypatch.setattr(bot.requests, "post", fake_post)
     monkeypatch.setattr(bot.requests, "get", fake_get)
     settings = bot.Settings(
-        grok_api_key="grok",
-        video_api_key="video",
         facebook_page_id="page1",
         facebook_page_access_token="expired-page-token",
         facebook_user_access_token="user-token",
@@ -611,8 +855,6 @@ def test_facebook_expired_page_token_error_is_actionable(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bot.requests, "post", lambda *_args, **_kwargs: FakeResponse())
     settings = bot.Settings(
-        grok_api_key="grok",
-        video_api_key="video",
         facebook_page_id="page1",
         facebook_page_access_token="expired-page-token",
     )
@@ -653,7 +895,7 @@ def test_tiktok_direct_post_uploads_whole_file(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bot.requests, "post", fake_post)
     monkeypatch.setattr(bot.requests, "put", fake_put)
-    settings = bot.Settings(grok_api_key="grok", video_api_key="video", tiktok_access_token="token")
+    settings = bot.Settings(tiktok_access_token="token")
     social = bot.SocialPlan(title="Tieu de", description="Mo ta #lichsu", tags=["lichsu"], narration="Loi doc")
 
     assert bot.upload_to_tiktok(video, social, settings) == "tt123"

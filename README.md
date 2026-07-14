@@ -14,7 +14,7 @@ Caption được burn-in bằng FFmpeg/ASS sau khi TTS tạo audio, không nhờ
 
 Logo thương hiệu nền trong suốt từ `overlay-logo.png` được chèn xuyên suốt ở góc trên bên phải của Shorts, video dài và bản social. Mặc định logo rộng 220 px ở cả hai định dạng, cách mép phải 36 px; logo Short cách mép trên 72 px và logo video dài cách mép trên 36 px. Có thể chỉnh bằng các biến `OVERLAY_LOGO_*`.
 
-Topic Short mặc định ưu tiên nội dung có sức tò mò đại chúng: bí ẩn, thảm họa, thành phố/đế chế thất lạc, khoa học, phát minh, các kỳ quan và kiến trúc xưa–nay. Video dài vẫn tập trung tin tức thế giới, chính trị, quân sự, kinh tế, công nghệ, thể thao và khoa học.
+Topic Short giữ đúng phong cách documentary về nhân vật và sự kiện lịch sử, nền văn minh, chiến tranh, đế chế, kỳ quan thiên nhiên, kiến trúc xưa–nay, công trình nổi tiếng, thảm họa và lịch sử văn hóa. Bot không chọn chủ đề độc lập về phát minh/kỹ thuật, động vật, khảo cổ, khám phá khoa học hoặc thám hiểm không gian; chi tiết xây dựng chỉ được dùng để kể về một công trình hay kiến trúc cụ thể. Mỗi video phải chọn một câu chuyện như quyết định, cách xây dựng, trở ngại, sai lầm, bước ngoặt, kỷ lục hoặc chi tiết ít người biết để người xem dễ hiểu và kể lại. Planner loại góc lý thuyết, hành tinh giả định và ẩn dụ học thuật; không chuyển nội dung thành mẹo tiêu dùng. Video dài chỉ tập trung tin thế giới, chính trị, quân sự, kinh tế, công nghệ và thể thao; không lấy chủ đề khoa học.
 
 ## Local setup
 
@@ -164,4 +164,4 @@ LONG_FORM_INTERVAL_DAYS=2
 BRAVE_WEB_IMAGES_PER_LONG_FORM=5
 ```
 
-Nội dung video dài vẫn dùng Google News RSS làm lead cho tin thế giới, chính trị/quân sự, kinh tế, công nghệ, thể thao và khoa học; planner tiếp tục loại nội dung liên quan Việt Nam. Mười ảnh OpenAI `low` có chi phí đầu ra khoảng `$0.05/video dài`; Brave không tìm đủ thì visual được lặp lại nên mức OpenAI này không tăng. PostgreSQL lưu lịch và archive, còn toàn bộ media được tạo và hoàn tất trong cùng một lượt chạy.
+Nội dung video dài dùng Google News RSS làm lead cho tin thế giới, chính trị/quân sự, kinh tế, công nghệ và thể thao. Feed khoa học đã bị loại; planner cũng từ chối nghiên cứu khoa học, khí hậu, không gian, y khoa, khảo cổ và tin học thuật lọt vào mục tin tổng hợp. Kịch bản ưu tiên thay đổi cụ thể, người bị ảnh hưởng, hệ quả thực tế và diễn biến cần theo dõi; đồng thời tiếp tục loại nội dung liên quan Việt Nam. Mười ảnh OpenAI `low` có chi phí đầu ra khoảng `$0.05/video dài`; Brave không tìm đủ thì visual được lặp lại nên mức OpenAI này không tăng. PostgreSQL lưu lịch và archive, còn toàn bộ media được tạo và hoàn tất trong cùng một lượt chạy.

@@ -89,10 +89,15 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "viewer_question" in prompts[0]
     assert "procedural report" in prompts[0]
     assert "low-stakes" in prompts[0]
+    assert "Concrete/retellability test" in prompts[0]
+    assert "classroom theory" in prompts[0]
     assert "viewer_question, stakes, and thumbnail_hint" in prompts[1]
+    assert "viewer_payoff" in prompts[1]
+    assert "worth remembering or sharing" in prompts[1]
     assert "photorealistic" in prompts[1]
     assert "Preserve this visual direction" in prompts[2]
-    assert "dry topics that lack a strong hook" in prompts[2]
+    assert "dry topics that lack a strong concrete story" in prompts[2]
+    assert "concreteness_score" in prompts[2]
 
 
 def test_choose_novel_plan_passes_duplicate_candidate_to_retry(tmp_path, monkeypatch):
@@ -126,6 +131,118 @@ def test_choose_novel_plan_passes_duplicate_candidate_to_retry(tmp_path, monkeyp
     assert rejected_seen[0] == []
     assert rejected_seen[1][0]["title"] == "Ancient Gears Predicted Eclipses"
     assert rejected_seen[1][0]["matched_existing_title"] == "Ancient Gears Predicted Eclipses"
+
+
+@pytest.mark.parametrize(
+    "angle",
+    [
+        "Newton as a human processing engine, not magic",
+        "A planet can lock itself into a self-feeding climate trap",
+        "The unintended hacking of Earth's biological carrying capacity",
+    ],
+)
+def test_short_editorial_filter_rejects_abstract_theory_angles(angle):
+    plan = bot.ShortPlan.from_dict({
+        "topic": angle,
+        "angle": angle,
+        "title": angle,
+        "description": "Description #A #B",
+        "tags": ["A", "B"],
+        "hook": angle,
+        "narration": angle,
+        "closing_line": angle,
+        "fact_note": "Note",
+        "source_hints": ["Source"],
+        "scenes": [{"duration": 10, "visual_prompt": "Concrete scene"}],
+    })
+
+    assert bot.short_editorial_rejection_reason(plan) is not None
+
+
+def test_short_categories_stay_documentary_not_consumer_tips():
+    categories = " ".join(bot.CURIOSITY_TOPIC_CATEGORIES).lower()
+
+    assert "historical figures" in categories
+    assert "major historical events" in categories
+    assert "world wonders and architecture" in categories
+    assert "natural wonders" in categories
+    assert "money and consumer surprises" not in categories
+    assert "shopping" not in categories
+    assert "scams" not in categories
+    assert "great inventions and engineering achievements" not in categories
+    assert "animals and remarkable nature" not in categories
+    assert "archaeology" not in categories
+    assert "scientific discoveries" not in categories
+    assert "space exploration" not in categories
+    assert "astronomy" not in categories
+
+
+def test_choose_novel_plan_retries_abstract_candidate(tmp_path, monkeypatch):
+    abstract = bot.ShortPlan.from_dict({
+        "topic": "Planetary feedback",
+        "angle": "A planet can lock itself into a climate trap",
+        "title": "The Planet That Locked Itself",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "A planet can lock itself into a climate trap.",
+        "narration": "A planet can lock itself into a climate trap.",
+        "closing_line": "The trap feeds itself.", "fact_note": "Note", "source_hints": ["Source"],
+        "scenes": [{"duration": 10, "visual_prompt": "A planet"}],
+    })
+    concrete = bot.ShortPlan.from_dict({
+        "topic": "Airplane window holes",
+        "angle": "The tiny hole prevents dangerous pressure stress",
+        "title": "That Tiny Airplane Window Hole Has a Safety Job",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "That tiny window hole protects the outer pane.",
+        "narration": "That tiny window hole protects the outer pane.",
+        "closing_line": "A tiny detail manages a huge pressure difference.",
+        "fact_note": "Note", "source_hints": ["FAA"],
+        "scenes": [{"duration": 10, "visual_prompt": "An airplane window"}],
+    })
+    rejected_seen = []
+
+    def fake_plan_short(_llm, _archive, _theme, _duration, rejected=None):
+        rejected_seen.append(list(rejected or []))
+        return abstract if len(rejected_seen) == 1 else concrete
+
+    monkeypatch.setattr(bot, "plan_short", fake_plan_short)
+
+    result = bot.choose_novel_plan(object(), bot.Archive(tmp_path / "shorts.db"), "documentary", 60, 2)
+
+    assert result == concrete
+    assert "editorial_rejection" in rejected_seen[1][0]
+
+
+def test_long_form_news_feeds_exclude_science(monkeypatch):
+    requested_urls = []
+
+    class FakeResponse:
+        def __init__(self, content):
+            self.content = content
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, **_kwargs):
+        requested_urls.append(url)
+        unique_title = f"Headline from feed {len(requested_urls)}"
+        rss = (
+            f"<rss><channel><item><title>{unique_title}</title>"
+            "<description>Concrete public impact</description>"
+            "<pubDate>Tue, 14 Jul 2026 06:00:00 GMT</pubDate>"
+            "<link>https://example.com</link></item></channel></rss>"
+        ).encode()
+        return FakeResponse(rss)
+
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+
+    context = bot.fetch_trending_news_context(limit=5)
+
+    assert len(requested_urls) == 5
+    assert all("SCIENCE" not in url for url in requested_urls)
+    assert {item["category"] for item in context} == {"top", "world", "business", "technology", "sports"}
+    assert all(item["published"] for item in context)
+    assert all("science" not in domain.lower() for domain in bot.LONG_FORM_TOPIC_DOMAINS)
 
 
 def test_archive_counts_jobs_created_today(tmp_path):

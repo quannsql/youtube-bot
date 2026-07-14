@@ -954,30 +954,57 @@ VIETNAM_BLOCKLIST = (
 )
 
 LONG_FORM_TOPIC_DOMAINS = (
-    "war and geopolitics",
-    "global politics outside Vietnam",
-    "sports",
-    "global economy and markets",
-    "technology and AI",
-    "science, climate, and space",
-    "major disasters and infrastructure",
+    "global politics and elections outside Vietnam",
+    "wars, military affairs, defense, and geopolitics",
+    "global economy, business, trade, and markets",
+    "consumer technology, cybersecurity, AI industry, and major tech companies",
+    "major international sports",
+    "major world news with clear public impact",
 )
 
 CURIOSITY_TOPIC_CATEGORIES = [
-    "Great Discoveries & Mysteries: e.g., 'What really killed the dinosaurs?', 'Which empire vanished most mysteriously?', 'Did Atlantis exist?'",
-    "Historical figures, great people: Great achievements, lives, processes, or incredible facts about these prominent figures, e.g., 'Napoleon', 'Qin Shi Huang', 'Genghis Khan', 'George Washington', 'Albert Einstein', etc. (Note: avoid mentioning figures in Vietnam)",
-    "Historical events: great victories or defeats of an empire or nation, or shocking events in history, e.g., 'the atomic bombing of Hiroshima', 'the fall of the Roman Empire', 'the Battle of Waterloo', etc. (Note: avoid mentioning events in Vietnam).",
-    "Geography & Extreme Nature: e.g., 'The most dangerous place on earth', 'Unexplained natural phenomena'",
-    "Animals & Biology: e.g., 'The immortal jellyfish', 'Animals with mind-control abilities'",
-    "Great human inventions, both past and present, e.g., 'the printing press', 'the internet', 'the steam engine'.",
-    "World wonders and architecture, ancient and modern: reveal the engineering, symbolism, construction, or hidden trade-offs behind landmarks such as the Statue of Liberty, the Great Wall, the Three Gorges Dam, temples, bridges, towers, and megaprojects.",
-    "Space & the Cosmos: e.g., 'What happens inside a black hole?', 'The coldest place in the universe', 'Why Venus turned deadly'.",
-    "Physics & big scientific ideas made simple: e.g., 'Why time slows down near gravity', 'What absolute zero really means', 'How lightning actually forms'.",
-    "The human body & mind: e.g., 'What your brain does while you sleep', 'Why we forget', 'The organ we barely understand'.",
-    "Ancient engineering & lost technology: e.g., 'How Rome made concrete that still stands', 'The 2000-year-old computer', 'Why we can't rebuild some ancient structures'.",
-    "Money, economics & society: e.g., 'How one tulip crashed an economy', 'The most valuable object ever made', 'Why some currencies collapse overnight'.",
-    "Everyday things with a hidden origin or secret: e.g., 'Why keyboards aren't alphabetical', 'The accident that created a common food', 'What's really inside your everyday objects'.",
+    "Famous historical figures outside Vietnam: reveal one documented decision, habit, relationship, failure, escape, object, contradiction, or little-known episode that shows what the person was actually like. Use a concrete story, never an abstract metaphor or personality theory.",
+    "Major historical events outside Vietnam: tell one decisive moment, overlooked mistake, unlikely turning point, deception, survival story, or consequence that changed the recognizable outcome.",
+    "World wonders and architecture, ancient and modern: explain how a named landmark or megaproject was built, the hardest engineering problem, a unique structural feature, a hidden space, symbolism, human cost, or a surprising episode in its history. Examples include the Statue of Liberty, Great Wall, Three Gorges Dam, temples, bridges, towers, and palaces.",
+    "Natural wonders and extreme geography: focus on one named place, how a visible feature formed, what makes it unique, a record it holds, a real danger, or the human story of exploring or protecting it.",
+    "Ancient civilizations, lost cities, and historical mysteries: center the story on a named civilization, ruler, city, monument, inscription, disappearance, conflict, or surviving historical record and clearly separate evidence from legend.",
+    "Wars, battles, empires, and political turning points in history outside Vietnam: focus on one concrete tactic, decision, object, route, betrayal, logistical failure, or unexpected event rather than broad theory.",
+    "Famous disasters, accidents, and engineering failures: explain the specific chain of events, overlooked warning, design flaw, rescue, or rule that changed afterward without graphic detail or sensationalism.",
+    "Origins of famous symbols, traditions, monuments, foods, or cultural practices: trace one documented event, creator, mistake, controversy, or transformation that produced something widely recognized today.",
 ]
+
+ABSTRACT_SHORT_TOPIC_TERMS = (
+    "abstract mechanism",
+    "biological carrying capacity",
+    "cognitive processing",
+    "conceptual model",
+    "climate trap",
+    "earth's carrying capacity",
+    "earth's biological",
+    "human processing engine",
+    "planetary feedback",
+    "planet can lock",
+    "processing engine",
+    "self-feeding climate",
+    "systems theory",
+    "theoretical framework",
+)
+
+SCIENCE_NEWS_BLOCKLIST = (
+    "archaeologists",
+    "archaeology",
+    "asteroid",
+    "clinical trial",
+    "exoplanet",
+    "fossil discovery",
+    "medical study",
+    "nasa mission",
+    "new species",
+    "researchers discover",
+    "scientists discover",
+    "space telescope",
+    "study finds",
+)
 
 # Trục ĐỊNH DẠNG kể chuyện — độc lập với chủ đề, quyết định "kiểu" video để phá thế đơn điệu.
 NARRATIVE_FORMATS = [
@@ -1015,7 +1042,8 @@ def get_random_topic_rule() -> str:
         f"TITLE STYLE to aim for: **{title_style}**. "
         "Only about one in three videos should use a question title; prefer confident declarative or teaser titles otherwise, "
         "and never begin the title with 'Why' unless the narrative format is genuinely MYSTERY. "
-        "Choose a topic with immediate viral curiosity. "
+        "Choose a concrete topic with immediate viral curiosity, a surprising historical or factual payoff, and a detail people would remember and retell. "
+        "Reject academic theories, unnamed hypothetical systems or planets, and metaphorical thesis-style angles. "
         "Do not hardcode the exact examples, but generate similarly captivating concepts."
     )
 
@@ -1063,6 +1091,10 @@ RESEARCH_SCHEMA = '''{
   "curiosity_frame":"match the assigned narrative format: mystery, record/superlative, hidden mechanism, rise-and-fall, myth correction, hidden origin, staggering number, dramatic transformation, or consequence",
   "viewer_question":"the single clickable hook this Short delivers — phrase it as a question ONLY if the format is a mystery, otherwise as a bold promise or reveal statement", "stakes":"why a broad viewer should care",
   "thumbnail_hint":"2-4 words for a vivid thumbnail concept",
+  "concrete_anchor":"the named person, place, object, event, rule, mistake, price, or feature at the center of the story",
+  "viewer_payoff":"the concrete answer, historical insight, construction detail, discovery, decision, or consequence the viewer learns",
+  "share_trigger":"the one-sentence fact a viewer would repeat to a friend",
+  "surprise_payoff":"the specific reveal that makes the hook worth watching",
   "central_claim":"one defensible claim", "evidence_points":["fact 1","fact 2","fact 3"],
   "uncertainty":"what must be qualified or omitted", "fresh_angle":"a non-repetitive narrative angle",
   "source_leads":["credible primary institution, archive, museum, or research body"],
@@ -1099,10 +1131,10 @@ def fetch_trending_news_context(limit: int = 28) -> list[dict[str, str]]:
         "business": "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
         "technology": "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en",
         "sports": "https://news.google.com/rss/headlines/section/topic/SPORTS?hl=en-US&gl=US&ceid=US:en",
-        "science": "https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=en-US&gl=US&ceid=US:en",
     }
     items: list[dict[str, str]] = []
     seen: set[str] = set()
+    per_feed_limit = max(1, (limit + len(feeds) - 1) // len(feeds))
     for category, url in feeds.items():
         try:
             response = requests.get(url, timeout=(10, 30))
@@ -1111,20 +1143,34 @@ def fetch_trending_news_context(limit: int = 28) -> list[dict[str, str]]:
         except Exception as exc:
             LOG.warning("Could not fetch %s news RSS: %s", category, exc)
             continue
+        category_items = 0
         for item in root.findall(".//item"):
             title = clean_feed_text(item.findtext("title") or "")
             summary = clean_feed_text(item.findtext("description") or "")
             link = clean_feed_text(item.findtext("link") or "")
-            if not title or mentions_vietnam(f"{title} {summary}"):
+            published = clean_feed_text(item.findtext("pubDate") or "")
+            normalized_news = f"{title} {summary}".lower()
+            if (
+                not title
+                or mentions_vietnam(normalized_news)
+                or any(term in normalized_news for term in SCIENCE_NEWS_BLOCKLIST)
+            ):
                 continue
             key = re.sub(r"\W+", "", title.lower())[:90]
             if key in seen:
                 continue
             seen.add(key)
-            items.append({"category": category, "title": title[:220], "summary": summary[:320], "link": link[:300]})
-            if len(items) >= limit:
-                return items
-    return items
+            items.append({
+                "category": category,
+                "title": title[:220],
+                "summary": summary[:320],
+                "published": published[:80],
+                "link": link[:300],
+            })
+            category_items += 1
+            if category_items >= per_feed_limit:
+                break
+    return items[:limit]
 
 
 def research_brief(
@@ -1136,13 +1182,14 @@ def research_brief(
 ) -> dict[str, Any]:
     past = past or []
     rejected = rejected or []
-    prompt = f'''Act as a high-retention research editor for an English science/history YouTube Short.
+    prompt = f'''Act as a high-retention research editor for an English general-audience YouTube Short.
 Theme: {theme}
 Use your reasoning internally before responding. Return only JSON using this schema:
 {RESEARCH_SCHEMA}
 Topic strategy: {topic_rule}
-Rules: Choose one topic that can be explained with established evidence and framed as a compelling hook a normal viewer would want to see paid off — a question, a bold claim, or a surprising reveal, whichever fits the assigned narrative format. Do not invent sources, data, fossil finds, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it. Prefer a surprising, specific angle over a broad textbook summary.
-Clickability filter: before selecting the topic, silently reject candidates that sound like a procedural report, a routine measurement update, a narrow technical footnote, or a low-stakes institutional detail. The final viewer_question should feel like a documentary title someone might click without already caring about the field.
+Rules: Choose one specific, evidence-based topic with a named person, place, object, event, rule, mistake, price, or visible feature. It must deliver a concrete surprise or useful real-world understanding that an ordinary viewer can grasp immediately. Do not invent sources, data, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it.
+Concrete/retellability test: silently reject the candidate unless it passes at least THREE of these tests: (1) centers a named person, event, place, structure, civilization, object, species, invention, mission, or discovery; (2) contains one documented decision, construction detail, obstacle, mistake, turning point, hidden feature, record, or discovery; (3) delivers a surprising answer that can be retold to a friend in one sentence; (4) has a vivid scene or object that can be shown clearly; (5) explains why the subject mattered in history or what changed because of it.
+Clickability filter: before selecting the topic, silently reject candidates that sound like a procedural report, a routine measurement update, a narrow technical footnote, a low-stakes institutional detail, a classroom theory, a speculative planetary scenario, or an academic concept with no concrete story. Never frame a person as a metaphorical "processing engine" and never build the story around carrying capacity, systems theory, a conceptual framework, or an unnamed planet. The final viewer_question should feel like a specific, surprising documentary story someone would click, save, or share without already knowing the subject.
 Novelty rule: The topic and fresh_angle must be materially different from every item in the existing archive and rejected candidates below. Do not choose the same object, event, artifact, site, person, mechanism, or central claim. If a broad theme keeps pointing to the same subject, switch domains within the theme.
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
@@ -1168,19 +1215,21 @@ def plan_short(
         else "TITLE VARIETY: vary the opening word of the title; do not default to 'Why'. "
     )
     brief = research_brief(llm, theme, topic_rule, past, rejected)
-    prompt = f'''Act as a senior documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
+    prompt = f'''Act as a senior viral documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
-Audience: curious global English-speaking viewers. Topics may cover discovery, history, geography, science, or technology.
+Audience: curious general English-speaking viewers, not academics or specialists. Keep the channel centered on historical figures, historical events, civilizations, wars, empires, natural wonders, architecture, famous landmarks, monuments, disasters, and cultural history.
 Topic strategy: {topic_rule}
 {opener_rule}
-Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel like a high-stakes, must-watch story in the assigned narrative format — not a neutral encyclopedia entry, and not forced into a generic "mystery" if another format was assigned.
+Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel specific, surprising, and worth remembering or sharing in the assigned narrative format — not a neutral encyclopedia entry, classroom lesson, consumer tip, or abstract theory.
+The topic, angle, title, and hook must name or clearly point to the brief's concrete_anchor. Fully deliver the viewer_payoff, share_trigger, and surprise_payoff. A viewer should be able to retell the core story in one plain sentence.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
 CRITICAL NARRATIVE RULE: The story must strictly follow a 3-part structure:
 1. BEGINNING (Context): Immediately establish the facts: Who? Where? When? What happened? Never jump straight into a mystery without setting the scene.
-2. MIDDLE (Deep Dive): Explain the mystery, scientific cause, or "What if" scenario in clear, simple terms.
-3. ENDING (Conclusion): Provide a satisfying conclusion or a haunting open question.
+2. MIDDLE (Story and reveal): Show the decision, construction challenge, obstacle, mistake, discovery, conflict, hidden feature, cause, or turning point using concrete details and simple cause-and-effect.
+3. ENDING (Meaning): Deliver the promised answer and finish with the historical significance, lasting consequence, striking comparison, or memorable fact worth retelling.
 Ensure the narration flows logically and is highly accessible to a general audience.
 Use plain spoken language, define any necessary technical term immediately, keep one main idea per sentence, and replace abstract filler with concrete cause-and-effect or scale comparisons. Fully pay off the opening hook before the closing line.
+Do not use thesis-like angles such as "X as a human engine," "a planet locking itself into a climate trap," "hacking Earth's carrying capacity," or similar metaphorical academic framing. Do not select standalone topics about inventions, engineering achievements, scientific discoveries, animals, archaeology, astronomy, or space exploration. Construction details are allowed only when they directly explain a named landmark, monument, building, bridge, dam, palace, temple, or other architectural work.
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
@@ -1193,10 +1242,10 @@ Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     LOG.info("Writing pass: turning the research brief into a short-form story…")
     draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.65)))
-    review_prompt = f'''Act as the final fact and retention editor. Think deeply but return only JSON.
+    review_prompt = f'''Act as the final fact, documentary-story, and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
-{{"quality_check":{{"hook_score":1,"clarity_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, and dry topics that lack a strong hook. Make the hook immediately intriguing, the middle concrete, and the closing line memorable. Use plain spoken English and ensure the narration clearly pays off the hook. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+{{"quality_check":{{"hook_score":1,"clarity_score":1,"concreteness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
+The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, consumer-tip drift, academic framing, speculative planetary scenarios, and dry topics that lack a strong concrete story. Rewrite any abstract angle into a named person/place/object/event/structure/discovery story; if that is impossible, replace it with a better candidate from the assigned documentary category. Make the hook immediately intriguing, the middle concrete, and the closing line memorable enough to retell or share. Use plain spoken English and ensure the narration clearly pays off the hook. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
@@ -1316,6 +1365,8 @@ Expansion requirements:
 - Add context, timeline, explanation, stakes, uncertainty, and likely next consequences.
 - Do not invent precise numbers, quotes, dates, casualty figures, scores, or market data not present in the supplied context.
 - Do not mention Vietnam or any Vietnam-related person, place, or event.
+- Keep the story strictly within politics, military affairs, economics, technology industry, sports, or major world news. Do not add science, climate research, space, medicine, or academic-study material.
+- Keep every chapter tied to a concrete current event and an ordinary-viewer consequence; avoid abstract geopolitical or economic theory.
 - The narration must begin with hook and end with closing_line.
 - Final narration word count must be {min_words}-{max_words}.
 
@@ -1364,10 +1415,13 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
 
 Hard rules:
 - Do NOT choose any topic, event, person, location, company, political figure, sports figure, or public controversy related to Vietnam.
-- Use the supplied news context as leads. If the context is thin, choose a globally relevant current topic outside Vietnam and explicitly keep claims broad.
+- Use the supplied news context as leads and prioritize the newest headline with the clearest public consequence. If the context is thin, choose a globally relevant current topic outside Vietnam and explicitly keep claims broad.
+- Cover ONLY politics, elections, wars, military affairs, geopolitics, economics, business, trade, markets, consumer technology, cybersecurity, the AI industry, major sports, or major world news. Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries even if they appear in a top-news feed.
 - Do not invent quotes, casualty numbers, market numbers, scores, dates, or source names not present in the context.
-- The result must feel timely, clickable, and broad-interest, but not sensationalized.
-- Explain the story like a 5-7 minute documentary: hook, context, timeline, what changed, why it matters, competing interpretations, likely next consequences, memorable close.
+- The result must feel timely, clickable, practical, surprising, and broad-interest, but not sensationalized.
+- Select a story with a concrete change: who acted, what changed, who pays or benefits, what viewers should watch next, and why it matters now. Reject routine speeches, procedural updates, and abstract policy theory with no visible consequence.
+- Use a save/share test: the viewer should finish with at least one clear consequence, comparison, warning sign, or next development they can explain to someone else.
+- Explain the story like a 5-7 minute news documentary: immediate headline payoff, essential context, timeline, what changed, who is affected, competing interpretations, likely next consequences, memorable close.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
 - Use roughly {min_words}-{max_words} spoken English words.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
@@ -1386,15 +1440,17 @@ Return raw JSON only using exactly this schema:
             )
         )
     )
-    review_prompt = f'''Act as the final long-form fact, structure, and retention editor. Return only JSON.
+    review_prompt = f'''Act as the final long-form news, fact, usefulness, and retention editor. Return only JSON.
 Improve the draft below for a {duration}-second horizontal YouTube documentary.
 Return exactly:
-{{"quality_check":{{"timeliness_score":1,"clarity_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{LONG_FORM_PLAN_SCHEMA}}}
+{{"quality_check":{{"timeliness_score":1,"clarity_score":1,"public_relevance_score":1,"shareability_score":1,"surprise_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{LONG_FORM_PLAN_SCHEMA}}}
 
 Rules:
 - Reject or rewrite any Vietnam-related topic, person, event, or location.
+- Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries. Keep only politics, military affairs, economics, business, technology industry, sports, or consequential world news.
 - Keep only claims supportable by the supplied RSS context or clearly phrased as general background.
-- Keep a strong first 20 seconds, then clear chapters with escalation and explanation.
+- Reject routine announcements or abstract theory unless the script can name the concrete change, affected people, real-world consequence, and what happens next.
+- Keep a strong first 20 seconds, then clear chapters with escalation, practical explanation, a surprising but supported payoff, and a reason viewers would save or share the video.
 - The narration must begin with hook and end with closing_line.
 - The scenes must total exactly {duration} seconds and be horizontal 16:9 visual prompts.
 - Word count must remain roughly {min_words}-{max_words}.
@@ -1484,6 +1540,16 @@ def rejection_context(plan: ShortPlan, duplicate: sqlite3.Row) -> dict[str, str]
     }
 
 
+def short_editorial_rejection_reason(plan: ShortPlan) -> str | None:
+    """Reject known academic/abstract framings before image credits are spent."""
+    text = " ".join((plan.topic, plan.angle, plan.title, plan.hook, plan.narration)).lower()
+    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    matched = [term for term in ABSTRACT_SHORT_TOPIC_TERMS if term in normalized]
+    if matched:
+        return f"abstract or theory-led framing ({', '.join(matched[:3])})"
+    return None
+
+
 def choose_novel_plan(
     llm: OpenAITextClient,
     archive: Archive,
@@ -1494,6 +1560,16 @@ def choose_novel_plan(
     rejected: list[dict[str, str]] = []
     for _attempt in range(1, max_attempts + 1):
         plan = plan_short(llm, archive, theme, duration, rejected)
+        editorial_reason = short_editorial_rejection_reason(plan)
+        if editorial_reason:
+            rejected.append({
+                "topic": plan.topic,
+                "angle": plan.angle,
+                "title": plan.title,
+                "editorial_rejection": editorial_reason,
+            })
+            print(f"Ý tưởng quá trừu tượng ({plan.title!r}); yêu cầu OpenAI chọn câu chuyện thực dụng hơn…")
+            continue
         duplicate = archive.duplicate_of(plan)
         if not duplicate:
             return plan
@@ -2483,7 +2559,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--theme",
-        default="high-curiosity mysteries, disasters, lost civilizations, world wonders, architecture, scientific limits, and grounded what-if questions",
+        default="historical figures, major historical events, civilizations, wars, empires, natural wonders, world architecture, famous landmarks, monuments, disasters, and cultural history with surprising concrete details",
     )
     parser.add_argument(
         "--duration",

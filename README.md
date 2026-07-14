@@ -112,8 +112,9 @@ SCHEDULED_DAILY_LIMIT=2
 GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json
 GOOGLE_TTS_VOICE=en-US-Chirp3-HD-Achernar
 GOOGLE_TTS_SPEAKING_RATE=1.05
-SOCIAL_TTS_VOICE=vi-VN-Standard-A
-SOCIAL_TTS_SPEAKING_RATE=1.05
+# Vietnamese Short narration for Facebook/TikTok via OpenAI gpt-4o-mini-tts
+SOCIAL_OPENAI_TTS_VOICE=marin
+SOCIAL_OPENAI_TTS_SPEED=1.0
 YOUTUBE_CLIENT_SECRETS=client_secrets.json
 YOUTUBE_TOKEN_FILE=youtube_token.json
 YOUTUBE_PRIVACY_STATUS=private
@@ -132,7 +133,7 @@ TIKTOK_DISABLE_STITCH=false
 
 `OPENAI_TEXT_ATTEMPTS`/`OPENAI_TEXT_RETRY_BACKOFF_SECONDS` và `OPENAI_IMAGE_ATTEMPTS`/`OPENAI_IMAGE_RETRY_BACKOFF_SECONDS` giúp cron chịu được lỗi mạng/rate-limit tạm thời. Chất lượng và kích thước GPT Image 2 không có biến môi trường để nâng lên, tránh vô tình tiêu credits ở mức `medium/high`.
 
-Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. Nếu Page token hết hạn hoặc bạn muốn bot tự lấy token Page mỗi lần chạy, đặt thêm `FACEBOOK_USER_ACCESS_TOKEN` là long-lived user token có quyền quản lý Page; bot sẽ gọi `/me/accounts` để lấy Page token khớp `FACEBOOK_PAGE_ID`. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
+Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Voice tiếng Việt dùng OpenAI `gpt-4o-mini-tts` với mặc định `marin`; có thể đổi qua `SOCIAL_OPENAI_TTS_VOICE` và `SOCIAL_OPENAI_TTS_SPEED`. Trước khi gọi Brave hoặc GPT Image 2, bot luôn tạo audio tiếng Anh và lấy thời lượng thật làm timeline: các scene sẽ được co/giãn theo audio, nên không cần tạo lại voice chỉ để khớp thời lượng. Bản tiếng Việt cũng tự co/giãn từ visual đã có, không tạo thêm ảnh. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. Nếu Page token hết hạn hoặc bạn muốn bot tự lấy token Page mỗi lần chạy, đặt thêm `FACEBOOK_USER_ACCESS_TOKEN` là long-lived user token có quyền quản lý Page; bot sẽ gọi `/me/accounts` để lấy Page token khớp `FACEBOOK_PAGE_ID`. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
 
 Không thêm `BOT_DATA_DIR=.` vào Railway Variables: điều đó sẽ làm bot ghi dữ liệu vào filesystem tạm thay vì Volume. Để kiểm tra file trên Volume, Railway CLI hỗ trợ `railway volume files list /`.
 
@@ -140,7 +141,7 @@ Railway Cron yêu cầu process hoàn tất và thoát; bot đã là one-shot pr
 
 ## Long-form horizontal videos
 
-Video dài chạy end-to-end trong một lượt: lập kế hoạch → chuẩn bị 15 visual (5 Brave + 10 OpenAI) → render → upload. Không còn chế độ `prepare/finalize`, không cần Volume để giữ ảnh tạo dần:
+Video dài chạy end-to-end trong một lượt: lập kế hoạch → tạo audio → co/giãn scene theo audio → chuẩn bị 15 visual (5 Brave + 10 OpenAI) → render → upload lên YouTube. Voice được dùng đúng một lần; video tự khớp với thời lượng voice nên không có đoạn im lặng cuối và không cần tiêu voice/ảnh lần hai chỉ để sửa thời lượng. Video dài không được đăng sang Facebook/TikTok và không tạo bản tiếng Việt. Không còn chế độ `prepare/finalize`, không cần Volume để giữ ảnh tạo dần:
 
 ```powershell
 python youtube_shorts_bot.py --long-form --publish

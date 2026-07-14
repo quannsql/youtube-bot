@@ -325,6 +325,17 @@ def test_settings_reads_scheduled_daily_limit(monkeypatch):
     assert bot.Settings.from_env().scheduled_daily_limit == 6
 
 
+def test_settings_defaults_social_tts_to_openai_marin(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.delenv("SOCIAL_OPENAI_TTS_VOICE", raising=False)
+    monkeypatch.delenv("SOCIAL_OPENAI_TTS_SPEED", raising=False)
+
+    settings = bot.Settings.from_env()
+
+    assert settings.social_openai_tts_voice == "marin"
+    assert settings.social_openai_tts_speed == 1.0
+
+
 def test_openai_text_uses_responses_api_and_extracts_output(monkeypatch):
     captured = {}
 
@@ -694,7 +705,7 @@ def test_split_text_for_tts_chunks_long_script():
 def test_plan_long_form_accepts_current_events_documentary(tmp_path):
     narration = (
         "This shipping shock is now bigger than one canal. "
-        + " ".join("Energy prices, insurance costs, rerouted ships, and military risk are changing global trade." for _ in range(60))
+            + " ".join("Energy prices, insurance costs, rerouted ships, and military risk are changing global trade." for _ in range(77))
         + " The real story is not one headline, but the fragile map underneath modern commerce."
     )
     plan = {
@@ -765,7 +776,7 @@ def test_plan_long_form_expands_too_short_script(tmp_path):
         + " "
         + " ".join(
             "Governments, manufacturers, cloud companies, and equipment suppliers are all adjusting because advanced chips now sit inside military systems, data centers, vehicles, phones, and industrial machines."
-            for _ in range(28)
+            for _ in range(36)
         )
         + " "
         + expanded_plan["closing_line"]
@@ -793,6 +804,13 @@ def test_plan_long_form_expands_too_short_script(tmp_path):
     )
 
     assert bot.spoken_word_count(result.narration) >= bot.long_form_word_bounds(300)[0]
+
+
+def test_long_form_word_bounds_match_chirp_documentary_pacing():
+    minimum, maximum = bot.long_form_word_bounds(419)
+
+    assert minimum == 1257
+    assert maximum == 1446
 
 
 def test_prepare_long_form_images_creates_every_image_in_one_run(tmp_path):
@@ -896,6 +914,74 @@ def test_long_form_uses_five_brave_slots_and_only_ten_openai_slots(tmp_path):
     assert all((tmp_path / f"long_scene_{index:02d}.jpg").is_file() for index in range(1, 16))
 
 
+def test_long_form_tts_preflight_failure_spends_no_image_credits(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic", "angle": "Angle", "title": "Title",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Body. Close.", "closing_line": "Close.",
+        "scenes": [{"duration": 60, "visual_prompt": "Scene one"}],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+    output_dir = tmp_path / "long-job"
+    output_dir.mkdir()
+    events = []
+
+    class FakeArchive:
+        def mark(self, *_args):
+            pass
+
+    class FakeImages:
+        web_sources = []
+
+    monkeypatch.setattr(bot, "long_form_is_due", lambda *_args: (True, None))
+    monkeypatch.setattr(bot, "create_long_form_job", lambda *_args: (plan, output_dir, 60, 1))
+
+    def fail_audio(*_args):
+        events.append("audio")
+        raise bot.BotError("audio duration mismatch")
+
+    def unexpected_images(*_args):
+        events.append("images")
+        raise AssertionError("images must not be requested after a failed audio preflight")
+
+    monkeypatch.setattr(bot, "prepare_long_form_narration", fail_audio)
+    monkeypatch.setattr(bot, "prepare_long_form_images", unexpected_images)
+
+    with pytest.raises(bot.BotError, match="audio duration mismatch"):
+        bot.run_long_form_flow(
+            publish=False,
+            privacy="private",
+            theme="world news",
+            settings=bot.Settings(),
+            archive=FakeArchive(),
+            llm=object(),
+            images=FakeImages(),
+            tts=object(),
+        )
+
+    assert events == ["audio"]
+
+
+def test_audio_led_timeline_rescales_all_scenes_exactly():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic", "angle": "Angle", "title": "Title",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Body. Close.", "closing_line": "Close.",
+        "scenes": [
+            {"duration": 10, "visual_prompt": "Scene one"},
+            {"duration": 20, "visual_prompt": "Scene two"},
+            {"duration": 30, "visual_prompt": "Scene three"},
+        ],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+
+    effective_duration = bot.rescale_scene_durations(plan, 47.321, "Short English")
+
+    assert effective_duration == 47.321
+    assert sum(scene.duration for scene in plan.scenes) == pytest.approx(47.321)
+    assert plan.scenes[1].duration == pytest.approx(plan.scenes[0].duration * 2, abs=0.002)
+
+
 def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
     called = {}
 
@@ -926,6 +1012,33 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
 def test_tts_language_code_supports_english_and_vietnamese_voices():
     assert bot.GoogleChirpTTS.language_code_for_voice("en-US-Chirp3-HD-Achernar") == "en-US"
     assert bot.GoogleChirpTTS.language_code_for_voice("vi-VN-Standard-A") == "vi-VN"
+
+
+def test_openai_short_vietnamese_tts_uses_gpt_4o_mini_tts(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+        content = b"mp3-bytes"
+        text = ""
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(url=url, headers=headers, payload=json, timeout=timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    destination = tmp_path / "narration_vi.mp3"
+    settings = bot.Settings(openai_api_key="openai", social_openai_tts_voice="marin")
+
+    bot.OpenAIShortVietnameseTTS(settings).speech("Xin chào, đây là đoạn đọc tiếng Việt.", destination)
+
+    assert destination.read_bytes() == b"mp3-bytes"
+    assert captured["url"] == "https://api.openai.com/v1/audio/speech"
+    assert captured["headers"]["Authorization"] == "Bearer openai"
+    assert captured["payload"]["model"] == "gpt-4o-mini-tts"
+    assert captured["payload"]["voice"] == "marin"
+    assert captured["payload"]["speed"] == 1.0
 
 
 def test_facebook_page_upload_posts_video(tmp_path, monkeypatch):

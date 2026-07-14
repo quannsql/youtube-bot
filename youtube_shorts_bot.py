@@ -145,6 +145,7 @@ class Settings:
     brave_search_api_key: str = ""
     openai_text_endpoint: str = "https://api.openai.com/v1/responses"
     openai_image_endpoint: str = "https://api.openai.com/v1/images/generations"
+    openai_tts_endpoint: str = "https://api.openai.com/v1/audio/speech"
     text_model: str = "gpt-5.4-mini"
     text_reasoning_effort: str = "low"
     text_long_form_reasoning_effort: str = "medium"
@@ -187,8 +188,8 @@ class Settings:
     youtube_client_secrets: Path = DATA_DIR / "client_secrets.json"
     youtube_token: Path = DATA_DIR / "youtube_token.json"
     youtube_privacy: str = "private"
-    social_tts_voice: str = "vi-VN-Standard-A"
-    social_tts_speaking_rate: float = 1.05
+    social_openai_tts_voice: str = "marin"
+    social_openai_tts_speed: float = 1.0
     publish_facebook: bool = False
     facebook_graph_version: str = "v25.0"
     facebook_page_id: str = ""
@@ -264,8 +265,8 @@ class Settings:
             youtube_client_secrets=DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
             youtube_token=DATA_DIR / os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
             youtube_privacy=os.getenv("YOUTUBE_PRIVACY_STATUS", "private"),
-            social_tts_voice=os.getenv("SOCIAL_TTS_VOICE", "vi-VN-Standard-A"),
-            social_tts_speaking_rate=float(os.getenv("SOCIAL_TTS_SPEAKING_RATE", os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05"))),
+            social_openai_tts_voice=os.getenv("SOCIAL_OPENAI_TTS_VOICE", "marin").strip() or "marin",
+            social_openai_tts_speed=min(4.0, max(0.25, float(os.getenv("SOCIAL_OPENAI_TTS_SPEED", "1.0")))),
             publish_facebook=env_bool("PUBLISH_FACEBOOK", False),
             facebook_graph_version=os.getenv("FACEBOOK_GRAPH_VERSION", "v25.0"),
             facebook_page_id=os.getenv("FACEBOOK_PAGE_ID", "").strip(),
@@ -365,7 +366,13 @@ def similarity(a: str, b: str) -> float:
 
 
 def narration_word_bounds(duration: int) -> tuple[int, int]:
-    return max(24, round(duration * 1.5)), duration * 4 + 4
+    # Unit tests and historical plans may use short durations below the current
+    # production minimum of 45 seconds; preserve their legacy bounds.
+    if duration < MIN_SHORT_DURATION_SECONDS:
+        return max(24, round(duration * 1.5)), duration * 4 + 4
+    # Chirp 3 HD reads the English Shorts at about 180 words per minute.
+    # Keep enough narration to fill the visual timeline without a silent tail.
+    return max(24, round(duration * 3.0)), round(duration * 3.45)
 
 
 class Archive:
@@ -915,6 +922,45 @@ class GoogleChirpTTS:
         destination.write_bytes(response.audio_content)
 
 
+class OpenAIShortVietnameseTTS:
+    """OpenAI TTS used only for Vietnamese Facebook/TikTok Shorts."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.s = settings
+
+    def speech(self, text: str, destination: Path) -> None:
+        payload = {
+            "model": "gpt-4o-mini-tts",
+            "voice": self.s.social_openai_tts_voice,
+            "input": text,
+            "instructions": (
+                "Speak natural Vietnamese from Vietnam for a short documentary social video. "
+                "Use a warm, confident, conversational delivery with clear pronunciation, "
+                "smooth pauses, and natural intonation. Do not add, omit, or translate words."
+            ),
+            "response_format": "mp3",
+            "speed": self.s.social_openai_tts_speed,
+        }
+        try:
+            response = requests.post(
+                self.s.openai_tts_endpoint,
+                headers={
+                    "Authorization": f"Bearer {self.s.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=(self.s.text_connect_timeout, self.s.text_read_timeout),
+            )
+        except requests.RequestException as exc:
+            raise BotError(f"OpenAI TTS tiếng Việt không thể kết nối: {exc}") from exc
+        if not response.ok:
+            detail = response.text[:500].strip() or "empty response"
+            raise BotError(f"OpenAI TTS tiếng Việt thất bại (HTTP {response.status_code}): {detail}")
+        if not response.content:
+            raise BotError("OpenAI TTS tiếng Việt trả audio rỗng.")
+        destination.write_bytes(response.content)
+
+
 # Chỉ dẫn dành cho LLM khi VIẾT visual_prompt (không phải để gửi cho model ảnh).
 VISUAL_STYLE_RULES = (
     "Write each visual_prompt as one concrete, self-contained sentence describing a single clear subject "
@@ -1215,6 +1261,7 @@ def plan_short(
         else "TITLE VARIETY: vary the opening word of the title; do not default to 'Why'. "
     )
     brief = research_brief(llm, theme, topic_rule, past, rejected)
+    minimum_words, maximum_words = narration_word_bounds(duration)
     prompt = f'''Act as a senior viral documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
 Audience: curious general English-speaking viewers, not academics or specialists. Keep the channel centered on historical figures, historical events, civilizations, wars, empires, natural wonders, architecture, famous landmarks, monuments, disasters, and cultural history.
@@ -1233,7 +1280,7 @@ Do not use thesis-like angles such as "X as a human engine," "a planet locking i
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
-Split the story into exactly 6 scenes whose total duration is exactly {duration}. Reusing a visual concept is acceptable when it helps continuity, but every scene still needs a concrete visual_prompt. For a {duration}-second Short, use roughly {max(30, round(duration * 1.75))}–{duration * 3 + 15} spoken English words.
+Split the story into exactly 6 scenes whose total duration is exactly {duration}. Reusing a visual concept is acceptable when it helps continuity, but every scene still needs a concrete visual_prompt. For a {duration}-second Short, use roughly {minimum_words}–{maximum_words} spoken English words.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, fact_note, and source_hints.
 The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
@@ -1260,7 +1307,6 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if abs(scene_total - duration) > 0.1:
         raise BotError(f"OpenAI chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
-    minimum_words, maximum_words = narration_word_bounds(duration)
     if not minimum_words <= words <= maximum_words:
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
@@ -1290,7 +1336,10 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
 
 
 def long_form_word_bounds(duration: int) -> tuple[int, int]:
-    return round(duration * 1.55), round(duration * 2.75)
+    # Chirp 3 HD reads the English documentary scripts at roughly 180 words per
+    # minute in production.  The old lower bound (93 wpm) allowed the renderer
+    # to pad one or two minutes of silence onto an otherwise full-length video.
+    return round(duration * 3.0), round(duration * 3.45)
 
 
 def image_scene_prompt_horizontal(visual_prompt: str) -> str:
@@ -1511,20 +1560,21 @@ def choose_novel_long_form_plan(
 
 
 def plan_social_vietnamese(llm: OpenAITextClient, plan: ShortPlan, duration: int) -> SocialPlan:
+    minimum_words, maximum_words = narration_word_bounds(duration)
     prompt = f'''Translate and adapt this English YouTube Short plan into Vietnamese for Facebook and TikTok.
 Return raw JSON only with this schema:
 {{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with exactly 2 relevant hashtags","tags":["exactly 2 short hashtags"],"narration":"Vietnamese voice-over"}}
 Rules:
 - Keep every factual claim equivalent to the English plan; do not add dates, names, statistics, sources, or certainty.
 - Make the Vietnamese narration natural, concise, and suitable for a {duration}-second short video.
-- The narration should be roughly {max(28, round(duration * 1.6))}-{duration * 4 + 8} Vietnamese words.
+- The narration should be roughly {minimum_words}-{maximum_words} Vietnamese words.
 - The caption should disclose that the video is AI-assisted when appropriate.
 English plan: {json.dumps(plan.to_dict(), ensure_ascii=False)}'''
     LOG.info("Creating Vietnamese social caption and narration…")
     social = SocialPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.35)))
     words = len(re.findall(r"\b\w+\b", social.narration, flags=re.UNICODE))
-    if words < max(20, round(duration * 1.2)):
-        raise BotError(f"Kịch bản tiếng Việt có {words} từ, quá ngắn cho Short {duration}s.")
+    if not minimum_words <= words <= maximum_words:
+        raise BotError(f"Kịch bản tiếng Việt có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     LOG.info("Vietnamese social plan ready: %r (%d words)", social.title, words)
     return social
 
@@ -1708,7 +1758,7 @@ def mux_video_audio_with_captions(
     narration: Path,
     captions: Path,
     output: Path,
-    target_duration: int,
+    target_duration: float,
     settings: Settings,
     long_form: bool = False,
 ) -> None:
@@ -1833,6 +1883,57 @@ def synthesize_narration(
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(destination)])
 
 
+def measured_narration_duration(narration: Path, label: str) -> float:
+    """Use the generated audio as the source of truth for the visual timeline."""
+    narration_seconds = media_duration(narration)
+    if narration_seconds <= 0:
+        raise BotError(f"{label} narration has no audible duration.")
+    return round(narration_seconds, 3)
+
+
+def rescale_scene_durations(plan: ShortPlan, target_duration: float, label: str) -> float:
+    """Preserve scene proportions while making the video exactly match its audio."""
+    original_duration = sum(scene.duration for scene in plan.scenes)
+    if original_duration <= 0 or not plan.scenes:
+        raise BotError(f"{label} has no valid scene duration to rescale.")
+    scale = target_duration / original_duration
+    running_total = 0.0
+    for scene in plan.scenes[:-1]:
+        scene.duration = round(scene.duration * scale, 3)
+        running_total += scene.duration
+    plan.scenes[-1].duration = round(target_duration - running_total, 3)
+    LOG.info(
+        "%s timeline follows %.3fs of narration (was %.3fs; scale %.3f).",
+        label,
+        target_duration,
+        original_duration,
+        scale,
+    )
+    return target_duration
+
+
+def prepare_short_english_narration(
+    plan: ShortPlan,
+    tts: GoogleChirpTTS,
+    output_dir: Path,
+) -> tuple[Path, float]:
+    narration = output_dir / "narration.mp3"
+    LOG.info("Preflighting English narration before generating any Short images…")
+    tts.speech(plan.narration, narration)
+    return narration, measured_narration_duration(narration, "Short English")
+
+
+def prepare_long_form_narration(
+    plan: ShortPlan,
+    tts: GoogleChirpTTS,
+    output_dir: Path,
+) -> tuple[Path, float]:
+    narration = output_dir / "long_narration.mp3"
+    LOG.info("Preflighting long-form English narration before generating any images…")
+    synthesize_narration(tts, plan.narration, narration, output_dir, prefix="long_narration_part")
+    return narration, measured_narration_duration(narration, "Long-form")
+
+
 def distributed_web_image_indexes(scene_count: int, requested: int) -> set[int]:
     count = min(scene_count, max(0, requested))
     if count == 0:
@@ -1857,9 +1958,10 @@ def append_web_source_credits(plan: ShortPlan, sources: list[dict[str, str]]) ->
 def render(
     plan: ShortPlan,
     client: VisualAssetProvider,
-    tts: GoogleChirpTTS,
     output_dir: Path,
-    target_duration: int,
+    target_duration: float,
+    narration: Path,
+    narration_seconds: float,
 ) -> Path:
     require_tools()
     LOG.info("Rendering %d scenes into %s", len(plan.scenes), output_dir)
@@ -1869,22 +1971,25 @@ def render(
     for index, scene in enumerate(plan.scenes, start=1):
         image_file = output_dir / f"scene_{index}.jpg"
         clip = output_dir / f"scene_{index}.mp4"
-        try:
-            client.image(
-                search_query=scene.visual_prompt,
-                generation_prompt=image_scene_prompt(scene.visual_prompt),
-                destination=image_file,
-                width=1080,
-                height=1920,
-                prefer_web=index in web_indexes,
-            )
-        except ImageGenerationTransientError as exc:
-            if not client.s.allow_image_fallback_placeholder:
-                raise BotError(
-                    f"Image generation for scene {index} failed and placeholder fallback is disabled: {exc}"
-                ) from exc
-            LOG.warning("Image generation for scene %d failed; using fallback image: %s", index, exc)
-            create_fallback_scene_image(image_file, previous_image)
+        if image_file.is_file() and image_file.stat().st_size >= 1024:
+            LOG.info("Reusing existing Short image %d; no new image credit spent.", index)
+        else:
+            try:
+                client.image(
+                    search_query=scene.visual_prompt,
+                    generation_prompt=image_scene_prompt(scene.visual_prompt),
+                    destination=image_file,
+                    width=1080,
+                    height=1920,
+                    prefer_web=index in web_indexes,
+                )
+            except ImageGenerationTransientError as exc:
+                if not client.s.allow_image_fallback_placeholder:
+                    raise BotError(
+                        f"Image generation for scene {index} failed and placeholder fallback is disabled: {exc}"
+                    ) from exc
+                LOG.warning("Image generation for scene %d failed; using fallback image: %s", index, exc)
+                create_fallback_scene_image(image_file, previous_image)
         if image_file.stat().st_size < 1024:
             raise BotError(f"Cảnh {index} không phải hình ảnh hợp lệ.")
         
@@ -1917,18 +2022,6 @@ def render(
     )
     LOG.info("Concatenating and normalizing the vertical video…")
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)])
-
-    narration = output_dir / "narration.mp3"
-    LOG.info("Generating English narration with Google Chirp 3 HD…")
-    tts.speech(plan.narration, narration)
-    narration_seconds = media_duration(narration)
-    if narration_seconds > target_duration + 0.4:
-        # Gentle tempo increase only when the voice runs long; prevents visual/audio drift.
-        tempo = min(1.25, narration_seconds / target_duration)
-        adjusted = output_dir / "narration_fit.mp3"
-        run(["ffmpeg", "-y", "-i", str(narration), "-filter:a", f"atempo={tempo:.4f}", str(adjusted)])
-        narration = adjusted
-        narration_seconds = media_duration(narration)
 
     captions = output_dir / "captions_en.ass"
     caption_seconds = min(narration_seconds, target_duration)
@@ -1992,10 +2085,11 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
 
 def render_long_form_from_assets(
     plan: ShortPlan,
-    tts: GoogleChirpTTS,
     output_dir: Path,
-    target_duration: int,
+    target_duration: float,
     settings: Settings,
+    narration: Path,
+    narration_seconds: float,
 ) -> Path:
     require_tools()
     if not long_form_assets_ready(plan, output_dir):
@@ -2032,17 +2126,6 @@ def render_long_form_from_assets(
     )
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)])
 
-    narration = output_dir / "long_narration.mp3"
-    LOG.info("Generating long-form English narration...")
-    synthesize_narration(tts, plan.narration, narration, output_dir, prefix="long_narration_part")
-    narration_seconds = media_duration(narration)
-    if narration_seconds > target_duration + 0.4:
-        tempo = min(1.25, narration_seconds / target_duration)
-        adjusted = output_dir / "long_narration_fit.mp3"
-        run(["ffmpeg", "-y", "-i", str(narration), "-filter:a", f"atempo={tempo:.4f}", str(adjusted)])
-        narration = adjusted
-        narration_seconds = media_duration(narration)
-
     captions = output_dir / "long_captions_en.ass"
     caption_seconds = min(narration_seconds, target_duration)
     cues = caption_cues_from_text(plan.narration, caption_seconds)
@@ -2061,28 +2144,42 @@ def render_long_form_from_assets(
     return final_video
 
 
-def render_social_video(social: SocialPlan, tts: GoogleChirpTTS, output_dir: Path, settings: Settings, target_duration: int) -> Path:
+def retime_vertical_visuals(visuals: Path, destination: Path, target_duration: float) -> Path:
+    if destination.is_file() and abs(media_duration(destination) - target_duration) <= 0.15:
+        LOG.info("Reusing Vietnamese social visual timeline at %.3fs.", target_duration)
+        return destination
+    video_filter = (
+        "tpad=stop_mode=clone:stop_duration="
+        f"{target_duration},trim=duration={target_duration},setpts=PTS-STARTPTS,format=yuv420p"
+    )
+    run([
+        "ffmpeg", "-y", "-i", str(visuals), "-an", "-vf", video_filter,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(destination),
+    ])
+    return destination
+
+
+def render_social_video(social: SocialPlan, tts: OpenAIShortVietnameseTTS, output_dir: Path, settings: Settings) -> Path:
     visuals = output_dir / "visuals.mp4"
     if not visuals.is_file():
         raise BotError(f"Không tìm thấy visuals.mp4 để tạo bản social: {visuals}")
     narration = output_dir / "narration_vi.mp3"
-    LOG.info("Generating Vietnamese narration for Facebook/TikTok…")
-    tts.speech(social.narration, narration, voice=settings.social_tts_voice, speaking_rate=settings.social_tts_speaking_rate)
-    narration_seconds = media_duration(narration)
-    if narration_seconds > target_duration + 0.4:
-        tempo = min(1.25, narration_seconds / target_duration)
-        adjusted = output_dir / "narration_vi_fit.mp3"
-        run(["ffmpeg", "-y", "-i", str(narration), "-filter:a", f"atempo={tempo:.4f}", str(adjusted)])
-        narration = adjusted
-        narration_seconds = media_duration(narration)
+    LOG.info("Generating Vietnamese narration for Facebook/TikTok with OpenAI gpt-4o-mini-tts…")
+    tts.speech(social.narration, narration)
+    narration_seconds = measured_narration_duration(narration, "Short Vietnamese")
+    social_visuals = retime_vertical_visuals(
+        visuals,
+        output_dir / "visuals_vi.mp4",
+        narration_seconds,
+    )
     captions = output_dir / "captions_vi.ass"
-    caption_seconds = min(narration_seconds, target_duration)
+    caption_seconds = narration_seconds
     cues = caption_cues_from_text(social.narration, caption_seconds)
     write_ass_captions(cues, captions)
     LOG.info("Generated %d Vietnamese caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     social_video = output_dir / "short_vi.mp4"
     LOG.info("Muxing Vietnamese social video with captions…")
-    mux_video_audio_with_captions(visuals, narration, captions, social_video, target_duration, settings)
+    mux_video_audio_with_captions(social_visuals, narration, captions, social_video, narration_seconds, settings)
     return social_video
 
 
@@ -2423,7 +2520,7 @@ def social_publish_enabled(settings: Settings) -> bool:
     return settings.publish_facebook or settings.publish_tiktok
 
 
-def prepare_social_video(plan: ShortPlan, llm: OpenAITextClient, tts: GoogleChirpTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
+def prepare_social_video(plan: ShortPlan, llm: OpenAITextClient, tts: OpenAIShortVietnameseTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
     social_file = output_dir / "social_vi.json"
     if social_file.is_file():
         social = SocialPlan.from_dict(json.loads(social_file.read_text(encoding="utf-8")))
@@ -2432,7 +2529,7 @@ def prepare_social_video(plan: ShortPlan, llm: OpenAITextClient, tts: GoogleChir
         social_file.write_text(json.dumps(social.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     social_video = output_dir / "short_vi.mp4"
     if not social_video.is_file():
-        social_video = render_social_video(social, tts, output_dir, settings, settings.duration)
+        social_video = render_social_video(social, tts, output_dir, settings)
     return social_video, social
 
 
@@ -2480,18 +2577,10 @@ def long_form_is_due(
 
 
 def publish_long_form_video(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> dict[str, str]:
-    results: dict[str, str] = {}
     youtube_id = upload_to_youtube(video, plan, settings, privacy)
-    results["youtube"] = youtube_id
-    if settings.publish_facebook:
-        facebook_plan = SocialPlan(
-            title=plan.title,
-            description=plan.description,
-            tags=plan.tags,
-            narration=plan.narration,
-        )
-        results["facebook"] = upload_to_facebook_page(video, facebook_plan, settings)
-    return results
+    # Long-form is YouTube-only. Facebook/TikTok Vietnamese publishing applies
+    # to the separate Short workflow only.
+    return {"youtube": youtube_id}
 
 
 def run_long_form_flow(
@@ -2517,8 +2606,24 @@ def run_long_form_flow(
     plan, output_dir, duration, record_id = create_long_form_job(llm, archive, theme, settings)
     rendered = False
     try:
+        narration, narration_seconds = prepare_long_form_narration(
+            plan,
+            tts,
+            output_dir,
+        )
+        duration = rescale_scene_durations(plan, narration_seconds, "Long-form")
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         prepare_long_form_images(plan, images, output_dir)
-        video = render_long_form_from_assets(plan, tts, output_dir, duration, settings)
+        video = render_long_form_from_assets(
+            plan,
+            output_dir,
+            duration,
+            settings,
+            narration,
+            narration_seconds,
+        )
         append_web_source_credits(plan, images.web_sources)
         (output_dir / "plan.json").write_text(
             json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
@@ -2600,6 +2705,7 @@ def main() -> int:
     images = VisualAssetProvider(settings)
     llm = OpenAITextClient(settings)
     tts = GoogleChirpTTS(settings)
+    social_tts = OpenAIShortVietnameseTTS(settings)
     if args.long_form or env_forces_long_form:
         return run_long_form_flow(
             publish=args.publish,
@@ -2626,7 +2732,7 @@ def main() -> int:
             archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
 
         if social_publish_enabled(settings):
-            social_video, social = prepare_social_video(plan, llm, tts, video.parent, settings)
+            social_video, social = prepare_social_video(plan, llm, social_tts, video.parent, settings)
             social_results = publish_social_video(social_video, social, settings)
             if social_results:
                 print(f"Đã publish social: {social_results}")
@@ -2666,7 +2772,23 @@ def main() -> int:
     record_id = archive.reserve(plan, output_dir)
     rendered = False
     try:
-        video = render(plan, images, tts, output_dir, settings.duration)
+        narration, narration_seconds = prepare_short_english_narration(
+            plan,
+            tts,
+            output_dir,
+        )
+        effective_duration = rescale_scene_durations(plan, narration_seconds, "Short English")
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        video = render(
+            plan,
+            images,
+            output_dir,
+            effective_duration,
+            narration,
+            narration_seconds,
+        )
         append_web_source_credits(plan, images.web_sources)
         (output_dir / "plan.json").write_text(
             json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
@@ -2686,7 +2808,7 @@ def main() -> int:
                 archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
 
             if social_publish_enabled(settings):
-                social_video, social = prepare_social_video(plan, llm, tts, output_dir, settings)
+                social_video, social = prepare_social_video(plan, llm, social_tts, output_dir, settings)
                 social_results = publish_social_video(social_video, social, settings)
                 if social_results:
                     print(f"Đã publish social: {social_results}")

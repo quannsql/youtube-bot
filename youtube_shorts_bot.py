@@ -175,6 +175,12 @@ class Settings:
     image_vertical_size: str = "1024x1536"
     image_horizontal_size: str = "1536x1024"
     allow_image_fallback_placeholder: bool = False
+    overlay_logo: Path = ROOT / "overlay-logo.png"
+    overlay_logo_short_width: int = 220
+    overlay_logo_long_form_width: int = 220
+    overlay_logo_margin: int = 36
+    overlay_logo_short_top_margin: int = 72
+    overlay_logo_long_form_top_margin: int = 36
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
     google_tts_voice: str = "en-US-Chirp3-HD-Achernar"
     google_tts_speaking_rate: float = 1.05
@@ -199,6 +205,9 @@ class Settings:
     def from_env(cls, duration_override: int | None = None) -> "Settings":
         openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
         brave_long_form_images = min(10, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "5"))))
+        overlay_logo = Path(os.getenv("OVERLAY_LOGO_FILE", "overlay-logo.png"))
+        if not overlay_logo.is_absolute():
+            overlay_logo = ROOT / overlay_logo
         if not openai_api_key:
             raise BotError("Thiếu OPENAI_API_KEY cho OpenAI text và GPT Image 2.")
         duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "60"))
@@ -243,6 +252,12 @@ class Settings:
             long_form_interval_days=max(1, int(os.getenv("LONG_FORM_INTERVAL_DAYS", "2"))),
             scheduled_daily_limit=max(0, int(os.getenv("SCHEDULED_DAILY_LIMIT", "2"))),
             allow_image_fallback_placeholder=env_bool("ALLOW_IMAGE_FALLBACK_PLACEHOLDER", False),
+            overlay_logo=overlay_logo,
+            overlay_logo_short_width=max(64, int(os.getenv("OVERLAY_LOGO_SHORT_WIDTH", "220"))),
+            overlay_logo_long_form_width=max(64, int(os.getenv("OVERLAY_LOGO_LONG_FORM_WIDTH", "220"))),
+            overlay_logo_margin=max(0, int(os.getenv("OVERLAY_LOGO_MARGIN", "36"))),
+            overlay_logo_short_top_margin=max(0, int(os.getenv("OVERLAY_LOGO_SHORT_TOP_MARGIN", "72"))),
+            overlay_logo_long_form_top_margin=max(0, int(os.getenv("OVERLAY_LOGO_LONG_FORM_TOP_MARGIN", "36"))),
             google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
             google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Achernar"),
             google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
@@ -1618,12 +1633,35 @@ def mux_video_audio_with_captions(
     captions: Path,
     output: Path,
     target_duration: int,
+    settings: Settings,
+    long_form: bool = False,
 ) -> None:
+    logo = settings.overlay_logo
+    if not logo.is_file():
+        raise BotError(f"Không tìm thấy logo overlay: {logo}")
+    logo_width = (
+        settings.overlay_logo_long_form_width
+        if long_form
+        else settings.overlay_logo_short_width
+    )
+    margin = settings.overlay_logo_margin
+    top_margin = (
+        settings.overlay_logo_long_form_top_margin
+        if long_form
+        else settings.overlay_logo_short_top_margin
+    )
+    video_filter = (
+        f"[0:v]{ass_video_filter(captions)}[base];"
+        f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
+        f"[base][logo]overlay=x=W-w-{margin}:y={top_margin}:format=auto,format=yuv420p[v];"
+        f"[1:a]apad=pad_dur={target_duration}[a]"
+    )
     run([
         "ffmpeg", "-y",
         "-i", str(visuals),
         "-i", str(narration),
-        "-filter_complex", f"[0:v]{ass_video_filter(captions)}[v];[1:a]apad=pad_dur={target_duration}[a]",
+        "-loop", "1", "-i", str(logo),
+        "-filter_complex", video_filter,
         "-map", "[v]",
         "-map", "[a]",
         "-t", str(target_duration),
@@ -1823,7 +1861,7 @@ def render(
     LOG.info("Generated %d English caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     final_video = output_dir / "short.mp4"
     LOG.info("Muxing narration, captions, and final video…")
-    mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration)
+    mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration, client.s)
     return final_video
 
 
@@ -1876,7 +1914,13 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
     return prepared
 
 
-def render_long_form_from_assets(plan: ShortPlan, tts: GoogleChirpTTS, output_dir: Path, target_duration: int) -> Path:
+def render_long_form_from_assets(
+    plan: ShortPlan,
+    tts: GoogleChirpTTS,
+    output_dir: Path,
+    target_duration: int,
+    settings: Settings,
+) -> Path:
     require_tools()
     if not long_form_assets_ready(plan, output_dir):
         raise BotError("Long-form images are incomplete; the one-shot run cannot continue.")
@@ -1929,7 +1973,15 @@ def render_long_form_from_assets(plan: ShortPlan, tts: GoogleChirpTTS, output_di
     write_ass_captions(cues, captions, play_res_x=1920, play_res_y=1080, font_size=58, margin_v=92)
     final_video = output_dir / "long.mp4"
     LOG.info("Muxing horizontal long-form video...")
-    mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration)
+    mux_video_audio_with_captions(
+        visuals,
+        narration,
+        captions,
+        final_video,
+        target_duration,
+        settings,
+        long_form=True,
+    )
     return final_video
 
 
@@ -1954,7 +2006,7 @@ def render_social_video(social: SocialPlan, tts: GoogleChirpTTS, output_dir: Pat
     LOG.info("Generated %d Vietnamese caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     social_video = output_dir / "short_vi.mp4"
     LOG.info("Muxing Vietnamese social video with captions…")
-    mux_video_audio_with_captions(visuals, narration, captions, social_video, target_duration)
+    mux_video_audio_with_captions(visuals, narration, captions, social_video, target_duration, settings)
     return social_video
 
 
@@ -2390,7 +2442,7 @@ def run_long_form_flow(
     rendered = False
     try:
         prepare_long_form_images(plan, images, output_dir)
-        video = render_long_form_from_assets(plan, tts, output_dir, duration)
+        video = render_long_form_from_assets(plan, tts, output_dir, duration, settings)
         append_web_source_credits(plan, images.web_sources)
         (output_dir / "plan.json").write_text(
             json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"

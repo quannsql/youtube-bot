@@ -12,6 +12,8 @@ Brave chỉ giúp tìm ảnh, không tự cấp bản quyền sử dụng. Bot g
 
 Caption được burn-in bằng FFmpeg/ASS sau khi TTS tạo audio, không nhờ model video vẽ chữ. Bot chia narration thành cụm 3-6 từ, canh timing theo duration thực tế của MP3 sau bước chỉnh tempo, rồi lưu `captions_en.ass` và `captions_vi.ass` trong thư mục `generated/...` để dễ kiểm tra.
 
+Logo thương hiệu nền trong suốt từ `overlay-logo.png` được chèn xuyên suốt ở góc trên bên phải của Shorts, video dài và bản social. Mặc định logo rộng 220 px ở cả hai định dạng, cách mép phải 36 px; logo Short cách mép trên 72 px và logo video dài cách mép trên 36 px. Có thể chỉnh bằng các biến `OVERLAY_LOGO_*`.
+
 Topic Short mặc định ưu tiên nội dung có sức tò mò đại chúng: bí ẩn, thảm họa, thành phố/đế chế thất lạc, khoa học, phát minh, các kỳ quan và kiến trúc xưa–nay. Video dài vẫn tập trung tin tức thế giới, chính trị, quân sự, kinh tế, công nghệ, thể thao và khoa học.
 
 ## Local setup
@@ -99,6 +101,12 @@ BRAVE_WEB_IMAGES_PER_SHORT=2
 BRAVE_WEB_IMAGES_PER_LONG_FORM=5
 OPENAI_IMAGE_ATTEMPTS=3
 OPENAI_IMAGE_RETRY_BACKOFF_SECONDS=10
+OVERLAY_LOGO_FILE=overlay-logo.png
+OVERLAY_LOGO_SHORT_WIDTH=220
+OVERLAY_LOGO_LONG_FORM_WIDTH=220
+OVERLAY_LOGO_MARGIN=36
+OVERLAY_LOGO_SHORT_TOP_MARGIN=72
+OVERLAY_LOGO_LONG_FORM_TOP_MARGIN=36
 SHORT_DURATION_SECONDS=60
 SCHEDULED_DAILY_LIMIT=2
 GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json

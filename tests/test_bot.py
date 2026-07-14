@@ -346,6 +346,54 @@ def test_ass_filter_path_escapes_windows_drive():
     assert escaped.endswith("/captions_en.ass")
 
 
+@pytest.mark.parametrize(
+    ("long_form", "expected_width", "expected_top_margin"),
+    [(False, 220, 72), (True, 220, 36)],
+)
+def test_mux_adds_transparent_logo_at_top_right(
+    tmp_path, monkeypatch, long_form, expected_width, expected_top_margin
+):
+    logo = tmp_path / "overlay-logo.png"
+    logo.write_bytes(b"png")
+    captured = {}
+    monkeypatch.setattr(bot, "run", lambda command: captured.setdefault("command", command))
+    settings = bot.Settings(openai_api_key="openai", overlay_logo=logo)
+
+    bot.mux_video_audio_with_captions(
+        tmp_path / "visuals.mp4",
+        tmp_path / "narration.mp3",
+        tmp_path / "captions.ass",
+        tmp_path / "output.mp4",
+        60,
+        settings,
+        long_form=long_form,
+    )
+
+    command = captured["command"]
+    filter_complex = command[command.index("-filter_complex") + 1]
+    assert command[command.index("-loop"):command.index("-filter_complex")] == [
+        "-loop", "1", "-i", str(logo)
+    ]
+    assert f"scale={expected_width}:-1" in filter_complex
+    assert f"overlay=x=W-w-36:y={expected_top_margin}" in filter_complex
+    assert "format=rgba[logo]" in filter_complex
+
+
+def test_mux_requires_overlay_logo(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "run", lambda _command: pytest.fail("ffmpeg must not run"))
+    settings = bot.Settings(openai_api_key="openai", overlay_logo=tmp_path / "missing.png")
+
+    with pytest.raises(bot.BotError, match="Không tìm thấy logo overlay"):
+        bot.mux_video_audio_with_captions(
+            tmp_path / "visuals.mp4",
+            tmp_path / "narration.mp3",
+            tmp_path / "captions.ass",
+            tmp_path / "output.mp4",
+            60,
+            settings,
+        )
+
+
 def test_openai_image_retries_transient_failure(tmp_path, monkeypatch):
     calls = {"count": 0}
     encoded = base64.b64encode(b"x" * 2048).decode()

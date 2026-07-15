@@ -318,6 +318,11 @@ def test_settings_accepts_48_second_duration(monkeypatch):
     assert settings.text_long_form_reasoning_effort == "medium"
 
 
+def test_audio_led_short_keeps_word_target_as_guidance_not_a_hard_gate():
+    assert bot.target_narration_word_bounds(60) == (180, 207)
+    assert bot.narration_word_bounds(60) == (90, 244)
+
+
 def test_settings_reads_scheduled_daily_limit(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
     monkeypatch.setenv("SCHEDULED_DAILY_LIMIT", "6")
@@ -806,11 +811,12 @@ def test_plan_long_form_expands_too_short_script(tmp_path):
     assert bot.spoken_word_count(result.narration) >= bot.long_form_word_bounds(300)[0]
 
 
-def test_long_form_word_bounds_match_chirp_documentary_pacing():
+def test_long_form_word_bounds_keep_audio_led_safety_and_pacing_guidance_separate():
     minimum, maximum = bot.long_form_word_bounds(419)
+    target_minimum, target_maximum = bot.target_long_form_word_bounds(419)
 
-    assert minimum == 1257
-    assert maximum == 1446
+    assert (minimum, maximum) == (210, 2095)
+    assert (target_minimum, target_maximum) == (1257, 1446)
 
 
 def test_prepare_long_form_images_creates_every_image_in_one_run(tmp_path):

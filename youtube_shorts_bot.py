@@ -366,12 +366,15 @@ def similarity(a: str, b: str) -> float:
 
 
 def narration_word_bounds(duration: int) -> tuple[int, int]:
-    # Unit tests and historical plans may use short durations below the current
-    # production minimum of 45 seconds; preserve their legacy bounds.
+    # Broad safety range: audio-led rendering allows the final video to be
+    # shorter or longer than the requested target without rejecting a good plan.
+    return max(24, round(duration * 1.5)), duration * 4 + 4
+
+
+def target_narration_word_bounds(duration: int) -> tuple[int, int]:
+    """Preferred pacing sent to the writer; not a hard requirement."""
     if duration < MIN_SHORT_DURATION_SECONDS:
-        return max(24, round(duration * 1.5)), duration * 4 + 4
-    # Chirp 3 HD reads the English Shorts at about 180 words per minute.
-    # Keep enough narration to fill the visual timeline without a silent tail.
+        return narration_word_bounds(duration)
     return max(24, round(duration * 3.0)), round(duration * 3.45)
 
 
@@ -1261,6 +1264,7 @@ def plan_short(
         else "TITLE VARIETY: vary the opening word of the title; do not default to 'Why'. "
     )
     brief = research_brief(llm, theme, topic_rule, past, rejected)
+    target_minimum_words, target_maximum_words = target_narration_word_bounds(duration)
     minimum_words, maximum_words = narration_word_bounds(duration)
     prompt = f'''Act as a senior viral documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
@@ -1280,7 +1284,7 @@ Do not use thesis-like angles such as "X as a human engine," "a planet locking i
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
-Split the story into exactly 6 scenes whose total duration is exactly {duration}. Reusing a visual concept is acceptable when it helps continuity, but every scene still needs a concrete visual_prompt. For a {duration}-second Short, use roughly {minimum_words}–{maximum_words} spoken English words.
+Split the story into exactly 6 scenes whose total duration is exactly {duration}. Reusing a visual concept is acceptable when it helps continuity, but every scene still needs a concrete visual_prompt. For a {duration}-second Short, aim for roughly {target_minimum_words}–{target_maximum_words} spoken English words. This is a preferred pace, not a reason to pad a clear story with filler.
 Every string in the returned JSON must be English, including topic, title, description, tags, narration, fact_note, and source_hints.
 The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
@@ -1336,9 +1340,13 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
 
 
 def long_form_word_bounds(duration: int) -> tuple[int, int]:
-    # Chirp 3 HD reads the English documentary scripts at roughly 180 words per
-    # minute in production.  The old lower bound (93 wpm) allowed the renderer
-    # to pad one or two minutes of silence onto an otherwise full-length video.
+    # Broad content safety range. The actual audio duration now controls the
+    # rendered timeline, so this must not act as a hard target-duration gate.
+    return max(60, round(duration * 0.5)), round(duration * 5.0)
+
+
+def target_long_form_word_bounds(duration: int) -> tuple[int, int]:
+    """Preferred 5–7 minute pacing sent to the writer and reviewer."""
     return round(duration * 3.0), round(duration * 3.45)
 
 
@@ -1450,6 +1458,7 @@ def plan_long_form(
     past = archive.recent_context()
     rejected = rejected or []
     news_context = news_context or []
+    target_min_words, target_max_words = target_long_form_word_bounds(duration)
     min_words, max_words = long_form_word_bounds(duration)
     scene_count = random.randint(min_scenes, max_scenes)
     target_scene_duration = round(duration / scene_count, 2)
@@ -1472,7 +1481,7 @@ Hard rules:
 - Use a save/share test: the viewer should finish with at least one clear consequence, comparison, warning sign, or next development they can explain to someone else.
 - Explain the story like a 5-7 minute news documentary: immediate headline payoff, essential context, timeline, what changed, who is affected, competing interpretations, likely next consequences, memorable close.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
-- Use roughly {min_words}-{max_words} spoken English words.
+- Aim for roughly {target_min_words}-{target_max_words} spoken English words, but do not pad the story with filler solely to hit a duration target.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
 - Visuals: {LONG_FORM_VISUAL_STYLE_RULES}
 - It is acceptable for later scenes to reuse a visual concept if the narration has moved to a new argument, but still provide a visual_prompt for every scene.
@@ -1502,7 +1511,7 @@ Rules:
 - Keep a strong first 20 seconds, then clear chapters with escalation, practical explanation, a surprising but supported payoff, and a reason viewers would save or share the video.
 - The narration must begin with hook and end with closing_line.
 - The scenes must total exactly {duration} seconds and be horizontal 16:9 visual prompts.
-- Word count must remain roughly {min_words}-{max_words}.
+- Aim for roughly {target_min_words}-{target_max_words} words, but preserve a clear and complete story rather than adding filler solely to hit a duration target.
 
 News context: {json.dumps(news_context, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
@@ -1518,13 +1527,6 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
         raise BotError("OpenAI long-form quality pass thieu truong plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
     ensure_long_form_hook_and_closing(plan)
-    for expansion_attempt in range(2):
-        words = spoken_word_count(plan.narration)
-        if words >= min_words:
-            break
-        plan = expand_long_form_plan(llm, plan, duration, min_words, max_words, news_context)
-        ensure_long_form_hook_and_closing(plan)
-        LOG.info("Expansion pass %d produced %d words.", expansion_attempt + 1, spoken_word_count(plan.narration))
     normalize_scene_count(plan, scene_count)
     validate_long_form_plan(plan, duration, min_words, max_words, scene_count)
     quality = reviewed.get("quality_check", {})
@@ -1560,6 +1562,7 @@ def choose_novel_long_form_plan(
 
 
 def plan_social_vietnamese(llm: OpenAITextClient, plan: ShortPlan, duration: int) -> SocialPlan:
+    target_minimum_words, target_maximum_words = target_narration_word_bounds(duration)
     minimum_words, maximum_words = narration_word_bounds(duration)
     prompt = f'''Translate and adapt this English YouTube Short plan into Vietnamese for Facebook and TikTok.
 Return raw JSON only with this schema:
@@ -1567,7 +1570,7 @@ Return raw JSON only with this schema:
 Rules:
 - Keep every factual claim equivalent to the English plan; do not add dates, names, statistics, sources, or certainty.
 - Make the Vietnamese narration natural, concise, and suitable for a {duration}-second short video.
-- The narration should be roughly {minimum_words}-{maximum_words} Vietnamese words.
+- Aim for roughly {target_minimum_words}-{target_maximum_words} Vietnamese words, but prioritize natural Vietnamese over padding.
 - The caption should disclose that the video is AI-assisted when appropriate.
 English plan: {json.dumps(plan.to_dict(), ensure_ascii=False)}'''
     LOG.info("Creating Vietnamese social caption and narration…")

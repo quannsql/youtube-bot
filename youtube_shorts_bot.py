@@ -183,12 +183,12 @@ class Settings:
     overlay_logo_short_top_margin: int = 72
     overlay_logo_long_form_top_margin: int = 36
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
-    google_tts_voice: str = "en-US-Chirp3-HD-Achernar"
+    google_tts_voice: str = "en-US-Chirp3-HD-Enceladus"
     google_tts_speaking_rate: float = 1.05
     youtube_client_secrets: Path = DATA_DIR / "client_secrets.json"
     youtube_token: Path = DATA_DIR / "youtube_token.json"
     youtube_privacy: str = "private"
-    social_openai_tts_voice: str = "marin"
+    social_openai_tts_voice: str = "ash"
     social_openai_tts_speed: float = 1.0
     publish_facebook: bool = False
     facebook_graph_version: str = "v25.0"
@@ -260,12 +260,12 @@ class Settings:
             overlay_logo_short_top_margin=max(0, int(os.getenv("OVERLAY_LOGO_SHORT_TOP_MARGIN", "72"))),
             overlay_logo_long_form_top_margin=max(0, int(os.getenv("OVERLAY_LOGO_LONG_FORM_TOP_MARGIN", "36"))),
             google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
-            google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Achernar"),
+            google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Enceladus"),
             google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
             youtube_client_secrets=DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
             youtube_token=DATA_DIR / os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
             youtube_privacy=os.getenv("YOUTUBE_PRIVACY_STATUS", "private"),
-            social_openai_tts_voice=os.getenv("SOCIAL_OPENAI_TTS_VOICE", "marin").strip() or "marin",
+            social_openai_tts_voice=os.getenv("SOCIAL_OPENAI_TTS_VOICE", "ash").strip() or "ash",
             social_openai_tts_speed=min(4.0, max(0.25, float(os.getenv("SOCIAL_OPENAI_TTS_SPEED", "1.0")))),
             publish_facebook=env_bool("PUBLISH_FACEBOOK", False),
             facebook_graph_version=os.getenv("FACEBOOK_GRAPH_VERSION", "v25.0"),
@@ -883,8 +883,8 @@ class VisualAssetProvider:
         return "openai"
 
 
-class GoogleChirpTTS:
-    """Google Cloud Chirp 3 HD narration; independent from the image provider."""
+class GoogleCloudTTS:
+    """Google Cloud Text-to-Speech narration; independent from the image provider."""
 
     def __init__(self, settings: Settings) -> None:
         self.s = settings
@@ -921,7 +921,7 @@ class GoogleChirpTTS:
                 ),
             )
         except Exception as exc:
-            raise BotError(f"Google Chirp 3 HD không tạo được giọng đọc: {exc}") from exc
+            raise BotError(f"Google Cloud TTS không tạo được giọng đọc: {exc}") from exc
         destination.write_bytes(response.audio_content)
 
 
@@ -938,8 +938,9 @@ class OpenAIShortVietnameseTTS:
             "input": text,
             "instructions": (
                 "Speak natural Vietnamese from Vietnam for a short documentary social video. "
-                "Use a warm, confident, conversational delivery with clear pronunciation, "
-                "smooth pauses, and natural intonation. Do not add, omit, or translate words."
+                "Use the vibe of a patient teacher: calm, warm, clear, and encouraging. "
+                "Explain each idea with gentle pacing, smooth pauses, and natural intonation. "
+                "Do not sound childish, overly dramatic, or rushed. Do not add, omit, or translate words."
             ),
             "response_format": "mp3",
             "speed": self.s.social_openai_tts_speed,
@@ -1865,7 +1866,7 @@ def split_text_for_tts(text: str, max_chars: int = 3800) -> list[str]:
 
 
 def synthesize_narration(
-    tts: GoogleChirpTTS,
+    tts: GoogleCloudTTS,
     text: str,
     destination: Path,
     output_dir: Path,
@@ -1917,7 +1918,7 @@ def rescale_scene_durations(plan: ShortPlan, target_duration: float, label: str)
 
 def prepare_short_english_narration(
     plan: ShortPlan,
-    tts: GoogleChirpTTS,
+    tts: GoogleCloudTTS,
     output_dir: Path,
 ) -> tuple[Path, float]:
     narration = output_dir / "narration.mp3"
@@ -1928,7 +1929,7 @@ def prepare_short_english_narration(
 
 def prepare_long_form_narration(
     plan: ShortPlan,
-    tts: GoogleChirpTTS,
+    tts: GoogleCloudTTS,
     output_dir: Path,
 ) -> tuple[Path, float]:
     narration = output_dir / "long_narration.mp3"
@@ -2594,7 +2595,7 @@ def run_long_form_flow(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: GoogleChirpTTS,
+    tts: GoogleCloudTTS,
     force_new: bool = False,
 ) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -2707,7 +2708,7 @@ def main() -> int:
 
     images = VisualAssetProvider(settings)
     llm = OpenAITextClient(settings)
-    tts = GoogleChirpTTS(settings)
+    tts = GoogleCloudTTS(settings)
     social_tts = OpenAIShortVietnameseTTS(settings)
     if args.long_form or env_forces_long_form:
         return run_long_form_flow(

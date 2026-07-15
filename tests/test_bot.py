@@ -330,14 +330,14 @@ def test_settings_reads_scheduled_daily_limit(monkeypatch):
     assert bot.Settings.from_env().scheduled_daily_limit == 6
 
 
-def test_settings_defaults_social_tts_to_openai_marin(monkeypatch):
+def test_settings_defaults_social_tts_to_openai_ash(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
     monkeypatch.delenv("SOCIAL_OPENAI_TTS_VOICE", raising=False)
     monkeypatch.delenv("SOCIAL_OPENAI_TTS_SPEED", raising=False)
 
     settings = bot.Settings.from_env()
 
-    assert settings.social_openai_tts_voice == "marin"
+    assert settings.social_openai_tts_voice == "ash"
     assert settings.social_openai_tts_speed == 1.0
 
 
@@ -1002,7 +1002,7 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
     monkeypatch.setattr(bot, "Archive", lambda: FakeArchive())
     monkeypatch.setattr(bot, "VisualAssetProvider", lambda settings: object())
     monkeypatch.setattr(bot, "OpenAITextClient", lambda settings: object())
-    monkeypatch.setattr(bot, "GoogleChirpTTS", lambda settings: object())
+    monkeypatch.setattr(bot, "GoogleCloudTTS", lambda settings: object())
 
     def fake_run_long_form_flow(**kwargs):
         called.update(kwargs)
@@ -1016,8 +1016,8 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
 
 
 def test_tts_language_code_supports_english_and_vietnamese_voices():
-    assert bot.GoogleChirpTTS.language_code_for_voice("en-US-Chirp3-HD-Achernar") == "en-US"
-    assert bot.GoogleChirpTTS.language_code_for_voice("vi-VN-Standard-A") == "vi-VN"
+    assert bot.GoogleCloudTTS.language_code_for_voice("en-US-Chirp3-HD-Enceladus") == "en-US"
+    assert bot.GoogleCloudTTS.language_code_for_voice("vi-VN-Standard-A") == "vi-VN"
 
 
 def test_openai_short_vietnamese_tts_uses_gpt_4o_mini_tts(tmp_path, monkeypatch):
@@ -1035,7 +1035,7 @@ def test_openai_short_vietnamese_tts_uses_gpt_4o_mini_tts(tmp_path, monkeypatch)
 
     monkeypatch.setattr(bot.requests, "post", fake_post)
     destination = tmp_path / "narration_vi.mp3"
-    settings = bot.Settings(openai_api_key="openai", social_openai_tts_voice="marin")
+    settings = bot.Settings(openai_api_key="openai", social_openai_tts_voice="ash")
 
     bot.OpenAIShortVietnameseTTS(settings).speech("Xin chào, đây là đoạn đọc tiếng Việt.", destination)
 
@@ -1043,8 +1043,9 @@ def test_openai_short_vietnamese_tts_uses_gpt_4o_mini_tts(tmp_path, monkeypatch)
     assert captured["url"] == "https://api.openai.com/v1/audio/speech"
     assert captured["headers"]["Authorization"] == "Bearer openai"
     assert captured["payload"]["model"] == "gpt-4o-mini-tts"
-    assert captured["payload"]["voice"] == "marin"
+    assert captured["payload"]["voice"] == "ash"
     assert captured["payload"]["speed"] == 1.0
+    assert "patient teacher" in captured["payload"]["instructions"]
 
 
 def test_facebook_page_upload_posts_video(tmp_path, monkeypatch):

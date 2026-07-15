@@ -38,6 +38,9 @@ DATA_DIR = _configured_data_dir if _configured_data_dir.is_absolute() else ROOT 
 LOG = logging.getLogger("shorts_bot")
 MIN_SHORT_DURATION_SECONDS = 45
 MAX_SHORT_DURATION_SECONDS = 60
+SHORT_FORM_INTERMEDIATE_WIDTH = 1728
+SHORT_FORM_SCENE_RENDER_TIMEOUT_SECONDS = 120
+SHORT_FORM_FINAL_RENDER_TIMEOUT_SECONDS = 600
 LONG_FORM_INTERMEDIATE_WIDTH = 2304
 LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS = 120
 LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS = 900
@@ -577,6 +580,24 @@ class Archive:
         rows = self.conn.execute(
             "SELECT id, status, output_path FROM shorts WHERE output_path LIKE ? "
             "AND status IN (?, ?, ?) ORDER BY created_at DESC LIMIT ?",
+            ("%long-%", *statuses, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def resumable_short_form_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Return interrupted Short jobs that can continue from files on the Volume."""
+        statuses = ("rendering", "failed")
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, status, output_path FROM shorts WHERE output_path NOT LIKE %s "
+                    "AND status IN %s ORDER BY created_at DESC LIMIT %s",
+                    ("%long-%", statuses, limit),
+                )
+                return [dict(row) for row in cur.fetchall()]
+        rows = self.conn.execute(
+            "SELECT id, status, output_path FROM shorts WHERE output_path NOT LIKE ? "
+            "AND status IN (?, ?) ORDER BY created_at DESC LIMIT ?",
             ("%long-%", *statuses, limit),
         ).fetchall()
         return [dict(row) for row in rows]
@@ -2160,21 +2181,65 @@ def render(
                 create_fallback_scene_image(image_file, previous_image)
         if image_file.stat().st_size < 1024:
             raise BotError(f"Cảnh {index} không phải hình ảnh hợp lệ.")
-        
-        previous_image = image_file
-        LOG.info("Image %d ready. Converting to video clip with Ken Burns effect...", index)
+
+        if short_form_clip_ready(clip, scene.duration):
+            LOG.info(
+                "Reusing rendered Short scene %d/%d (%.1fs); no FFmpeg re-render.",
+                index,
+                len(plan.scenes),
+                scene.duration,
+            )
+            previous_image = image_file
+            clips.append(clip)
+            continue
+
         frames = int(scene.duration * 30)
-        zoom_filter = f"scale=3840:-1,zoompan=z='min(zoom+0.001,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
-        run([
+        zoom_filter = (
+            f"scale={SHORT_FORM_INTERMEDIATE_WIDTH}:-1,"
+            f"zoompan=z='min(zoom+0.001,1.5)':d={frames}:"
+            "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
+        )
+        command = [
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
             "-vf", zoom_filter,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p",
             str(clip)
-        ])
-        
+        ]
+        started = time.monotonic()
+        LOG.info(
+            "Rendering Short scene %d/%d (%.1fs, timeout %ds)...",
+            index,
+            len(plan.scenes),
+            scene.duration,
+            SHORT_FORM_SCENE_RENDER_TIMEOUT_SECONDS,
+        )
+        try:
+            run(command, timeout_seconds=SHORT_FORM_SCENE_RENDER_TIMEOUT_SECONDS)
+        except BotError as exc:
+            LOG.warning(
+                "Short scene %d could not render from %s (%s). Reusing the preceding visual; no image API call.",
+                index,
+                image_file.name,
+                exc,
+            )
+            # For the first scene this creates a neutral vertical image. For all
+            # later scenes it copies the preceding image, including a Brave file
+            # that has already rendered successfully.
+            create_fallback_scene_image(image_file, previous_image)
+            started = time.monotonic()
+            run(command, timeout_seconds=SHORT_FORM_SCENE_RENDER_TIMEOUT_SECONDS)
+
         clip_seconds = media_duration(clip)
-        LOG.info("Scene %d video ready: %.2fs, %.1f MB", index, clip_seconds, clip.stat().st_size / (1024 * 1024))
+        LOG.info(
+            "Short scene %d/%d rendered in %.1fs: %.2fs, %.1f MB",
+            index,
+            len(plan.scenes),
+            time.monotonic() - started,
+            clip_seconds,
+            clip.stat().st_size / (1024 * 1024),
+        )
+        previous_image = image_file
         clips.append(clip)
 
     concat = output_dir / "clips.txt"
@@ -2189,7 +2254,10 @@ def render(
         "unsharp=5:5:1.0:5:5:0.0"
     )
     LOG.info("Concatenating and normalizing the vertical video…")
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)])
+    run(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)],
+        timeout_seconds=SHORT_FORM_FINAL_RENDER_TIMEOUT_SECONDS,
+    )
 
     captions = output_dir / "captions_en.ass"
     caption_seconds = min(narration_seconds, target_duration)
@@ -2198,7 +2266,15 @@ def render(
     LOG.info("Generated %d English caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     final_video = output_dir / "short.mp4"
     LOG.info("Muxing narration, captions, and final video…")
-    mux_video_audio_with_captions(visuals, narration, captions, final_video, target_duration, client.s)
+    mux_video_audio_with_captions(
+        visuals,
+        narration,
+        captions,
+        final_video,
+        target_duration,
+        client.s,
+        timeout_seconds=SHORT_FORM_FINAL_RENDER_TIMEOUT_SECONDS,
+    )
     return final_video
 
 
@@ -2208,6 +2284,15 @@ def long_form_image_path(output_dir: Path, index: int) -> Path:
 
 def long_form_assets_ready(plan: ShortPlan, output_dir: Path) -> bool:
     return all(long_form_image_path(output_dir, index).is_file() for index in range(1, len(plan.scenes) + 1))
+
+
+def short_form_clip_ready(clip: Path, expected_duration: float) -> bool:
+    if not clip.is_file() or clip.stat().st_size < 1024:
+        return False
+    try:
+        return abs(media_duration(clip) - expected_duration) <= 0.75
+    except BotError:
+        return False
 
 
 def long_form_clip_ready(clip: Path, expected_duration: float) -> bool:
@@ -2798,6 +2883,46 @@ def create_long_form_job(
     return plan, output_dir, duration, record_id
 
 
+def load_resumable_short_form_job(archive: Archive) -> tuple[ShortPlan, Path, float, int] | None:
+    """Load an interrupted Short job without re-planning or regenerating its narration."""
+    for row in archive.resumable_short_form_jobs():
+        output_dir = Path(str(row.get("output_path") or ""))
+        plan_file = output_dir / "plan.json"
+        narration = output_dir / "narration.mp3"
+        if not plan_file.is_file() or not narration.is_file() or narration.stat().st_size < 1024:
+            continue
+        try:
+            plan = ShortPlan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
+            narration_seconds = measured_narration_duration(narration, "Short resume")
+        except (BotError, OSError, json.JSONDecodeError) as exc:
+            LOG.warning("Skipping unusable unfinished Short job %s: %s", output_dir, exc)
+            continue
+        scene_total = sum(scene.duration for scene in plan.scenes)
+        if abs(scene_total - narration_seconds) > 0.1:
+            rescale_scene_durations(plan, narration_seconds, "Short resume")
+            plan_file.write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        record_id = int(row["id"])
+        existing_images = sum(
+            1 for index in range(1, len(plan.scenes) + 1)
+            if (output_dir / f"scene_{index}.jpg").is_file()
+        )
+        existing_clips = sum(
+            1 for index, scene in enumerate(plan.scenes, start=1)
+            if short_form_clip_ready(output_dir / f"scene_{index}.mp4", scene.duration)
+        )
+        LOG.info(
+            "Resuming interrupted Short job from %s (%d/%d images, %d/%d scene clips, %.3fs narration; no new TTS or duplicate image requests).",
+            output_dir,
+            existing_images,
+            len(plan.scenes),
+            existing_clips,
+            len(plan.scenes),
+            narration_seconds,
+        )
+        return plan, output_dir, narration_seconds, record_id
+    return None
+
+
 def load_resumable_long_form_job(archive: Archive) -> tuple[ShortPlan, Path, float, int] | None:
     """Load a fully prepared but unfinished Long job without calling TTS or image APIs."""
     for row in archive.resumable_long_form_jobs():
@@ -2852,6 +2977,15 @@ def long_form_is_due(
 
 
 def long_form_video_ready(video: Path, expected_duration: float) -> bool:
+    if not video.is_file() or video.stat().st_size < 1024:
+        return False
+    try:
+        return abs(media_duration(video) - expected_duration) <= 1.0
+    except BotError:
+        return False
+
+
+def short_form_video_ready(video: Path, expected_duration: float) -> bool:
     if not video.is_file() or video.stat().st_size < 1024:
         return False
     try:
@@ -3053,50 +3187,64 @@ def main() -> int:
                 LOG.warning("Could not clean up %s: %s", video.parent, exc)
                 
         return 0
-    if args.scheduled and settings.scheduled_daily_limit > 0:
-        jobs_today = archive.jobs_created_today()
-        if jobs_today >= settings.scheduled_daily_limit:
-            LOG.warning(
-                "Daily limit reached: %d/%d video jobs have already been created today (UTC). Exiting.",
-                jobs_today,
-                settings.scheduled_daily_limit,
-            )
-            return 0
-    plan = choose_novel_plan(llm, archive, args.theme, settings.duration)
-    if plan is None:
-        message = "Không tìm được ý tưởng đủ mới sau 4 lần."
-        if args.scheduled:
-            LOG.warning("%s Bỏ qua lượt scheduled này.", message)
-            return 0
-        raise BotError(message)
+    resumable = None if args.dry_run else load_resumable_short_form_job(archive)
+    resumed = resumable is not None
+    if resumable:
+        plan, output_dir, narration_seconds, record_id = resumable
+        narration = output_dir / "narration.mp3"
+        archive.mark(record_id, "rendering")
+    else:
+        if args.scheduled and settings.scheduled_daily_limit > 0:
+            jobs_today = archive.jobs_created_today()
+            if jobs_today >= settings.scheduled_daily_limit:
+                LOG.warning(
+                    "Daily limit reached: %d/%d video jobs have already been created today (UTC). Exiting.",
+                    jobs_today,
+                    settings.scheduled_daily_limit,
+                )
+                return 0
+        plan = choose_novel_plan(llm, archive, args.theme, settings.duration)
+        if plan is None:
+            message = "Không tìm được ý tưởng đủ mới sau 4 lần."
+            if args.scheduled:
+                LOG.warning("%s Bỏ qua lượt scheduled này.", message)
+                return 0
+            raise BotError(message)
 
-    if args.dry_run:
-        print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
-        return 0
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    output_dir = DATA_DIR / "generated" / f"{datetime.now():%Y%m%d-%H%M%S}-{slug(plan.topic)}"
-    output_dir.mkdir(parents=True)
-    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-    record_id = archive.reserve(plan, output_dir)
+        if args.dry_run:
+            print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+            return 0
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        output_dir = DATA_DIR / "generated" / f"{datetime.now():%Y%m%d-%H%M%S}-{slug(plan.topic)}"
+        output_dir.mkdir(parents=True)
+        (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        record_id = archive.reserve(plan, output_dir)
+        narration = output_dir / "narration.mp3"
+        narration_seconds = 0.0
     rendered = False
     try:
-        narration, narration_seconds = prepare_short_english_narration(
-            plan,
-            tts,
-            output_dir,
-        )
-        effective_duration = rescale_scene_durations(plan, narration_seconds, "Short English")
-        (output_dir / "plan.json").write_text(
-            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        video = render(
-            plan,
-            images,
-            output_dir,
-            effective_duration,
-            narration,
-            narration_seconds,
-        )
+        if not resumed:
+            narration, narration_seconds = prepare_short_english_narration(
+                plan,
+                tts,
+                output_dir,
+            )
+            rescale_scene_durations(plan, narration_seconds, "Short English")
+            (output_dir / "plan.json").write_text(
+                json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        video = output_dir / "short.mp4"
+        if short_form_video_ready(video, narration_seconds):
+            LOG.info("Reusing completed Short video %s; skipping render.", video.name)
+        else:
+            video = render(
+                plan,
+                images,
+                output_dir,
+                narration_seconds,
+                narration,
+                narration_seconds,
+            )
         append_web_source_credits(plan, images.web_sources)
         (output_dir / "plan.json").write_text(
             json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"

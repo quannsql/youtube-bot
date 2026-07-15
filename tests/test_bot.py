@@ -1232,6 +1232,110 @@ def test_long_form_render_replaces_an_unrenderable_scene_with_previous_visual(tm
     assert second_image.read_bytes() == first_image.read_bytes()
 
 
+def test_short_form_render_uses_lighter_scene_scale_and_timeout(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Statue of Liberty", "angle": "Construction", "title": "How the Statue Was Built",
+        "description": "#History", "tags": ["History"], "hook": "Hook.", "narration": "Hook.",
+        "closing_line": "Hook.", "fact_note": "Note", "source_hints": ["History"],
+        "scenes": [{"duration": 10, "visual_prompt": "The Statue of Liberty"}],
+    })
+    logo = tmp_path / "overlay-logo.png"
+    logo.write_bytes(b"p" * 2048)
+    commands = []
+
+    class FakeImages:
+        s = bot.Settings(overlay_logo=logo)
+
+        def image(self, *_args, **kwargs):
+            kwargs["destination"].write_bytes(b"i" * 2048)
+
+    def fake_run(command, timeout_seconds=None):
+        commands.append((command, timeout_seconds))
+        Path(command[-1]).write_bytes(b"v" * 2048)
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "short_form_clip_ready", lambda *_args: False)
+    monkeypatch.setattr(bot, "media_duration", lambda _path: 10.0)
+    monkeypatch.setattr(bot, "run", fake_run)
+
+    bot.render(plan, FakeImages(), tmp_path, 10, tmp_path / "narration.mp3", 10)
+
+    scene_command, scene_timeout = commands[0]
+    assert f"scale={bot.SHORT_FORM_INTERMEDIATE_WIDTH}:-1" in scene_command[scene_command.index("-vf") + 1]
+    assert scene_timeout == bot.SHORT_FORM_SCENE_RENDER_TIMEOUT_SECONDS
+    assert commands[-1][1] == bot.SHORT_FORM_FINAL_RENDER_TIMEOUT_SECONDS
+
+
+def test_short_form_render_replaces_an_unrenderable_scene_with_previous_visual(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Statue of Liberty", "angle": "Construction", "title": "How the Statue Was Built",
+        "description": "#History", "tags": ["History"], "hook": "Hook.", "narration": "Hook.",
+        "closing_line": "Hook.", "fact_note": "Note", "source_hints": ["History"],
+        "scenes": [
+            {"duration": 10, "visual_prompt": "The Statue of Liberty"},
+            {"duration": 10, "visual_prompt": "The statue under construction"},
+        ],
+    })
+    first_image = tmp_path / "scene_1.jpg"
+    second_image = tmp_path / "scene_2.jpg"
+    first_image.write_bytes(b"first" * 512)
+    second_image.write_bytes(b"second" * 512)
+    logo = tmp_path / "overlay-logo.png"
+    logo.write_bytes(b"p" * 2048)
+    failed_once = False
+
+    class FakeImages:
+        s = bot.Settings(overlay_logo=logo)
+
+        def image(self, *_args, **_kwargs):
+            pytest.fail("Existing images must be reused")
+
+    def fake_run(command, timeout_seconds=None):
+        nonlocal failed_once
+        destination = Path(command[-1])
+        if destination.name == "scene_2.mp4" and not failed_once:
+            failed_once = True
+            raise bot.BotError("FFmpeg timed out after 120s")
+        destination.write_bytes(b"v" * 2048)
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "short_form_clip_ready", lambda *_args: False)
+    monkeypatch.setattr(bot, "media_duration", lambda _path: 10.0)
+    monkeypatch.setattr(bot, "run", fake_run)
+
+    bot.render(plan, FakeImages(), tmp_path, 20, tmp_path / "narration.mp3", 20)
+
+    assert failed_once
+    assert second_image.read_bytes() == first_image.read_bytes()
+
+
+def test_load_resumable_short_form_job_reuses_saved_narration_and_assets(tmp_path, monkeypatch):
+    output_dir = tmp_path / "short-interrupted"
+    output_dir.mkdir()
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Statue of Liberty", "angle": "Construction", "title": "How the Statue Was Built",
+        "description": "#History", "tags": ["History"], "hook": "Hook.", "narration": "Hook.",
+        "closing_line": "Hook.", "fact_note": "Note", "source_hints": ["History"],
+        "scenes": [{"duration": 10, "visual_prompt": "The Statue of Liberty"}],
+    })
+    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict()), encoding="utf-8")
+    (output_dir / "narration.mp3").write_bytes(b"a" * 2048)
+    (output_dir / "scene_1.jpg").write_bytes(b"i" * 2048)
+    (output_dir / "scene_1.mp4").write_bytes(b"v" * 2048)
+    archive = bot.Archive(tmp_path / "shorts.db")
+    record_id = archive.reserve(plan, output_dir)
+    monkeypatch.setattr(bot, "media_duration", lambda _path: 10.0)
+
+    resumed = bot.load_resumable_short_form_job(archive)
+
+    assert resumed is not None
+    resumed_plan, resumed_dir, duration, resumed_id = resumed
+    assert resumed_plan.title == plan.title
+    assert resumed_dir == output_dir
+    assert duration == 10.0
+    assert resumed_id == record_id
+
+
 def test_audio_led_timeline_rescales_all_scenes_exactly():
     plan = bot.ShortPlan.from_dict({
         "topic": "Topic", "angle": "Angle", "title": "Title",

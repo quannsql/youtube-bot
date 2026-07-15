@@ -20,11 +20,42 @@ def test_similarity_normalizes_vietnamese_accents():
 def test_plan_parser_accepts_valid_plan():
     plan = bot.ShortPlan.from_dict({
         "topic": "T", "angle": "A", "title": "Title", "description": "#Shorts", "tags": ["shorts"],
+        "thumbnail_text": "Named Subject",
         "hook": "A short script.", "narration": "A short script.", "closing_line": "A short script.",
         "fact_note": "No exaggeration", "source_hints": ["Smithsonian"],
         "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
     })
     assert plan.scenes[0].duration == 4
+    assert plan.thumbnail_text == "Named Subject"
+
+
+def test_thumbnail_headline_uses_named_subject_and_wraps_to_two_lines():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "The Strait of Hormuz", "angle": "Oil risk", "title": "The Trade Crisis",
+        "thumbnail_text": "Strait of Hormuz", "description": "#News", "tags": ["News"],
+        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
+        "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [{"duration": 4, "visual_prompt": "A ship"}],
+    })
+
+    headline = bot.thumbnail_headline(plan)
+
+    assert headline == "STRAIT OF HORMUZ"
+    assert bot.thumbnail_headline_lines("THE STRAIT OF HORMUZ AND GLOBAL OIL PRICES RISE") == "THE STRAIT OF HORMUZ\nAND GLOBAL OIL PRICES…"
+
+
+def test_title_is_prefixed_with_the_named_subject_when_the_planner_returns_a_vague_headline():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "The Strait of Hormuz", "angle": "Oil risk", "title": "The Trade Crisis",
+        "thumbnail_text": "Strait of Hormuz", "description": "#News", "tags": ["News"],
+        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
+        "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [{"duration": 4, "visual_prompt": "A ship"}],
+    })
+
+    bot.ensure_title_names_main_subject(plan)
+
+    assert plan.title == "Strait of Hormuz: The Trade Crisis"
 
 
 def test_archive_blocks_exactly_repeated_plan(tmp_path):
@@ -93,6 +124,8 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "classroom theory" in prompts[0]
     assert "viewer_question, stakes, and thumbnail_hint" in prompts[1]
     assert "viewer_payoff" in prompts[1]
+    assert "TITLE REQUIREMENT" in prompts[1]
+    assert "thumbnail_text" in prompts[1]
     assert "worth remembering or sharing" in prompts[1]
     assert "photorealistic" in prompts[1]
     assert "Preserve this visual direction" in prompts[2]
@@ -477,6 +510,66 @@ def test_ass_filter_path_escapes_windows_drive():
 
     assert "D\\:" in escaped
     assert escaped.endswith("/captions_en.ass")
+
+
+def test_create_long_form_thumbnail_reuses_scene_visual_without_openai_image_cost(tmp_path, monkeypatch):
+    scene = bot.long_form_image_path(tmp_path, 1)
+    scene.write_bytes(b"x" * 2048)
+    font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
+    font_file.parent.mkdir()
+    font_file.write_bytes(b"font")
+    logo = tmp_path / "overlay-logo.png"
+    logo.write_bytes(b"png")
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
+        "thumbnail_text": "Strait of Hormuz", "description": "#News", "tags": ["News"],
+        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
+        "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
+    })
+    commands = []
+
+    def fake_run(command):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"j" * 4096)
+
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "run", fake_run)
+
+    thumbnail = bot.create_long_form_thumbnail(plan, tmp_path / "long.mp4", tmp_path, bot.Settings(overlay_logo=logo))
+
+    assert thumbnail == tmp_path / "thumbnail.jpg"
+    assert thumbnail.is_file()
+    assert (tmp_path / "thumbnail_headline.txt").read_text(encoding="utf-8") == "STRAIT OF HORMUZ"
+    command = commands[0]
+    assert command[command.index("-i") + 1] == str(scene)
+    assert "drawtext=" in command[command.index("-filter_complex") + 1]
+    assert "scale=130:-1" in command[command.index("-filter_complex") + 1]
+
+
+def test_publish_long_form_uploads_the_prepared_custom_thumbnail(tmp_path, monkeypatch):
+    video = tmp_path / "long.mp4"
+    thumbnail = tmp_path / "thumbnail.jpg"
+    captured = {}
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
+        "description": "#News", "tags": ["News"], "hook": "Hook.",
+        "narration": "Hook.", "closing_line": "Hook.", "fact_note": "Note",
+        "source_hints": ["News"], "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
+    })
+
+    monkeypatch.setattr(bot, "create_long_form_thumbnail", lambda *_args: thumbnail)
+
+    def fake_upload(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return "youtube123"
+
+    monkeypatch.setattr(bot, "upload_to_youtube", fake_upload)
+
+    assert bot.publish_long_form_video(video, plan, bot.Settings(), "public") == {"youtube": "youtube123"}
+    assert captured["kwargs"]["thumbnail"] == thumbnail
 
 
 @pytest.mark.parametrize(

@@ -141,7 +141,7 @@ Railway Cron yêu cầu process hoàn tất và thoát; bot đã là one-shot pr
 
 ## Long-form horizontal videos
 
-Video dài chạy end-to-end trong một lượt: lập kế hoạch → tạo audio → co/giãn scene theo audio → chuẩn bị 15 visual (5 Brave + 10 OpenAI) → render → upload lên YouTube. Voice được dùng đúng một lần; video tự khớp với thời lượng voice nên không có đoạn im lặng cuối và không cần tiêu voice/ảnh lần hai chỉ để sửa thời lượng. Video dài không được đăng sang Facebook/TikTok và không tạo bản tiếng Việt. Không còn chế độ `prepare/finalize`, không cần Volume để giữ ảnh tạo dần:
+Video dài chạy end-to-end trong một lượt: lập kế hoạch → tạo audio → co/giãn scene theo audio → chuẩn bị 15 visual (5 Brave + 10 OpenAI) → render → tạo thumbnail 16:9 → upload lên YouTube. Thumbnail lấy visual hook đã có, phủ chữ lớn từ `thumbnail_text` (tên nhân vật/địa danh/sự kiện chính), nên không gọi GPT Image 2 thêm lần nào và không tốn thêm image credit. Bot upload `thumbnail.jpg` qua YouTube API sau khi video Long hoàn tất. Voice được dùng đúng một lần; video tự khớp với thời lượng voice nên không có đoạn im lặng cuối và không cần tiêu voice/ảnh lần hai chỉ để sửa thời lượng. Video dài không được đăng sang Facebook/TikTok và không tạo bản tiếng Việt. Không còn chế độ `prepare/finalize`, không cần Volume để giữ ảnh tạo dần:
 
 ```powershell
 python youtube_shorts_bot.py --long-form --publish

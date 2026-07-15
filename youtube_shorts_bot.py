@@ -300,6 +300,7 @@ class ShortPlan:
     scenes: list[Scene]
     fact_note: str
     source_hints: list[str]
+    thumbnail_text: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ShortPlan":
@@ -318,6 +319,7 @@ class ShortPlan:
             hook=str(value.get("hook") or sentences[0]), narration=narration,
             closing_line=str(value.get("closing_line") or sentences[-1]), scenes=scenes,
             fact_note=str(value["fact_note"]), source_hints=[str(x) for x in value["source_hints"]][:4],
+            thumbnail_text=str(value.get("thumbnail_text") or "")[:48],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1115,7 +1117,7 @@ def recent_title_openers(past: list[dict[str, str]], limit: int = 8) -> str:
 
 
 PLAN_SCHEMA = '''{
-  "topic":"short English topic", "angle":"specific surprising angle", "title":"<=100 chars",
+  "topic":"short English topic", "angle":"specific surprising angle", "title":"<=100 chars and explicitly names the concrete main subject", "thumbnail_text":"2-5 words, names the same main subject",
   "description":"English description with exactly 2 hashtags", "tags":["exactly 2 tags"],
   "hook":"first spoken sentence, <=12 words", "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=14 words",
@@ -1126,7 +1128,8 @@ PLAN_SCHEMA = '''{
 LONG_FORM_PLAN_SCHEMA = '''{
   "topic":"specific current global topic, not related to Vietnam",
   "angle":"specific explanatory angle with broad viewer appeal",
-  "title":"<=100 chars, English, clickable but factual",
+  "title":"<=100 chars, English, clickable but factual, explicitly names the main person/place/event/company/route",
+  "thumbnail_text":"2-5 words, names the same main subject for large thumbnail text",
   "description":"English YouTube description with exactly 2 hashtags and a brief AI-assisted disclosure",
   "tags":["exactly 2 tags"],
   "hook":"first spoken sentence, <=18 words",
@@ -1274,6 +1277,7 @@ Topic strategy: {topic_rule}
 {opener_rule}
 Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel specific, surprising, and worth remembering or sharing in the assigned narrative format — not a neutral encyclopedia entry, classroom lesson, consumer tip, or abstract theory.
 The topic, angle, title, and hook must name or clearly point to the brief's concrete_anchor. Fully deliver the viewer_payoff, share_trigger, and surprise_payoff. A viewer should be able to retell the core story in one plain sentence.
+TITLE REQUIREMENT: The title must explicitly name the concrete_anchor — the actual person, landmark, place, structure, event, civilization, object, or discovery — rather than hiding it behind "this", "that", "the secret", or a generic mystery phrase. Make the named subject appear early in the title whenever natural. For example, write "The Three Gorges Dam's Hidden Problem", not "The Dam Nobody Saw Coming". Set thumbnail_text to 2-5 bold words that name the same subject; it is not a vague slogan.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
 CRITICAL NARRATIVE RULE: The story must strictly follow a 3-part structure:
 1. BEGINNING (Context): Immediately establish the facts: Who? Where? When? What happened? Never jump straight into a mystery without setting the scene.
@@ -1297,7 +1301,7 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     review_prompt = f'''Act as the final fact, documentary-story, and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
 {{"quality_check":{{"hook_score":1,"clarity_score":1,"concreteness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, consumer-tip drift, academic framing, speculative planetary scenarios, and dry topics that lack a strong concrete story. Rewrite any abstract angle into a named person/place/object/event/structure/discovery story; if that is impossible, replace it with a better candidate from the assigned documentary category. Make the hook immediately intriguing, the middle concrete, and the closing line memorable enough to retell or share. Use plain spoken English and ensure the narration clearly pays off the hook. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, consumer-tip drift, academic framing, speculative planetary scenarios, and dry topics that lack a strong concrete story. Rewrite any abstract angle into a named person/place/object/event/structure/discovery story; if that is impossible, replace it with a better candidate from the assigned documentary category. Make the hook immediately intriguing, the middle concrete, and the closing line memorable enough to retell or share. Use plain spoken English and ensure the narration clearly pays off the hook. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. The title must explicitly name the concrete_anchor, never a pronoun-only or generic subject; thumbnail_text must be 2-5 words naming that same main subject. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
@@ -1305,6 +1309,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     if not isinstance(reviewed.get("plan"), dict):
         raise BotError("OpenAI quality pass thiếu trường plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
+    ensure_title_names_main_subject(plan)
     normalize_scene_count(plan, 6)
     quality = reviewed.get("quality_check", {})
     LOG.info("Quality pass complete — hook %s/10, clarity %s/10.", quality.get("hook_score", "?"), quality.get("clarity_score", "?"))
@@ -1353,6 +1358,36 @@ def target_long_form_word_bounds(duration: int) -> tuple[int, int]:
 
 def image_scene_prompt_horizontal(visual_prompt: str) -> str:
     return f"{visual_prompt.strip().rstrip('.')}. {LONG_FORM_IMAGE_STYLE_SUFFIX}"
+
+
+TITLE_SUBJECT_STOP_WORDS = {
+    "a", "an", "and", "at", "by", "for", "from", "in", "into", "of", "on", "or", "the", "to", "with",
+    "this", "that", "these", "those", "why", "how", "what", "when", "where", "who", "is", "are", "was", "were",
+}
+
+
+def title_mentions_main_subject(plan: ShortPlan) -> bool:
+    anchor = plan.thumbnail_text or plan.topic
+    anchor_terms = {
+        term.lower()
+        for term in re.findall(r"[A-Za-z0-9]+", anchor)
+        if len(term) >= 3 and term.lower() not in TITLE_SUBJECT_STOP_WORDS
+    }
+    title_terms = {term.lower() for term in re.findall(r"[A-Za-z0-9]+", plan.title)}
+    return not anchor_terms or bool(anchor_terms & title_terms)
+
+
+def ensure_title_names_main_subject(plan: ShortPlan) -> None:
+    """Prevent a vague headline when the planner omitted its named main subject."""
+    if title_mentions_main_subject(plan):
+        return
+    anchor = re.sub(r"\s+", " ", (plan.thumbnail_text or plan.topic).strip())
+    if not anchor:
+        return
+    prefix = f"{anchor}: "
+    remaining = max(0, 100 - len(prefix))
+    plan.title = (prefix + plan.title[:remaining].rstrip()).rstrip(": ")[:100]
+    LOG.info("Prefixed the title with its named main subject: %r", anchor)
 
 
 def normalize_scene_count(plan: ShortPlan, target_count: int) -> None:
@@ -1479,6 +1514,7 @@ Hard rules:
 - Do not invent quotes, casualty numbers, market numbers, scores, dates, or source names not present in the context.
 - The result must feel timely, clickable, practical, surprising, and broad-interest, but not sensationalized.
 - Select a story with a concrete change: who acted, what changed, who pays or benefits, what viewers should watch next, and why it matters now. Reject routine speeches, procedural updates, and abstract policy theory with no visible consequence.
+- TITLE REQUIREMENT: The title must explicitly name the central person, country, place, route, company, conflict, policy, event, or sports team — not only its consequence. Put that concrete subject early when possible. For example, write "Strait of Hormuz: The Risk to Global Oil", not "The Trade Crisis Getting Worse". Set thumbnail_text to 2-5 bold words that name the same central subject; never use a vague slogan.
 - Use a save/share test: the viewer should finish with at least one clear consequence, comparison, warning sign, or next development they can explain to someone else.
 - Explain the story like a 5-7 minute news documentary: immediate headline payoff, essential context, timeline, what changed, who is affected, competing interpretations, likely next consequences, memorable close.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
@@ -1509,7 +1545,7 @@ Rules:
 - Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries. Keep only politics, military affairs, economics, business, technology industry, sports, or consequential world news.
 - Keep only claims supportable by the supplied RSS context or clearly phrased as general background.
 - Reject routine announcements or abstract theory unless the script can name the concrete change, affected people, real-world consequence, and what happens next.
-- Keep a strong first 20 seconds, then clear chapters with escalation, practical explanation, a surprising but supported payoff, and a reason viewers would save or share the video.
+- Keep a strong first 20 seconds, then clear chapters with escalation, practical explanation, a surprising but supported payoff, and a reason viewers would save or share the video. The title must explicitly name the central person/place/event/company/route, and thumbnail_text must be 2-5 words that name that same subject rather than a vague teaser.
 - The narration must begin with hook and end with closing_line.
 - The scenes must total exactly {duration} seconds and be horizontal 16:9 visual prompts.
 - Aim for roughly {target_min_words}-{target_max_words} words, but preserve a clear and complete story rather than adding filler solely to hit a duration target.
@@ -1527,6 +1563,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     if not isinstance(reviewed.get("plan"), dict):
         raise BotError("OpenAI long-form quality pass thieu truong plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
+    ensure_title_names_main_subject(plan)
     ensure_long_form_hook_and_closing(plan)
     normalize_scene_count(plan, scene_count)
     validate_long_form_plan(plan, duration, min_words, max_words, scene_count)
@@ -1751,6 +1788,92 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 def ffmpeg_filter_path(path: Path) -> str:
     return path.resolve().as_posix().replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
+YOUTUBE_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
+
+
+def thumbnail_headline(plan: ShortPlan) -> str:
+    """Return a concise, concrete subject label for a YouTube thumbnail."""
+    raw = plan.thumbnail_text or plan.topic or plan.title
+    clean = re.sub(r"\s+", " ", raw).strip()
+    words = clean.split()
+    # The writer normally returns 2-5 words. The fallback keeps old plans and
+    # malformed model output readable without hiding the named subject.
+    return " ".join(words[:6]).upper() or "DOCUMENTARY"
+
+
+def thumbnail_headline_lines(text: str, max_line_chars: int = 22) -> str:
+    """Wrap thumbnail copy into at most two large, readable lines."""
+    words = text.split()
+    if not words:
+        return "DOCUMENTARY"
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > max_line_chars:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if len(lines) <= 2:
+        return "\n".join(lines)
+    return f"{lines[0]}\n{lines[1]}…"
+
+
+def create_long_form_thumbnail(plan: ShortPlan, video: Path, output_dir: Path, settings: Settings) -> Path:
+    """Build a 16:9 custom thumbnail from an existing hook visual, without a new image API call."""
+    destination = output_dir / "thumbnail.jpg"
+    if destination.is_file() and 1024 <= destination.stat().st_size <= YOUTUBE_THUMBNAIL_MAX_BYTES:
+        LOG.info("Reusing prepared long-form YouTube thumbnail: %s", destination.name)
+        return destination
+
+    source_scene = long_form_image_path(output_dir, 1)
+    source = source_scene if source_scene.is_file() and source_scene.stat().st_size >= 1024 else video
+    if not source.is_file():
+        raise BotError(f"Không tìm thấy visual để tạo thumbnail long-form: {source}")
+    font_file = DATA_DIR / "fonts" / "DejaVuSans.ttf"
+    if not font_file.is_file():
+        raise BotError(f"Không tìm thấy font để tạo thumbnail: {font_file}")
+
+    headline_file = output_dir / "thumbnail_headline.txt"
+    headline_file.write_text(thumbnail_headline_lines(thumbnail_headline(plan)), encoding="utf-8")
+    visual_filter = (
+        "scale=1280:720:force_original_aspect_ratio=increase,"
+        "crop=1280:720,eq=contrast=1.08:saturation=1.12,"
+        "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.14:t=fill,"
+        "drawbox=x=0:y=390:w=iw:h=330:color=black@0.70:t=fill,"
+        f"drawtext=fontfile='{ffmpeg_filter_path(font_file)}':"
+        f"textfile='{ffmpeg_filter_path(headline_file)}':"
+        "fontcolor=white:fontsize=74:line_spacing=12:borderw=5:bordercolor=black@0.9:"
+        "shadowcolor=black@0.9:shadowx=4:shadowy=4:x=64:y=h-text_h-66:fix_bounds=1"
+    )
+    command = ["ffmpeg", "-y", "-i", str(source)]
+    logo = settings.overlay_logo
+    if logo.is_file():
+        command.extend([
+            "-loop", "1", "-i", str(logo),
+            "-filter_complex",
+            f"[0:v]{visual_filter}[base];"
+            "[1:v]scale=130:-1:flags=lanczos,format=rgba[logo];"
+            "[base][logo]overlay=x=W-w-42:y=42:format=auto[v]",
+            "-map", "[v]",
+        ])
+    else:
+        command.extend(["-vf", visual_filter])
+    command.extend(["-frames:v", "1", "-q:v", "4", str(destination)])
+    require_tools()
+    LOG.info("Creating 16:9 long-form YouTube thumbnail from %s (no new image credit)…", source.name)
+    run(command)
+    if not destination.is_file() or destination.stat().st_size < 1024:
+        raise BotError("Thumbnail long-form không tạo được ảnh JPEG hợp lệ.")
+    if destination.stat().st_size > YOUTUBE_THUMBNAIL_MAX_BYTES:
+        raise BotError("Thumbnail long-form vượt giới hạn 2 MB của YouTube API.")
+    LOG.info("Created long-form YouTube thumbnail: %s (%.1f MB)", destination.name, destination.stat().st_size / (1024 * 1024))
+    return destination
 
 
 def ass_video_filter(captions: Path) -> str:
@@ -2202,7 +2325,13 @@ def authorize_youtube(settings: Settings) -> None:
     LOG.info("Saved YouTube authorization token to %s", settings.youtube_token)
 
 
-def upload_to_youtube(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> str:
+def upload_to_youtube(
+    video: Path,
+    plan: ShortPlan,
+    settings: Settings,
+    privacy: str,
+    thumbnail: Path | None = None,
+) -> str:
     if not settings.youtube_client_secrets.exists():
         raise BotError(f"Thiếu OAuth client secrets: {settings.youtube_client_secrets}")
     from google.auth.transport.requests import Request
@@ -2255,8 +2384,22 @@ def upload_to_youtube(video: Path, plan: ShortPlan, settings: Settings, privacy:
                 "Bật API trong APIs & Services → Library, chờ vài phút, rồi upload lại MP4 đã render."
             ) from exc
         raise BotError(f"YouTube upload thất bại: {detail}") from exc
+    video_id = str(response["id"])
     LOG.info("YouTube upload completed.")
-    return str(response["id"])
+    if thumbnail:
+        if not thumbnail.is_file() or thumbnail.stat().st_size > YOUTUBE_THUMBNAIL_MAX_BYTES:
+            raise BotError(f"Thumbnail YouTube không hợp lệ: {thumbnail}")
+        try:
+            service.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(str(thumbnail), mimetype="image/jpeg", resumable=False),
+            ).execute()
+            LOG.info("Custom YouTube thumbnail set for video %s.", video_id)
+        except HttpError as exc:
+            # The video is already live at this point. Preserve its published
+            # state, but leave an actionable error in Railway's logs.
+            LOG.error("Video %s uploaded, but its custom thumbnail could not be set: %s", video_id, exc)
+    return video_id
 
 
 def response_json(response: requests.Response) -> dict[str, Any]:
@@ -2581,7 +2724,8 @@ def long_form_is_due(
 
 
 def publish_long_form_video(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> dict[str, str]:
-    youtube_id = upload_to_youtube(video, plan, settings, privacy)
+    thumbnail = create_long_form_thumbnail(plan, video, video.parent, settings)
+    youtube_id = upload_to_youtube(video, plan, settings, privacy, thumbnail=thumbnail)
     # Long-form is YouTube-only. Facebook/TikTok Vietnamese publishing applies
     # to the separate Short workflow only.
     return {"youtube": youtube_id}
@@ -2730,7 +2874,14 @@ def main() -> int:
         if not video.is_file() or not plan_file.is_file():
             raise BotError("--upload-file phải trỏ đến short.mp4 có plan.json cùng thư mục.")
         plan = ShortPlan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
-        youtube_id = upload_to_youtube(video, plan, settings, args.privacy_status or settings.youtube_privacy)
+        thumbnail = create_long_form_thumbnail(plan, video, video.parent, settings) if video.name == "long.mp4" else None
+        youtube_id = upload_to_youtube(
+            video,
+            plan,
+            settings,
+            args.privacy_status or settings.youtube_privacy,
+            thumbnail=thumbnail,
+        )
         print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
         if settings.youtube_token.exists():
             archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))

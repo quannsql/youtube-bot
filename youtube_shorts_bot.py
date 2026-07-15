@@ -38,6 +38,9 @@ DATA_DIR = _configured_data_dir if _configured_data_dir.is_absolute() else ROOT 
 LOG = logging.getLogger("shorts_bot")
 MIN_SHORT_DURATION_SECONDS = 45
 MAX_SHORT_DURATION_SECONDS = 60
+LONG_FORM_INTERMEDIATE_WIDTH = 2304
+LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS = 300
+LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS = 900
 
 # Windows PowerShell sessions can still inherit cp1252. Keep CLI output
 # deterministic instead of failing on non-ASCII text in paths or user themes.
@@ -559,6 +562,24 @@ class Archive:
         value = str(row["created_at"])
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+    def resumable_long_form_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Return interrupted Long jobs whose assets may still exist on the Volume."""
+        statuses = ("rendering", "failed", "upload_failed")
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, status, output_path FROM shorts WHERE output_path LIKE %s "
+                    "AND status IN %s ORDER BY created_at DESC LIMIT %s",
+                    ("%long-%", statuses, limit),
+                )
+                return [dict(row) for row in cur.fetchall()]
+        rows = self.conn.execute(
+            "SELECT id, status, output_path FROM shorts WHERE output_path LIKE ? "
+            "AND status IN (?, ?, ?) ORDER BY created_at DESC LIMIT ?",
+            ("%long-%", *statuses, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 class OpenAITextClient:
@@ -1888,6 +1909,7 @@ def mux_video_audio_with_captions(
     target_duration: float,
     settings: Settings,
     long_form: bool = False,
+    timeout_seconds: int | None = None,
 ) -> None:
     logo = settings.overlay_logo
     if not logo.is_file():
@@ -1909,7 +1931,7 @@ def mux_video_audio_with_captions(
         f"[base][logo]overlay=x=W-w-{margin}:y={top_margin}:format=auto,format=yuv420p[v];"
         f"[1:a]apad=pad_dur={target_duration}[a]"
     )
-    run([
+    command = [
         "ffmpeg", "-y",
         "-i", str(visuals),
         "-i", str(narration),
@@ -1924,7 +1946,11 @@ def mux_video_audio_with_captions(
         "-c:a", "aac",
         "-movflags", "+faststart",
         str(output),
-    ])
+    ]
+    if timeout_seconds is None:
+        run(command)
+    else:
+        run(command, timeout_seconds=timeout_seconds)
 
 
 def require_tools() -> None:
@@ -1933,9 +1959,20 @@ def require_tools() -> None:
         raise BotError("Không tìm thấy trong PATH: " + ", ".join(missing))
 
 
-def run(command: list[str]) -> None:
+def run(command: list[str], timeout_seconds: int | None = None) -> None:
     LOG.debug("Running command: %s", " ".join(command))
-    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        timeout_label = f" after {timeout_seconds}s" if timeout_seconds else ""
+        LOG.error("FFmpeg timed out%s: %s", timeout_label, " ".join(command))
+        raise BotError(f"FFmpeg quá thời gian cho phép{timeout_label}: {' '.join(command)}") from exc
     if result.returncode:
         tail = result.stderr[-3000:] or result.stdout[-3000:] or "(no ffmpeg output captured)"
         LOG.error("FFmpeg exited with code %s: %s", result.returncode, " ".join(command))
@@ -2056,6 +2093,10 @@ def prepare_long_form_narration(
     output_dir: Path,
 ) -> tuple[Path, float]:
     narration = output_dir / "long_narration.mp3"
+    if narration.is_file() and narration.stat().st_size >= 1024:
+        narration_seconds = measured_narration_duration(narration, "Long-form")
+        LOG.info("Reusing existing long-form English narration at %.3fs; no new TTS request.", narration_seconds)
+        return narration, narration_seconds
     LOG.info("Preflighting long-form English narration before generating any images…")
     synthesize_narration(tts, plan.narration, narration, output_dir, prefix="long_narration_part")
     return narration, measured_narration_duration(narration, "Long-form")
@@ -2169,6 +2210,15 @@ def long_form_assets_ready(plan: ShortPlan, output_dir: Path) -> bool:
     return all(long_form_image_path(output_dir, index).is_file() for index in range(1, len(plan.scenes) + 1))
 
 
+def long_form_clip_ready(clip: Path, expected_duration: float) -> bool:
+    if not clip.is_file() or clip.stat().st_size < 1024:
+        return False
+    try:
+        return abs(media_duration(clip) - expected_duration) <= 0.75
+    except BotError:
+        return False
+
+
 def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, output_dir: Path) -> int:
     prepared = 0
     previous_image: Path | None = None
@@ -2226,19 +2276,43 @@ def render_long_form_from_assets(
     for index, scene in enumerate(plan.scenes, start=1):
         image_file = long_form_image_path(output_dir, index)
         clip = output_dir / f"long_scene_{index:02d}.mp4"
+        if long_form_clip_ready(clip, scene.duration):
+            LOG.info(
+                "Reusing rendered long-form scene %d/%d (%.1fs); no FFmpeg re-render.",
+                index,
+                len(plan.scenes),
+                scene.duration,
+            )
+            clips.append(clip)
+            continue
         frames = int(scene.duration * 30)
         zoom_filter = (
-            "scale=3840:-1,"
+            f"scale={LONG_FORM_INTERMEDIATE_WIDTH}:-1,"
             f"zoompan=z='min(zoom+0.00045,1.18)':d={frames}:"
             "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080,fps=30"
+        )
+        started = time.monotonic()
+        LOG.info(
+            "Rendering long-form scene %d/%d (%.1fs, timeout %ds)...",
+            index,
+            len(plan.scenes),
+            scene.duration,
+            LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS,
         )
         run([
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
             "-vf", zoom_filter,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p",
             str(clip),
-        ])
+        ], timeout_seconds=LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS)
+        LOG.info(
+            "Long-form scene %d/%d rendered in %.1fs (%.1f MB).",
+            index,
+            len(plan.scenes),
+            time.monotonic() - started,
+            clip.stat().st_size / (1024 * 1024),
+        )
         clips.append(clip)
 
     concat = output_dir / "long_clips.txt"
@@ -2251,7 +2325,11 @@ def render_long_form_from_assets(
         f"trim=duration={target_duration},setpts=PTS-STARTPTS,format=yuv420p,"
         "unsharp=5:5:1.0:5:5:0.0"
     )
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)])
+    LOG.info("Concatenating and normalizing %d long-form scene clips...", len(clips))
+    run(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)],
+        timeout_seconds=LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS,
+    )
 
     captions = output_dir / "long_captions_en.ass"
     caption_seconds = min(narration_seconds, target_duration)
@@ -2267,6 +2345,7 @@ def render_long_form_from_assets(
         target_duration,
         settings,
         long_form=True,
+        timeout_seconds=LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS,
     )
     return final_video
 
@@ -2702,6 +2781,38 @@ def create_long_form_job(
     return plan, output_dir, duration, record_id
 
 
+def load_resumable_long_form_job(archive: Archive) -> tuple[ShortPlan, Path, float, int] | None:
+    """Load a fully prepared but unfinished Long job without calling TTS or image APIs."""
+    for row in archive.resumable_long_form_jobs():
+        output_dir = Path(str(row.get("output_path") or ""))
+        plan_file = output_dir / "plan.json"
+        narration = output_dir / "long_narration.mp3"
+        if not plan_file.is_file() or not narration.is_file() or narration.stat().st_size < 1024:
+            continue
+        try:
+            plan = ShortPlan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
+            narration_seconds = measured_narration_duration(narration, "Long-form resume")
+        except (BotError, OSError, json.JSONDecodeError) as exc:
+            LOG.warning("Skipping unusable unfinished long-form job %s: %s", output_dir, exc)
+            continue
+        if not long_form_assets_ready(plan, output_dir):
+            # Do not silently spend more image credits after an interruption.
+            continue
+        scene_total = sum(scene.duration for scene in plan.scenes)
+        if abs(scene_total - narration_seconds) > 0.1:
+            rescale_scene_durations(plan, narration_seconds, "Long-form resume")
+            plan_file.write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        record_id = int(row["id"])
+        LOG.info(
+            "Resuming interrupted long-form job from %s (%d ready images, %.3fs narration; no new image/TTS requests).",
+            output_dir,
+            len(plan.scenes),
+            narration_seconds,
+        )
+        return plan, output_dir, narration_seconds, record_id
+    return None
+
+
 def long_form_is_due(
     archive: Archive,
     settings: Settings,
@@ -2721,6 +2832,15 @@ def long_form_is_due(
         return True, None
     days_since = (current_date - latest.astimezone(timezone).date()).days
     return days_since >= settings.long_form_interval_days, days_since
+
+
+def long_form_video_ready(video: Path, expected_duration: float) -> bool:
+    if not video.is_file() or video.stat().st_size < 1024:
+        return False
+    try:
+        return abs(media_duration(video) - expected_duration) <= 1.0
+    except BotError:
+        return False
 
 
 def publish_long_form_video(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> dict[str, str]:
@@ -2743,35 +2863,51 @@ def run_long_form_flow(
     force_new: bool = False,
 ) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    due, days_since = long_form_is_due(archive, settings)
-    if not force_new and not due:
-        LOG.info(
-            "Long-form is not due yet: last job was %s local day(s) ago; interval is %d days.",
-            days_since,
-            settings.long_form_interval_days,
-        )
-        return 0
-    plan, output_dir, duration, record_id = create_long_form_job(llm, archive, theme, settings)
+    resumable = load_resumable_long_form_job(archive)
+    resumed = resumable is not None
+    if resumable:
+        plan, output_dir, duration, record_id = resumable
+        narration = output_dir / "long_narration.mp3"
+        narration_seconds = duration
+        archive.mark(record_id, "rendering")
+    else:
+        due, days_since = long_form_is_due(archive, settings)
+        if not force_new and not due:
+            LOG.info(
+                "Long-form is not due yet: last job was %s local day(s) ago; interval is %d days.",
+                days_since,
+                settings.long_form_interval_days,
+            )
+            return 0
+        plan, output_dir, duration, record_id = create_long_form_job(llm, archive, theme, settings)
+        narration = output_dir / "long_narration.mp3"
+        narration_seconds = 0.0
     rendered = False
     try:
-        narration, narration_seconds = prepare_long_form_narration(
-            plan,
-            tts,
-            output_dir,
-        )
-        duration = rescale_scene_durations(plan, narration_seconds, "Long-form")
-        (output_dir / "plan.json").write_text(
-            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        prepare_long_form_images(plan, images, output_dir)
-        video = render_long_form_from_assets(
-            plan,
-            output_dir,
-            duration,
-            settings,
-            narration,
-            narration_seconds,
-        )
+        if not resumed:
+            narration, narration_seconds = prepare_long_form_narration(
+                plan,
+                tts,
+                output_dir,
+            )
+            duration = rescale_scene_durations(plan, narration_seconds, "Long-form")
+            (output_dir / "plan.json").write_text(
+                json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            prepare_long_form_images(plan, images, output_dir)
+
+        video = output_dir / "long.mp4"
+        if long_form_video_ready(video, duration):
+            LOG.info("Reusing completed long-form video %s; skipping render.", video.name)
+        else:
+            video = render_long_form_from_assets(
+                plan,
+                output_dir,
+                duration,
+                settings,
+                narration,
+                narration_seconds,
+            )
         append_web_source_credits(plan, images.web_sources)
         (output_dir / "plan.json").write_text(
             json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"

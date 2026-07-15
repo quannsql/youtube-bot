@@ -1029,6 +1029,9 @@ def test_long_form_tts_preflight_failure_spends_no_image_credits(tmp_path, monke
         def mark(self, *_args):
             pass
 
+        def resumable_long_form_jobs(self):
+            return []
+
     class FakeImages:
         web_sources = []
 
@@ -1059,6 +1062,131 @@ def test_long_form_tts_preflight_failure_spends_no_image_credits(tmp_path, monke
         )
 
     assert events == ["audio"]
+
+
+def test_archive_lists_interrupted_long_form_jobs(tmp_path):
+    archive = bot.Archive(tmp_path / "shorts.db")
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
+        "description": "#News", "tags": ["News"], "hook": "Hook.", "narration": "Hook.",
+        "closing_line": "Hook.", "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [{"duration": 60, "visual_prompt": "A tanker"}],
+    })
+    record_id = archive.reserve(plan, tmp_path / "long-interrupted")
+
+    jobs = archive.resumable_long_form_jobs()
+
+    assert jobs[0]["id"] == record_id
+    assert jobs[0]["status"] == "rendering"
+
+
+def test_load_resumable_long_form_job_reuses_saved_audio_and_images(tmp_path, monkeypatch):
+    output_dir = tmp_path / "long-interrupted"
+    output_dir.mkdir()
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
+        "description": "#News", "tags": ["News"], "hook": "Hook.", "narration": "Hook.",
+        "closing_line": "Hook.", "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [
+            {"duration": 30, "visual_prompt": "A tanker"},
+            {"duration": 30, "visual_prompt": "A strait"},
+        ],
+    })
+    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict()), encoding="utf-8")
+    (output_dir / "long_narration.mp3").write_bytes(b"a" * 2048)
+    for index in (1, 2):
+        bot.long_form_image_path(output_dir, index).write_bytes(b"i" * 2048)
+    archive = bot.Archive(tmp_path / "shorts.db")
+    record_id = archive.reserve(plan, output_dir)
+    monkeypatch.setattr(bot, "media_duration", lambda _path: 60.0)
+
+    resumed = bot.load_resumable_long_form_job(archive)
+
+    assert resumed is not None
+    resumed_plan, resumed_dir, duration, resumed_id = resumed
+    assert resumed_plan.title == plan.title
+    assert resumed_dir == output_dir
+    assert duration == 60.0
+    assert resumed_id == record_id
+
+
+def test_run_long_form_resumes_saved_job_without_tts_or_image_calls(tmp_path, monkeypatch):
+    output_dir = tmp_path / "long-interrupted"
+    output_dir.mkdir()
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
+        "description": "#News", "tags": ["News"], "hook": "Hook.", "narration": "Hook.",
+        "closing_line": "Hook.", "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [{"duration": 60, "visual_prompt": "A tanker"}],
+    })
+    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict()), encoding="utf-8")
+    (output_dir / "long_narration.mp3").write_bytes(b"a" * 2048)
+    bot.long_form_image_path(output_dir, 1).write_bytes(b"i" * 2048)
+    archive = bot.Archive(tmp_path / "shorts.db")
+    record_id = archive.reserve(plan, output_dir)
+    events = []
+
+    monkeypatch.setattr(bot, "media_duration", lambda _path: 60.0)
+    monkeypatch.setattr(bot, "prepare_long_form_narration", lambda *_args: pytest.fail("TTS must be reused"))
+    monkeypatch.setattr(bot, "prepare_long_form_images", lambda *_args: pytest.fail("images must be reused"))
+    monkeypatch.setattr(bot, "create_long_form_job", lambda *_args: pytest.fail("planner must not run"))
+    monkeypatch.setattr(bot, "long_form_video_ready", lambda *_args: False)
+
+    def fake_render(_plan, current_dir, *_args):
+        events.append("render")
+        video = current_dir / "long.mp4"
+        video.write_bytes(b"v" * 2048)
+        return video
+
+    monkeypatch.setattr(bot, "render_long_form_from_assets", fake_render)
+
+    assert bot.run_long_form_flow(
+        publish=False,
+        privacy="private",
+        theme="world news",
+        settings=bot.Settings(),
+        archive=archive,
+        llm=object(),
+        images=type("Images", (), {"web_sources": []})(),
+        tts=object(),
+    ) == 0
+    assert events == ["render"]
+    assert archive.conn.execute("SELECT status FROM shorts WHERE id = ?", (record_id,)).fetchone()["status"] == "rendered"
+
+
+def test_long_form_render_uses_lighter_scene_scale_and_timeout(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
+        "description": "#News", "tags": ["News"], "hook": "Hook.", "narration": "Hook.",
+        "closing_line": "Hook.", "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [{"duration": 10, "visual_prompt": "A tanker"}],
+    })
+    bot.long_form_image_path(tmp_path, 1).write_bytes(b"i" * 2048)
+    logo = tmp_path / "overlay-logo.png"
+    logo.write_bytes(b"p" * 2048)
+    commands = []
+
+    def fake_run(command, timeout_seconds=None):
+        commands.append((command, timeout_seconds))
+        Path(command[-1]).write_bytes(b"v" * 2048)
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "long_form_clip_ready", lambda *_args: False)
+    monkeypatch.setattr(bot, "run", fake_run)
+
+    bot.render_long_form_from_assets(
+        plan,
+        tmp_path,
+        10,
+        bot.Settings(overlay_logo=logo),
+        tmp_path / "long_narration.mp3",
+        10,
+    )
+
+    scene_command, scene_timeout = commands[0]
+    assert f"scale={bot.LONG_FORM_INTERMEDIATE_WIDTH}:-1" in scene_command[scene_command.index("-vf") + 1]
+    assert scene_timeout == bot.LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS
+    assert commands[-1][1] == bot.LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS
 
 
 def test_audio_led_timeline_rescales_all_scenes_exactly():

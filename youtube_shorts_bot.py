@@ -39,7 +39,7 @@ LOG = logging.getLogger("shorts_bot")
 MIN_SHORT_DURATION_SECONDS = 45
 MAX_SHORT_DURATION_SECONDS = 60
 LONG_FORM_INTERMEDIATE_WIDTH = 2304
-LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS = 300
+LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS = 120
 LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS = 900
 
 # Windows PowerShell sessions can still inherit cp1252. Keep CLI output
@@ -2273,6 +2273,7 @@ def render_long_form_from_assets(
         raise BotError("Long-form images are incomplete; the one-shot run cannot continue.")
     LOG.info("Rendering horizontal long-form video with %d scenes...", len(plan.scenes))
     clips: list[Path] = []
+    previous_image: Path | None = None
     for index, scene in enumerate(plan.scenes, start=1):
         image_file = long_form_image_path(output_dir, index)
         clip = output_dir / f"long_scene_{index:02d}.mp4"
@@ -2283,6 +2284,7 @@ def render_long_form_from_assets(
                 len(plan.scenes),
                 scene.duration,
             )
+            previous_image = image_file
             clips.append(clip)
             continue
         frames = int(scene.duration * 30)
@@ -2299,13 +2301,27 @@ def render_long_form_from_assets(
             scene.duration,
             LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS,
         )
-        run([
+        command = [
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
             "-vf", zoom_filter,
             "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p",
             str(clip),
-        ], timeout_seconds=LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS)
+        ]
+        try:
+            run(command, timeout_seconds=LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS)
+        except BotError as exc:
+            if previous_image is None or not previous_image.is_file():
+                raise
+            LOG.warning(
+                "Long-form scene %d could not render from %s (%s). Reusing the preceding visual; no image API call.",
+                index,
+                image_file.name,
+                exc,
+            )
+            create_fallback_scene_image(image_file, previous_image, width=1920, height=1080)
+            started = time.monotonic()
+            run(command, timeout_seconds=LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS)
         LOG.info(
             "Long-form scene %d/%d rendered in %.1fs (%.1f MB).",
             index,
@@ -2313,6 +2329,7 @@ def render_long_form_from_assets(
             time.monotonic() - started,
             clip.stat().st_size / (1024 * 1024),
         )
+        previous_image = image_file
         clips.append(clip)
 
     concat = output_dir / "long_clips.txt"

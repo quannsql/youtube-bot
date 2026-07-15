@@ -1189,6 +1189,49 @@ def test_long_form_render_uses_lighter_scene_scale_and_timeout(tmp_path, monkeyp
     assert commands[-1][1] == bot.LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS
 
 
+def test_long_form_render_replaces_an_unrenderable_scene_with_previous_visual(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
+        "description": "#News", "tags": ["News"], "hook": "Hook.", "narration": "Hook.",
+        "closing_line": "Hook.", "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [
+            {"duration": 10, "visual_prompt": "A tanker"},
+            {"duration": 10, "visual_prompt": "A strait"},
+        ],
+    })
+    first_image = bot.long_form_image_path(tmp_path, 1)
+    second_image = bot.long_form_image_path(tmp_path, 2)
+    first_image.write_bytes(b"first" * 512)
+    second_image.write_bytes(b"second" * 512)
+    logo = tmp_path / "overlay-logo.png"
+    logo.write_bytes(b"p" * 2048)
+    failed_once = False
+
+    def fake_run(command, timeout_seconds=None):
+        nonlocal failed_once
+        destination = Path(command[-1])
+        if destination.name == "long_scene_02.mp4" and not failed_once:
+            failed_once = True
+            raise bot.BotError("FFmpeg timed out after 120s")
+        destination.write_bytes(b"v" * 2048)
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "long_form_clip_ready", lambda *_args: False)
+    monkeypatch.setattr(bot, "run", fake_run)
+
+    bot.render_long_form_from_assets(
+        plan,
+        tmp_path,
+        20,
+        bot.Settings(overlay_logo=logo),
+        tmp_path / "long_narration.mp3",
+        20,
+    )
+
+    assert failed_once
+    assert second_image.read_bytes() == first_image.read_bytes()
+
+
 def test_audio_led_timeline_rescales_all_scenes_exactly():
     plan = bot.ShortPlan.from_dict({
         "topic": "Topic", "angle": "Angle", "title": "Title",

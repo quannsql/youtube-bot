@@ -70,6 +70,66 @@ def test_archive_blocks_exactly_repeated_plan(tmp_path):
     assert archive.duplicate_of(plan) is not None
 
 
+def test_long_form_subject_match_blocks_same_route_with_a_different_angle():
+    first = "Trump Iran strikes and Strait of Hormuz security risk"
+    second = "Strait of Hormuz economic risk in the US Iran clash"
+
+    assert bot.same_long_form_subject(first, second)
+    assert not bot.same_long_form_subject(first, "OpenAI changes the consumer AI market")
+
+
+def test_archive_blocks_repeated_long_form_subject_but_ignores_short_subject(tmp_path):
+    archived = bot.ShortPlan.from_dict({
+        "topic": "Trump Iran strikes and Strait of Hormuz security risk",
+        "angle": "Military escalation", "title": "Iran Strikes Put Hormuz Back at Risk",
+        "description": "#News", "tags": ["News"], "narration": "A script.",
+        "fact_note": "No exaggeration", "source_hints": ["News"],
+        "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
+    })
+    candidate = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz economic risk in the US Iran clash",
+        "angle": "Consumer and oil costs", "title": "Hormuz Is the Biggest Economic Risk",
+        "description": "#News", "tags": ["News"], "narration": "A different script.",
+        "fact_note": "No exaggeration", "source_hints": ["News"],
+        "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
+    })
+    archive = bot.Archive(tmp_path / "shorts.db")
+    archive.reserve(archived, tmp_path / "short-output")
+    assert archive.same_long_form_subject_as(candidate) is None
+
+    archived_long = bot.ShortPlan.from_dict({
+        **archived.to_dict(),
+        "angle": "Security consequences for shipping",
+        "title": "The Strait of Hormuz Security Shock",
+    })
+    archive.reserve(archived_long, tmp_path / "long-20260714-hormuz")
+    assert archive.same_long_form_subject_as(candidate) is not None
+
+
+def test_long_form_lane_avoids_two_recent_lanes(monkeypatch):
+    past = [
+        {"topic": "Trump Iran strikes and Strait of Hormuz risk", "angle": "Military escalation", "title": "Iran Strikes"},
+        {"topic": "OpenAI Codex keyboard", "angle": "Consumer technology", "title": "OpenAI Hardware"},
+    ]
+    monkeypatch.setattr(bot.random, "choice", lambda candidates: candidates[0])
+
+    lane = bot.choose_long_form_editorial_lane(past)
+
+    assert lane in {"economy_business", "sports"}
+
+
+def test_long_form_news_context_is_filtered_to_assigned_lane():
+    context = [
+        {"category": "world", "title": "World headline"},
+        {"category": "business", "title": "Business headline"},
+        {"category": "technology", "title": "Technology headline"},
+        {"category": "sports", "title": "Sports headline"},
+    ]
+
+    assert bot.news_context_for_lane(context, "technology") == [context[2]]
+    assert bot.news_context_for_lane(context, "world_affairs") == [context[0]]
+
+
 def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     archived = bot.ShortPlan.from_dict({
         "topic": "Antikythera mechanism", "angle": "Ancient gears predicted eclipses",
@@ -122,14 +182,19 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "low-stakes" in prompts[0]
     assert "Concrete/retellability test" in prompts[0]
     assert "classroom theory" in prompts[0]
+    assert "Historical-scale gate" in prompts[0]
+    assert "subject_stature_score" in prompts[0]
+    assert "quirky local incident" in prompts[0]
     assert "viewer_question, stakes, and thumbnail_hint" in prompts[1]
     assert "viewer_payoff" in prompts[1]
+    assert "SIGNIFICANCE REQUIREMENT" in prompts[1]
     assert "TITLE REQUIREMENT" in prompts[1]
     assert "thumbnail_text" in prompts[1]
     assert "worth remembering or sharing" in prompts[1]
     assert "photorealistic" in prompts[1]
     assert "Preserve this visual direction" in prompts[2]
     assert "dry topics that lack a strong concrete story" in prompts[2]
+    assert "minor local incidents" in prompts[2]
     assert "concreteness_score" in prompts[2]
 
 
@@ -192,6 +257,44 @@ def test_short_editorial_filter_rejects_abstract_theory_angles(angle):
     assert bot.short_editorial_rejection_reason(plan) is not None
 
 
+def test_short_editorial_filter_rejects_minor_local_disaster_story():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Boston's Great Molasses Flood",
+        "angle": "How one underbuilt tank turned millions of gallons into a city disaster",
+        "title": "One Tank Failed, and a City Paid",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "One tank failed, and a city paid.",
+        "narration": "One tank failed, and a city paid. An underbuilt tank caused a city disaster.",
+        "closing_line": "The underbuilt tank changed local rules.",
+        "fact_note": "Note", "source_hints": ["Source"],
+        "scenes": [{"duration": 10, "visual_prompt": "Concrete scene"}],
+        "subject_stature_score": 5,
+        "historical_significance_score": 4,
+        "broad_learning_value_score": 5,
+        "significance_reason": "A notable local industrial accident.",
+    })
+
+    reason = bot.short_editorial_rejection_reason(plan)
+
+    assert reason is not None
+    assert "minor or local incident" in reason
+
+
+def test_short_editorial_filter_rejects_low_significance_scores():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Obscure local event", "angle": "A surprising anecdote", "title": "A Local Mystery",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "A local mystery began here.", "narration": "A local mystery began here.",
+        "closing_line": "It remained a local story.", "fact_note": "Note", "source_hints": ["Source"],
+        "scenes": [{"duration": 10, "visual_prompt": "Concrete scene"}],
+        "subject_stature_score": 6,
+        "historical_significance_score": 5,
+        "broad_learning_value_score": 6,
+    })
+
+    assert "insufficient documentary significance" in bot.short_editorial_rejection_reason(plan)
+
+
 def test_short_categories_stay_documentary_not_consumer_tips():
     categories = " ".join(bot.CURIOSITY_TOPIC_CATEGORIES).lower()
 
@@ -208,6 +311,8 @@ def test_short_categories_stay_documentary_not_consumer_tips():
     assert "scientific discoveries" not in categories
     assert "space exploration" not in categories
     assert "astronomy" not in categories
+    assert "isolated local accidents" in categories
+    assert "small incidents remembered mainly as trivia" in categories
 
 
 def test_choose_novel_plan_retries_abstract_candidate(tmp_path, monkeypatch):

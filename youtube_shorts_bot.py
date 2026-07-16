@@ -307,6 +307,10 @@ class ShortPlan:
     fact_note: str
     source_hints: list[str]
     thumbnail_text: str = ""
+    subject_stature_score: int = 0
+    historical_significance_score: int = 0
+    broad_learning_value_score: int = 0
+    significance_reason: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ShortPlan":
@@ -326,6 +330,10 @@ class ShortPlan:
             closing_line=str(value.get("closing_line") or sentences[-1]), scenes=scenes,
             fact_note=str(value["fact_note"]), source_hints=[str(x) for x in value["source_hints"]][:4],
             thumbnail_text=str(value.get("thumbnail_text") or "")[:48],
+            subject_stature_score=max(0, min(10, int(value.get("subject_stature_score") or 0))),
+            historical_significance_score=max(0, min(10, int(value.get("historical_significance_score") or 0))),
+            broad_learning_value_score=max(0, min(10, int(value.get("broad_learning_value_score") or 0))),
+            significance_reason=str(value.get("significance_reason") or "")[:500],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -371,6 +379,34 @@ def normalized_words(text: str) -> set[str]:
 def similarity(a: str, b: str) -> float:
     left, right = normalized_words(a), normalized_words(b)
     return len(left & right) / len(left | right) if left and right else 0.0
+
+
+LONG_FORM_SUBJECT_STOPWORDS = {
+    "about", "after", "against", "amid", "and", "back", "because", "before",
+    "biggest", "but", "center", "clash", "crisis", "current", "economic",
+    "economy", "effect", "effects", "event", "explained", "for", "from", "global",
+    "how", "impact", "impacts", "into", "latest", "major", "news", "now", "over",
+    "put", "risk", "risks", "story", "the", "this", "today", "video", "what",
+    "when", "where", "which", "why", "with", "world",
+}
+
+
+def long_form_subject_words(text: str) -> set[str]:
+    return normalized_words(text) - LONG_FORM_SUBJECT_STOPWORDS
+
+
+def same_long_form_subject(candidate: str, previous: str) -> bool:
+    """Detect the same central subject even when the consequence/angle changes."""
+    left = long_form_subject_words(candidate)
+    right = long_form_subject_words(previous)
+    if not left or not right:
+        return False
+    shared = left & right
+    smaller = min(len(left), len(right))
+    if smaller == 1:
+        token = next(iter(left if len(left) == 1 else right))
+        return token in shared and len(token) >= 5
+    return len(shared) >= 2 and len(shared) / smaller >= 0.75
 
 
 def narration_word_bounds(duration: int) -> tuple[int, int]:
@@ -460,6 +496,43 @@ class Archive:
                 "SELECT topic, angle, title, status FROM shorts ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def recent_long_form_context(self, limit: int = 20) -> list[dict[str, str]]:
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT topic, angle, title, status FROM shorts "
+                    "WHERE output_path LIKE %s ORDER BY id DESC LIMIT %s",
+                    ("%long-%", limit),
+                )
+                return [dict(row) for row in cur.fetchall()]
+        rows = self.conn.execute(
+            "SELECT topic, angle, title, status FROM shorts "
+            "WHERE output_path LIKE ? ORDER BY id DESC LIMIT ?",
+            ("%long-%", limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def same_long_form_subject_as(self, plan: ShortPlan, limit: int = 40) -> sqlite3.Row | dict | None:
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM shorts WHERE output_path LIKE %s ORDER BY id DESC LIMIT %s",
+                    ("%long-%", limit),
+                )
+                rows = cur.fetchall()
+                for previous in rows:
+                    if same_long_form_subject(plan.topic, str(previous["topic"])):
+                        return dict(previous)
+            return None
+        rows = self.conn.execute(
+            "SELECT * FROM shorts WHERE output_path LIKE ? ORDER BY id DESC LIMIT ?",
+            ("%long-%", limit),
+        ).fetchall()
+        for previous in rows:
+            if same_long_form_subject(plan.topic, str(previous["topic"])):
+                return previous
+        return None
 
     def duplicate_of(self, plan: ShortPlan, threshold: float = 0.52) -> sqlite3.Row | dict | None:
         candidate = f"{plan.topic} {plan.angle} {plan.title}"
@@ -1056,15 +1129,91 @@ LONG_FORM_TOPIC_DOMAINS = (
     "major world news with clear public impact",
 )
 
+LONG_FORM_EDITORIAL_LANES = {
+    "world_affairs": {
+        "label": "world affairs, politics, elections, wars, defense, or geopolitics",
+        "feed_categories": ("top", "world"),
+    },
+    "economy_business": {
+        "label": "global economy, business, trade, markets, companies, or consumer costs",
+        "feed_categories": ("business",),
+    },
+    "technology": {
+        "label": "consumer technology, cybersecurity, AI industry, or major technology companies",
+        "feed_categories": ("technology",),
+    },
+    "sports": {
+        "label": "major international sports with broad public interest",
+        "feed_categories": ("sports",),
+    },
+}
+
+LONG_FORM_LANE_KEYWORDS = {
+    "world_affairs": (
+        "defense", "election", "geopolit", "government", "iran", "israel",
+        "military", "missile", "politic", "strike", "trump", "ukraine", "war",
+    ),
+    "economy_business": (
+        "airline", "bank", "business", "company", "consumer", "cost", "econom",
+        "finance", "fuel", "inflation", "market", "oil", "price", "shipping",
+        "stock", "trade",
+    ),
+    "technology": (
+        "ai ", "android", "apple", "chip", "codex", "cyber", "google", "microsoft",
+        "openai", "semiconductor", "software", "tech", "xbox",
+    ),
+    "sports": (
+        "athlete", "basketball", "championship", "cup", "fifa", "final", "football",
+        "game", "league", "match", "nba", "nfl", "olympic", "soccer", "sport",
+        "team", "tournament",
+    ),
+}
+
+
+def classify_long_form_lane(text: str) -> str:
+    normalized = f" {unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode().lower()} "
+    scores = {
+        lane: sum(1 for keyword in keywords if keyword in normalized)
+        for lane, keywords in LONG_FORM_LANE_KEYWORDS.items()
+    }
+    best_lane = max(scores, key=scores.get)
+    return best_lane if scores[best_lane] else "world_affairs"
+
+
+def choose_long_form_editorial_lane(
+    past: list[dict[str, str]],
+    excluded: set[str] | None = None,
+) -> str:
+    excluded = set(excluded or ())
+    recent_lanes = [
+        classify_long_form_lane(f"{row.get('topic', '')} {row.get('angle', '')} {row.get('title', '')}")
+        for row in past[:2]
+    ]
+    candidates = [
+        lane for lane in LONG_FORM_EDITORIAL_LANES
+        if lane not in excluded and lane not in recent_lanes
+    ]
+    if not candidates:
+        candidates = [lane for lane in LONG_FORM_EDITORIAL_LANES if lane not in excluded]
+    if not candidates:
+        candidates = list(LONG_FORM_EDITORIAL_LANES)
+    return random.choice(candidates)
+
+
+def news_context_for_lane(news_context: list[dict[str, str]], lane: str) -> list[dict[str, str]]:
+    categories = set(LONG_FORM_EDITORIAL_LANES[lane]["feed_categories"])
+    return [item for item in news_context if item.get("category") in categories]
+
+
 CURIOSITY_TOPIC_CATEGORIES = [
-    "Famous historical figures outside Vietnam: reveal one documented decision, habit, relationship, failure, escape, object, contradiction, or little-known episode that shows what the person was actually like. Use a concrete story, never an abstract metaphor or personality theory.",
-    "Major historical events outside Vietnam: tell one decisive moment, overlooked mistake, unlikely turning point, deception, survival story, or consequence that changed the recognizable outcome.",
-    "World wonders and architecture, ancient and modern: explain how a named landmark or megaproject was built, the hardest engineering problem, a unique structural feature, a hidden space, symbolism, human cost, or a surprising episode in its history. Examples include the Statue of Liberty, Great Wall, Three Gorges Dam, temples, bridges, towers, and palaces.",
-    "Natural wonders and extreme geography: focus on one named place, how a visible feature formed, what makes it unique, a record it holds, a real danger, or the human story of exploring or protecting it.",
-    "Ancient civilizations, lost cities, and historical mysteries: center the story on a named civilization, ruler, city, monument, inscription, disappearance, conflict, or surviving historical record and clearly separate evidence from legend.",
-    "Wars, battles, empires, and political turning points in history outside Vietnam: focus on one concrete tactic, decision, object, route, betrayal, logistical failure, or unexpected event rather than broad theory.",
-    "Famous disasters, accidents, and engineering failures: explain the specific chain of events, overlooked warning, design flaw, rescue, or rule that changed afterward without graphic detail or sensationalism.",
-    "Origins of famous symbols, traditions, monuments, foods, or cultural practices: trace one documented event, creator, mistake, controversy, or transformation that produced something widely recognized today.",
+    "World-historical figures outside Vietnam with durable international recognition: reveal one documented decision, failure, rivalry, reform, campaign, or contradiction that helps explain the person's larger historical impact. The specific detail must unlock the major figure's significance, not function as celebrity trivia.",
+    "Major historical events outside Vietnam that changed a nation, region, empire, or international order: tell one decisive moment, overlooked mistake, unlikely turning point, deception, survival decision, or consequence that changed the recognizable outcome.",
+    "World wonders and architecture, including iconic major engineering works, ancient or modern: explain how a named landmark or megaproject was built, its hardest structural problem, symbolism, human cost, or a decisive episode in its history. Choose globally or nationally significant works, not an ordinary building or small local structure.",
+    "World-renowned natural wonders and extreme geography: focus on a named, widely recognized place, how its defining feature formed, what makes it globally exceptional, a record it holds, or how it shaped exploration, settlement, borders, or civilization.",
+    "Major civilizations, empires, lost cities, and consequential historical mysteries: center the story on a widely significant civilization, ruler, capital, monument, conflict, collapse, or surviving historical record and clearly separate evidence from legend.",
+    "Major wars, battles, imperial struggles, revolutions, and political turning points outside Vietnam: focus on one concrete tactic, decision, route, betrayal, logistical failure, or unexpected event that helps explain a large historical outcome rather than a minor skirmish or local dispute.",
+    "Historically transformative disasters or collapses only: choose events whose consequences changed national or international law, industry, public policy, warfare, urban planning, or public memory for generations. Reject isolated local accidents, one-building failures, sensational death toll stories, and small incidents remembered mainly as trivia.",
+    "Globally recognized monuments, cultural heritage, and symbols: explain a documented creation, transformation, controversy, or historical turning point that shaped identity across a nation, civilization, or multiple countries. Reject food-origin trivia, small customs, and novelty-first anecdotes.",
 ]
 
 ABSTRACT_SHORT_TOPIC_TERMS = (
@@ -1082,6 +1231,18 @@ ABSTRACT_SHORT_TOPIC_TERMS = (
     "self-feeding climate",
     "systems theory",
     "theoretical framework",
+)
+
+MINOR_SHORT_STORY_TERMS = (
+    "city disaster",
+    "factory accident",
+    "local accident",
+    "local disaster",
+    "municipal accident",
+    "one building failed",
+    "one tank failed",
+    "small town disaster",
+    "underbuilt tank",
 )
 
 SCIENCE_NEWS_BLOCKLIST = (
@@ -1136,7 +1297,8 @@ def get_random_topic_rule() -> str:
         f"TITLE STYLE to aim for: **{title_style}**. "
         "Only about one in three videos should use a question title; prefer confident declarative or teaser titles otherwise, "
         "and never begin the title with 'Why' unless the narrative format is genuinely MYSTERY. "
-        "Choose a concrete topic with immediate viral curiosity, a surprising historical or factual payoff, and a detail people would remember and retell. "
+        "Choose a major, widely significant subject first, then find a concrete surprising detail inside it. Historical stature and learning value come before shock, oddity, or viral trivia. "
+        "Reject local accidents, one-building or one-company incidents, obscure anecdotes, and novelty-first stories unless they clearly changed a nation, civilization, major industry, or international history for generations. "
         "Reject academic theories, unnamed hypothetical systems or planets, and metaphorical thesis-style angles. "
         "Do not hardcode the exact examples, but generate similarly captivating concepts."
     )
@@ -1164,7 +1326,9 @@ PLAN_SCHEMA = '''{
   "hook":"first spoken sentence, <=12 words", "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=14 words",
   "scenes":[{"duration":5.5,"visual_prompt":"English photorealistic documentary image prompt: one concrete subject + setting, describe only what IS in frame; vary the shot type between scenes"}],
-  "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"]
+  "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"],
+  "subject_stature_score":9, "historical_significance_score":9, "broad_learning_value_score":9,
+  "significance_reason":"one sentence explaining the subject's durable national, civilizational, or global importance"
 }'''
 
 LONG_FORM_PLAN_SCHEMA = '''{
@@ -1192,6 +1356,8 @@ RESEARCH_SCHEMA = '''{
   "surprise_payoff":"the specific reveal that makes the hook worth watching",
   "central_claim":"one defensible claim", "evidence_points":["fact 1","fact 2","fact 3"],
   "uncertainty":"what must be qualified or omitted", "fresh_angle":"a non-repetitive narrative angle",
+  "subject_stature_score":9, "historical_significance_score":9, "broad_learning_value_score":9,
+  "significance_reason":"durable national, civilizational, or global importance beyond the surprising detail",
   "source_leads":["credible primary institution, archive, museum, or research body"],
   "avoid":["specific overclaim or cliché to avoid"]
 }'''
@@ -1283,6 +1449,9 @@ Use your reasoning internally before responding. Return only JSON using this sch
 {RESEARCH_SCHEMA}
 Topic strategy: {topic_rule}
 Rules: Choose one specific, evidence-based topic with a named person, place, object, event, rule, mistake, price, or visible feature. It must deliver a concrete surprise or useful real-world understanding that an ordinary viewer can grasp immediately. Do not invent sources, data, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it.
+Historical-scale gate: the central SUBJECT itself must be important enough for a serious world-history documentary before considering its surprising angle. Require all three honest scores — subject_stature_score, historical_significance_score, and broad_learning_value_score — to be at least 8/10. A famous-sounding headline is not evidence of significance. Do not inflate scores to save a weak candidate.
+Reject a candidate if it is mainly a quirky local incident, isolated industrial accident, one-building failure, municipal episode, obscure personal anecdote, food-origin fact, or shocking number with little durable consequence. An event centered on one city or company qualifies only when it clearly changed national or international law, institutions, industry, borders, warfare, culture, or public life for generations.
+Prefer a specific revealing detail INSIDE a major subject: a consequential decision by a world-historical person, a turning point in a major event or war, a structural challenge in an iconic work, or a defining feature of a renowned place. The detail is the storytelling lens; it must not be the entire reason the subject seems interesting.
 Concrete/retellability test: silently reject the candidate unless it passes at least THREE of these tests: (1) centers a named person, event, place, structure, civilization, object, species, invention, mission, or discovery; (2) contains one documented decision, construction detail, obstacle, mistake, turning point, hidden feature, record, or discovery; (3) delivers a surprising answer that can be retold to a friend in one sentence; (4) has a vivid scene or object that can be shown clearly; (5) explains why the subject mattered in history or what changed because of it.
 Clickability filter: before selecting the topic, silently reject candidates that sound like a procedural report, a routine measurement update, a narrow technical footnote, a low-stakes institutional detail, a classroom theory, a speculative planetary scenario, or an academic concept with no concrete story. Never frame a person as a metaphorical "processing engine" and never build the story around carrying capacity, systems theory, a conceptual framework, or an unnamed planet. The final viewer_question should feel like a specific, surprising documentary story someone would click, save, or share without already knowing the subject.
 Novelty rule: The topic and fresh_angle must be materially different from every item in the existing archive and rejected candidates below. Do not choose the same object, event, artifact, site, person, mechanism, or central claim. If a broad theme keeps pointing to the same subject, switch domains within the theme.
@@ -1314,10 +1483,11 @@ def plan_short(
     minimum_words, maximum_words = narration_word_bounds(duration)
     prompt = f'''Act as a senior viral documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
-Audience: curious general English-speaking viewers, not academics or specialists. Keep the channel centered on historical figures, historical events, civilizations, wars, empires, natural wonders, architecture, famous landmarks, monuments, disasters, and cultural history.
+Audience: curious general English-speaking viewers, not academics or specialists. Keep the channel centered on world-historical figures, major events, civilizations, wars, empires, renowned natural wonders, iconic architecture, major landmarks, monuments, and transformative cultural history.
 Topic strategy: {topic_rule}
 {opener_rule}
 Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel specific, surprising, and worth remembering or sharing in the assigned narrative format — not a neutral encyclopedia entry, classroom lesson, consumer tip, or abstract theory.
+SIGNIFICANCE REQUIREMENT: Preserve honest subject_stature_score, historical_significance_score, and broad_learning_value_score values of at least 8/10. The narration must teach why the larger subject mattered, not merely recount the surprising detail. Reject local incidents and trivia dressed up with dramatic language.
 The topic, angle, title, and hook must name or clearly point to the brief's concrete_anchor. Fully deliver the viewer_payoff, share_trigger, and surprise_payoff. A viewer should be able to retell the core story in one plain sentence.
 TITLE REQUIREMENT: The title must explicitly name the concrete_anchor — the actual person, landmark, place, structure, event, civilization, object, or discovery — rather than hiding it behind "this", "that", "the secret", or a generic mystery phrase. Make the named subject appear early in the title whenever natural. For example, write "The Three Gorges Dam's Hidden Problem", not "The Dam Nobody Saw Coming". Set thumbnail_text to 2-5 bold words that name the same subject; it is not a vague slogan.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
@@ -1342,8 +1512,8 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.65)))
     review_prompt = f'''Act as the final fact, documentary-story, and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
-{{"quality_check":{{"hook_score":1,"clarity_score":1,"concreteness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, consumer-tip drift, academic framing, speculative planetary scenarios, and dry topics that lack a strong concrete story. Rewrite any abstract angle into a named person/place/object/event/structure/discovery story; if that is impossible, replace it with a better candidate from the assigned documentary category. Make the hook immediately intriguing, the middle concrete, and the closing line memorable enough to retell or share. Use plain spoken English and ensure the narration clearly pays off the hook. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. The title must explicitly name the concrete_anchor, never a pronoun-only or generic subject; thumbnail_text must be 2-5 words naming that same main subject. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+{{"quality_check":{{"hook_score":1,"clarity_score":1,"concreteness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"subject_stature_score":1,"historical_significance_score":1,"broad_learning_value_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
+The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, consumer-tip drift, academic framing, speculative planetary scenarios, minor local incidents, novelty-first trivia, and dry topics that lack a strong concrete story. Score historical stature honestly: a candidate below 8/10 on subject stature, historical significance, or broad learning value must be rejected rather than rescued with dramatic wording. Rewrite any abstract angle into a named person/place/object/event/structure/discovery story; if that is impossible, replace it with a better candidate from the assigned documentary category. Make the hook immediately intriguing, the middle concrete, and the closing line memorable enough to retell or share. Use plain spoken English and ensure the narration clearly pays off the hook while explaining the larger subject's lasting importance. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. The title must explicitly name the concrete_anchor, never a pronoun-only or generic subject; thumbnail_text must be 2-5 words naming that same main subject. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
@@ -1351,6 +1521,13 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     if not isinstance(reviewed.get("plan"), dict):
         raise BotError("OpenAI quality pass thiếu trường plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
+    review_quality = reviewed.get("quality_check", {})
+    if not plan.subject_stature_score:
+        plan.subject_stature_score = int(review_quality.get("subject_stature_score") or 0)
+    if not plan.historical_significance_score:
+        plan.historical_significance_score = int(review_quality.get("historical_significance_score") or 0)
+    if not plan.broad_learning_value_score:
+        plan.broad_learning_value_score = int(review_quality.get("broad_learning_value_score") or 0)
     ensure_title_names_main_subject(plan)
     normalize_scene_count(plan, 6)
     quality = reviewed.get("quality_check", {})
@@ -1532,10 +1709,12 @@ def plan_long_form(
     max_scenes: int,
     news_context: list[dict[str, str]] | None = None,
     rejected: list[dict[str, str]] | None = None,
+    editorial_lane: str = "world_affairs",
 ) -> ShortPlan:
-    past = archive.recent_context()
+    past = archive.recent_long_form_context()
     rejected = rejected or []
     news_context = news_context or []
+    lane_label = LONG_FORM_EDITORIAL_LANES[editorial_lane]["label"]
     target_min_words, target_max_words = target_long_form_word_bounds(duration)
     min_words, max_words = long_form_word_bounds(duration)
     scene_count = random.randint(min_scenes, max_scenes)
@@ -1545,18 +1724,22 @@ Create ONE English long-form YouTube video plan for a horizontal 16:9 video.
 Target duration: exactly {duration} seconds, about {duration // 60} to {round(duration / 60, 1)} minutes.
 Theme: {theme}
 Allowed domains: {", ".join(LONG_FORM_TOPIC_DOMAINS)}.
+Assigned editorial lane for this run: {lane_label}.
 Fresh news context from public RSS headlines: {json.dumps(news_context, ensure_ascii=False)}
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
 
 Hard rules:
 - Do NOT choose any topic, event, person, location, company, political figure, sports figure, or public controversy related to Vietnam.
-- Use the supplied news context as leads and prioritize the newest headline with the clearest public consequence. If the context is thin, choose a globally relevant current topic outside Vietnam and explicitly keep claims broad.
+- Stay inside the assigned editorial lane. Choose from its supplied headlines; do not switch back to a recently covered lane merely because it has a louder headline.
+- Randomly evaluate several viable headlines inside the assigned lane before choosing one. Do not always select the first headline in the list.
+- Use the supplied news context as leads and prioritize a recent headline with a clear public consequence. If the context is thin, choose a globally relevant current topic in the same assigned lane and explicitly keep claims broad.
 - Cover ONLY politics, elections, wars, military affairs, geopolitics, economics, business, trade, markets, consumer technology, cybersecurity, the AI industry, major sports, or major world news. Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries even if they appear in a top-news feed.
 - Do not invent quotes, casualty numbers, market numbers, scores, dates, or source names not present in the context.
 - The result must feel timely, clickable, practical, surprising, and broad-interest, but not sensationalized.
 - Select a story with a concrete change: who acted, what changed, who pays or benefits, what viewers should watch next, and why it matters now. Reject routine speeches, procedural updates, and abstract policy theory with no visible consequence.
-- TITLE REQUIREMENT: The title must explicitly name the central person, country, place, route, company, conflict, policy, event, or sports team — not only its consequence. Put that concrete subject early when possible. For example, write "Strait of Hormuz: The Risk to Global Oil", not "The Trade Crisis Getting Worse". Set thumbnail_text to 2-5 bold words that name the same central subject; never use a vague slogan.
+- NOVELTY REQUIREMENT: Do not reuse the same central person, country pair, place, route, company, conflict, policy, event, or sports team from the existing archive or rejected candidates, even with a different consequence or angle. If a candidate shares the same central subject, choose a genuinely different headline.
+- TITLE REQUIREMENT: The title must explicitly name the central person, country, place, route, company, conflict, policy, event, or sports team — not only its consequence. Put that concrete subject early when possible. Set thumbnail_text to 2-5 bold words that name the same central subject; never use a vague slogan.
 - Use a save/share test: the viewer should finish with at least one clear consequence, comparison, warning sign, or next development they can explain to someone else.
 - Explain the story like a 5-7 minute news documentary: immediate headline payoff, essential context, timeline, what changed, who is affected, competing interpretations, likely next consequences, memorable close.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
@@ -1584,6 +1767,8 @@ Return exactly:
 
 Rules:
 - Reject or rewrite any Vietnam-related topic, person, event, or location.
+- Keep the assigned editorial lane: {lane_label}. Do not replace the draft with a story from another lane.
+- Reject a draft that repeats the same central person, country pair, place, route, company, conflict, policy, event, or sports team from the archive or rejected candidates, even if its title and consequence are different.
 - Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries. Keep only politics, military affairs, economics, business, technology industry, sports, or consequential world news.
 - Keep only claims supportable by the supplied RSS context or clearly phrased as general background.
 - Reject routine announcements or abstract theory unless the script can name the concrete change, affected people, real-world consequence, and what happens next.
@@ -1593,6 +1778,8 @@ Rules:
 - Aim for roughly {target_min_words}-{target_max_words} words, but preserve a clear and complete story rather than adding filler solely to hit a duration target.
 
 News context: {json.dumps(news_context, ensure_ascii=False)}
+Existing archive: {json.dumps(past, ensure_ascii=False)}
+Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking long-form timeliness, structure, and Vietnam exclusion...")
     reviewed = extract_json(
@@ -1630,14 +1817,34 @@ def choose_novel_long_form_plan(
     max_attempts: int = 3,
 ) -> ShortPlan | None:
     rejected: list[dict[str, str]] = []
-    news_context = fetch_trending_news_context()
+    all_news_context = fetch_trending_news_context()
+    past = archive.recent_long_form_context()
+    attempted_lanes: set[str] = set()
     for _attempt in range(1, max_attempts + 1):
-        plan = plan_long_form(llm, archive, theme, duration, min_scenes, max_scenes, news_context, rejected)
-        duplicate = archive.duplicate_of(plan, threshold=0.45)
+        editorial_lane = choose_long_form_editorial_lane(past, attempted_lanes)
+        attempted_lanes.add(editorial_lane)
+        news_context = news_context_for_lane(all_news_context, editorial_lane)
+        plan = plan_long_form(
+            llm,
+            archive,
+            theme,
+            duration,
+            min_scenes,
+            max_scenes,
+            news_context,
+            rejected,
+            editorial_lane,
+        )
+        duplicate = archive.same_long_form_subject_as(plan)
+        if not duplicate:
+            duplicate = archive.duplicate_of(plan, threshold=0.45)
         if not duplicate:
             return plan
         rejected.append(rejection_context(plan, duplicate))
-        print(f"Long-form idea duplicated ({duplicate['title']!r}); requesting a different angle...")
+        print(
+            f"Long-form subject duplicated ({duplicate['title']!r}); "
+            "switching editorial lane and requesting a different story..."
+        )
     return None
 
 
@@ -1674,12 +1881,25 @@ def rejection_context(plan: ShortPlan, duplicate: sqlite3.Row) -> dict[str, str]
 
 
 def short_editorial_rejection_reason(plan: ShortPlan) -> str | None:
-    """Reject known academic/abstract framings before image credits are spent."""
+    """Reject abstract or low-significance Shorts before image credits are spent."""
     text = " ".join((plan.topic, plan.angle, plan.title, plan.hook, plan.narration)).lower()
     normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     matched = [term for term in ABSTRACT_SHORT_TOPIC_TERMS if term in normalized]
     if matched:
         return f"abstract or theory-led framing ({', '.join(matched[:3])})"
+    minor_matches = [term for term in MINOR_SHORT_STORY_TERMS if term in normalized]
+    if minor_matches:
+        return f"minor or local incident framing ({', '.join(minor_matches[:3])})"
+    significance_scores = {
+        "subject stature": plan.subject_stature_score,
+        "historical significance": plan.historical_significance_score,
+        "broad learning value": plan.broad_learning_value_score,
+    }
+    supplied_scores = [score for score in significance_scores.values() if score > 0]
+    if supplied_scores:
+        weak = [name for name, score in significance_scores.items() if score < 8]
+        if weak:
+            return f"insufficient documentary significance ({', '.join(weak)})"
     return None
 
 
@@ -1701,7 +1921,10 @@ def choose_novel_plan(
                 "title": plan.title,
                 "editorial_rejection": editorial_reason,
             })
-            print(f"Ý tưởng quá trừu tượng ({plan.title!r}); yêu cầu OpenAI chọn câu chuyện thực dụng hơn…")
+            print(
+                f"Short idea rejected by editorial gate ({plan.title!r}: {editorial_reason}); "
+                "requesting a larger, more consequential historical subject..."
+            )
             continue
         duplicate = archive.duplicate_of(plan)
         if not duplicate:
@@ -3099,7 +3322,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--theme",
-        default="historical figures, major historical events, civilizations, wars, empires, natural wonders, world architecture, famous landmarks, monuments, disasters, and cultural history with surprising concrete details",
+        default="world-historical figures, major historical events, civilizations, wars, empires, renowned natural wonders, iconic world architecture, major landmarks, monuments, and transformative cultural history with surprising concrete details",
     )
     parser.add_argument(
         "--duration",

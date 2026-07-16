@@ -29,6 +29,23 @@ def test_plan_parser_accepts_valid_plan():
     assert plan.thumbnail_text == "Named Subject"
 
 
+def test_plan_parser_ignores_extra_scene_fields_and_accepts_visual_prompt_alt():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Major Event", "angle": "Decisive turning point", "title": "A Major Event",
+        "description": "#History #Shorts", "tags": ["history", "shorts"],
+        "hook": "A major event changed history.", "narration": "A major event changed history.",
+        "closing_line": "Its consequences lasted for generations.",
+        "fact_note": "Avoids unsupported claims", "source_hints": ["National archive"],
+        "scenes": [
+            {"duration": "5.5", "visual_prompt": "A wide historical scene.", "visual_prompt_alt": "Unused alternate scene.", "camera_move": "slow push"},
+            {"duration": 5.5, "visual_prompt_alt": "A detailed archival object on a table."},
+        ],
+    })
+
+    assert plan.scenes[0] == bot.Scene(duration=5.5, visual_prompt="A wide historical scene.")
+    assert plan.scenes[1] == bot.Scene(duration=5.5, visual_prompt="A detailed archival object on a table.")
+
+
 def test_thumbnail_headline_uses_named_subject_and_wraps_to_two_lines():
     plan = bot.ShortPlan.from_dict({
         "topic": "The Strait of Hormuz", "angle": "Oil risk", "title": "The Trade Crisis",

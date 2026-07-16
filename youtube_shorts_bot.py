@@ -318,7 +318,19 @@ class ShortPlan:
         missing = required - value.keys()
         if missing:
             raise BotError(f"Grok trả kế hoạch thiếu trường: {', '.join(sorted(missing))}")
-        scenes = [Scene(**scene) for scene in value["scenes"]]
+        raw_scenes = value["scenes"]
+        if not isinstance(raw_scenes, list):
+            raise BotError("Kế hoạch có trường scenes không hợp lệ.")
+        scenes: list[Scene] = []
+        for raw_scene in raw_scenes:
+            if not isinstance(raw_scene, dict):
+                raise BotError("Kế hoạch có cảnh không hợp lệ.")
+            try:
+                duration = float(raw_scene["duration"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise BotError("Kế hoạch có cảnh thiếu hoặc sai duration.") from exc
+            visual_prompt = raw_scene.get("visual_prompt") or raw_scene.get("visual_prompt_alt")
+            scenes.append(Scene(duration=duration, visual_prompt=str(visual_prompt or "")))
         if not scenes or any(not scene.visual_prompt or scene.duration <= 0 for scene in scenes):
             raise BotError("Kế hoạch có cảnh không hợp lệ.")
         narration = str(value["narration"])

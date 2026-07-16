@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import base64
+import re
 import sys
 from pathlib import Path
 import requests
@@ -44,6 +45,57 @@ def test_plan_parser_ignores_extra_scene_fields_and_accepts_visual_prompt_alt():
 
     assert plan.scenes[0] == bot.Scene(duration=5.5, visual_prompt="A wide historical scene.")
     assert plan.scenes[1] == bot.Scene(duration=5.5, visual_prompt="A detailed archival object on a table.")
+
+
+def test_social_vietnamese_plan_repairs_an_overlong_narration():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Panama Canal Locks", "angle": "How water lifts ships", "title": "Panama Canal Locks",
+        "description": "#History #Engineering", "tags": ["History", "Engineering"],
+        "hook": "Ships climb a water staircase.", "narration": "Ships climb a water staircase.",
+        "closing_line": "The locks changed global trade.", "fact_note": "No unsupported figures",
+        "source_hints": ["Panama Canal Authority"],
+        "scenes": [{"duration": 10, "visual_prompt": "Canal locks from above."}],
+    })
+    overlong = " ".join(["từ"] * 249)
+    repaired = " ".join(["từ"] * 207)
+    prompts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = [
+                {"title": "Kênh đào Panama", "description": "Mô tả #LichSu #CongTrinh", "tags": ["LichSu", "CongTrinh"], "narration": overlong},
+                {"title": "Kênh đào Panama", "description": "Mô tả #LichSu #CongTrinh", "tags": ["LichSu", "CongTrinh"], "narration": repaired},
+            ]
+
+        def chat(self, prompt, temperature=0.55):
+            prompts.append(prompt)
+            return json.dumps(self.responses.pop(0))
+
+    social = bot.plan_social_vietnamese(FakeClient(), plan, 60)
+
+    assert len(re.findall(r"\b\w+\b", social.narration, flags=re.UNICODE)) == 207
+    assert "Plan to rewrite" in prompts[1]
+
+
+def test_prepare_social_video_uses_actual_english_narration_duration(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Major Event", "angle": "Turning point", "title": "Major Event",
+        "description": "#History #Shorts", "tags": ["History", "Shorts"],
+        "hook": "A major event changed history.", "narration": "A major event changed history.",
+        "closing_line": "Its consequences lasted.", "fact_note": "No unsupported figures",
+        "source_hints": ["Archive"], "scenes": [{"duration": 10, "visual_prompt": "Historic scene."}],
+    })
+    (tmp_path / "narration.mp3").write_bytes(b"audio")
+    captured = []
+    social = bot.SocialPlan(title="Tiêu đề", description="Mô tả #A #B", tags=["A", "B"], narration="Lời đọc")
+
+    monkeypatch.setattr(bot, "measured_narration_duration", lambda *_args: 65.448)
+    monkeypatch.setattr(bot, "plan_social_vietnamese", lambda _llm, _plan, duration: captured.append(duration) or social)
+    monkeypatch.setattr(bot, "render_social_video", lambda *_args: tmp_path / "short_vi.mp4")
+
+    bot.prepare_social_video(plan, object(), object(), tmp_path, bot.Settings(duration=60))
+
+    assert captured == [65]
 
 
 def test_thumbnail_headline_uses_named_subject_and_wraps_to_two_lines():

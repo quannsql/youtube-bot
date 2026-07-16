@@ -1863,9 +1863,13 @@ def choose_novel_long_form_plan(
 def plan_social_vietnamese(llm: OpenAITextClient, plan: ShortPlan, duration: int) -> SocialPlan:
     target_minimum_words, target_maximum_words = target_narration_word_bounds(duration)
     minimum_words, maximum_words = narration_word_bounds(duration)
+    schema = (
+        '{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with exactly 2 relevant hashtags",'
+        '"tags":["exactly 2 short hashtags"],"narration":"Vietnamese voice-over"}'
+    )
     prompt = f'''Translate and adapt this English YouTube Short plan into Vietnamese for Facebook and TikTok.
-Return raw JSON only with this schema:
-{{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with exactly 2 relevant hashtags","tags":["exactly 2 short hashtags"],"narration":"Vietnamese voice-over"}}
+    Return raw JSON only with this schema:
+{schema}
 Rules:
 - Keep every factual claim equivalent to the English plan; do not add dates, names, statistics, sources, or certainty.
 - Make the Vietnamese narration natural, concise, and suitable for a {duration}-second short video.
@@ -1875,7 +1879,25 @@ English plan: {json.dumps(plan.to_dict(), ensure_ascii=False)}'''
     LOG.info("Creating Vietnamese social caption and narration…")
     social = SocialPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.35)))
     words = len(re.findall(r"\b\w+\b", social.narration, flags=re.UNICODE))
-    if not minimum_words <= words <= maximum_words:
+    if words > target_maximum_words or not minimum_words <= words <= maximum_words:
+        LOG.info(
+            "Vietnamese social narration has %d words; requesting a concise repair for %d-%d words.",
+            words,
+            minimum_words,
+            target_maximum_words,
+        )
+        repair_prompt = f'''Rewrite this Vietnamese Facebook/TikTok social plan into a natural voice-over for a {duration}-second video.
+Return raw JSON only with this schema:
+{schema}
+Rules:
+- Preserve every factual claim, named subject, and the original meaning. Do not add facts, dates, numbers, sources, or certainty.
+- Keep the title and caption natural Vietnamese; the caption must have exactly 2 relevant hashtags.
+- The narration must contain {minimum_words}-{target_maximum_words} Vietnamese words. Remove repetition and filler first; keep the hook, core explanation, and ending.
+
+Plan to rewrite: {json.dumps(social.to_dict(), ensure_ascii=False)}'''
+        social = SocialPlan.from_dict(extract_json(llm.chat(repair_prompt, temperature=0.2)))
+        words = len(re.findall(r"\b\w+\b", social.narration, flags=re.UNICODE))
+    if not minimum_words <= words <= maximum_words or words > target_maximum_words:
         raise BotError(f"Kịch bản tiếng Việt có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
     LOG.info("Vietnamese social plan ready: %r (%d words)", social.title, words)
     return social
@@ -3083,12 +3105,28 @@ def social_publish_enabled(settings: Settings) -> bool:
     return settings.publish_facebook or settings.publish_tiktok
 
 
+def social_planning_duration(output_dir: Path, fallback_duration: int) -> int:
+    """Use the actual English narration length when it is available on disk."""
+    narration = output_dir / "narration.mp3"
+    if not narration.is_file():
+        return fallback_duration
+    try:
+        return max(1, round(measured_narration_duration(narration, "Short English social planning")))
+    except BotError as exc:
+        LOG.warning("Could not measure English narration for social planning: %s", exc)
+        return fallback_duration
+
+
 def prepare_social_video(plan: ShortPlan, llm: OpenAITextClient, tts: OpenAIShortVietnameseTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
     social_file = output_dir / "social_vi.json"
     if social_file.is_file():
         social = SocialPlan.from_dict(json.loads(social_file.read_text(encoding="utf-8")))
     else:
-        social = plan_social_vietnamese(llm, plan, settings.duration)
+        social = plan_social_vietnamese(
+            llm,
+            plan,
+            social_planning_duration(output_dir, settings.duration),
+        )
         social_file.write_text(json.dumps(social.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     social_video = output_dir / "short_vi.mp4"
     if not social_video.is_file():

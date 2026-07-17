@@ -62,6 +62,10 @@ class ImageGenerationTransientError(BotError):
         self.status_code = status_code
 
 
+class ImageGenerationSafetyError(BotError):
+    """A prompt/image was rejected by the provider's safety system; do not retry it."""
+
+
 class FacebookAPIError(BotError):
     def __init__(
         self,
@@ -842,6 +846,12 @@ class OpenAIImageClient:
                 )
                 if not response.ok:
                     detail = response.text[:800]
+                    if response.status_code == 400 and (
+                        "moderation_blocked" in detail or "rejected by the safety system" in detail.lower()
+                    ):
+                        raise ImageGenerationSafetyError(
+                            f"OpenAI Image API safety block for {destination.name}: {detail}"
+                        )
                     if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
                         raise ImageGenerationTransientError(
                             f"OpenAI Image API {response.status_code}: {detail}", response.status_code
@@ -2429,12 +2439,17 @@ def render(
                     height=1920,
                     prefer_web=index in web_indexes,
                 )
-            except ImageGenerationTransientError as exc:
-                if not client.s.allow_image_fallback_placeholder:
+            except (ImageGenerationTransientError, ImageGenerationSafetyError) as exc:
+                if not client.s.allow_image_fallback_placeholder and not isinstance(exc, ImageGenerationSafetyError):
                     raise BotError(
                         f"Image generation for scene {index} failed and placeholder fallback is disabled: {exc}"
                     ) from exc
-                LOG.warning("Image generation for scene %d failed; using fallback image: %s", index, exc)
+                LOG.warning(
+                    "Image generation for scene %d %s; using fallback image: %s",
+                    index,
+                    "was safety-blocked" if isinstance(exc, ImageGenerationSafetyError) else "failed",
+                    exc,
+                )
                 create_fallback_scene_image(image_file, previous_image)
         if image_file.stat().st_size < 1024:
             raise BotError(f"Cảnh {index} không phải hình ảnh hợp lệ.")
@@ -2587,12 +2602,17 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
                     index,
                 )
                 create_fallback_scene_image(image_file, previous_image, width=1920, height=1080)
-        except ImageGenerationTransientError as exc:
-            if not client.s.allow_image_fallback_placeholder:
+        except (ImageGenerationTransientError, ImageGenerationSafetyError) as exc:
+            if not client.s.allow_image_fallback_placeholder and not isinstance(exc, ImageGenerationSafetyError):
                 raise BotError(
                     f"Long-form image {index} failed and placeholder fallback is disabled: {exc}"
                 ) from exc
-            LOG.warning("Long-form image %d failed; using fallback image: %s", index, exc)
+            LOG.warning(
+                "Long-form image %d %s; using fallback image: %s",
+                index,
+                "was safety-blocked" if isinstance(exc, ImageGenerationSafetyError) else "failed",
+                exc,
+            )
             create_fallback_scene_image(image_file, previous_image, width=1920, height=1080)
         if image_file.stat().st_size < 1024:
             raise BotError(f"Long-form scene {index} did not produce a valid image.")

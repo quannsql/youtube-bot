@@ -827,6 +827,27 @@ def test_openai_image_retries_transient_failure(tmp_path, monkeypatch):
     assert not (tmp_path / "scene_1.jpg.part").exists()
 
 
+def test_openai_image_safety_block_does_not_retry(tmp_path, monkeypatch):
+    calls = {"count": 0}
+
+    class FakeResponse:
+        ok = False
+        status_code = 400
+        text = '{"error":{"code":"moderation_blocked","message":"Rejected by the safety system"}}'
+
+    def fake_post(*_args, **_kwargs):
+        calls["count"] += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    settings = bot.Settings(openai_api_key="openai", image_attempts=3, image_retry_backoff_seconds=0)
+
+    with pytest.raises(bot.ImageGenerationSafetyError, match="safety block"):
+        bot.OpenAIImageClient(settings).image("a prompt", tmp_path / "scene_1.jpg")
+
+    assert calls["count"] == 1
+
+
 def test_openai_image_locks_portrait_to_low_cost_payload(tmp_path, monkeypatch):
     captured = {}
     encoded = base64.b64encode(b"y" * 2048).decode()
@@ -1149,6 +1170,31 @@ def test_prepare_long_form_images_fails_when_placeholder_fallback_disabled(tmp_p
 
     with pytest.raises(bot.BotError, match="placeholder fallback is disabled"):
         bot.prepare_long_form_images(plan, FakeImages(), tmp_path)
+
+
+def test_prepare_long_form_images_falls_back_after_safety_rejection(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic", "angle": "Angle", "title": "Title",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Body. Close.", "closing_line": "Close.",
+        "scenes": [{"duration": 10, "visual_prompt": "Scene one"}],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+
+    class FakeImages:
+        s = bot.Settings(brave_web_images_per_long_form=0)
+
+        def image(self, *_args, **_kwargs):
+            raise bot.ImageGenerationSafetyError("provider blocked the image")
+
+    monkeypatch.setattr(
+        bot,
+        "create_fallback_scene_image",
+        lambda destination, *_args, **_kwargs: destination.write_bytes(b"i" * 2048),
+    )
+
+    assert bot.prepare_long_form_images(plan, FakeImages(), tmp_path) == 1
+    assert bot.long_form_image_path(tmp_path, 1).is_file()
 
 
 def test_long_form_uses_five_brave_slots_and_only_ten_openai_slots(tmp_path):

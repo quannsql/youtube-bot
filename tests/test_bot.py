@@ -1149,7 +1149,18 @@ def test_long_form_word_bounds_keep_audio_led_safety_and_pacing_guidance_separat
     target_minimum, target_maximum = bot.target_long_form_word_bounds(419)
 
     assert (minimum, maximum) == (210, 2095)
-    assert (target_minimum, target_maximum) == (1257, 1446)
+    # Target pacing must match the measured TTS speed (~2.55 words/sec) so a
+    # 300s plan renders near 5 minutes instead of 9.
+    assert (target_minimum, target_maximum) == (1006, 1089)
+
+
+def test_target_long_form_words_render_near_requested_duration():
+    measured_tts_words_per_second = 2.57  # 1412 words -> 550.44s in production
+    for duration in (240, 300):
+        target_minimum, target_maximum = bot.target_long_form_word_bounds(duration)
+        rendered_seconds = target_maximum / measured_tts_words_per_second
+        assert rendered_seconds <= duration * 1.05
+        assert target_minimum / measured_tts_words_per_second >= duration * 0.85
 
 
 def test_prepare_long_form_images_creates_every_image_in_one_run(tmp_path):
@@ -1240,6 +1251,62 @@ def test_prepare_long_form_images_falls_back_after_safety_rejection(tmp_path, mo
 
     assert bot.prepare_long_form_images(plan, FakeImages(), tmp_path) == 1
     assert bot.long_form_image_path(tmp_path, 1).is_file()
+
+
+def test_scene_parser_keeps_real_subject_search_query():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic", "angle": "Angle", "title": "Title",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Body. Close.", "closing_line": "Close.",
+        "scenes": [
+            {"duration": 10, "visual_prompt": "A government building in Kyiv.", "search_query": " Zelenskyy press conference "},
+            {"duration": 10, "visual_prompt": "A symbolic map scene."},
+        ],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+
+    assert plan.scenes[0].search_query == "Zelenskyy press conference"
+    assert plan.scenes[1].search_query == ""
+
+
+def test_long_form_images_prefer_real_web_photos_for_named_subjects(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic", "angle": "Angle", "title": "Title",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Body. Close.", "closing_line": "Close.",
+        "scenes": [
+            {"duration": 10, "visual_prompt": "A presidential office building.", "search_query": "Zelenskyy press conference"},
+            {"duration": 10, "visual_prompt": "A defence ministry facade.", "search_query": "Ukraine defence ministry building"},
+            {"duration": 10, "visual_prompt": "A symbolic map scene."},
+        ],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+
+    class FakeImages:
+        s = bot.Settings(brave_web_images_per_long_form=0)
+
+        def __init__(self):
+            self.web_queries = []
+            self.openai_scenes = []
+
+        def image(self, search_query, generation_prompt, destination, width, height, prefer_web, web_only=False):
+            if prefer_web:
+                self.web_queries.append(search_query)
+                if "Zelenskyy" in search_query:
+                    destination.write_bytes(b"w" * 2048)
+                    return "web"
+                return "missing"
+            self.openai_scenes.append(destination.name)
+            destination.write_bytes(b"o" * 2048)
+            return "openai"
+
+    client = FakeImages()
+    prepared = bot.prepare_long_form_images(plan, client, tmp_path)
+
+    assert prepared == 3
+    assert client.web_queries == ["Zelenskyy press conference", "Ukraine defence ministry building"]
+    assert client.openai_scenes == ["long_scene_02.jpg", "long_scene_03.jpg"]
+    assert all((tmp_path / f"long_scene_{index:02d}.jpg").is_file() for index in range(1, 4))
 
 
 def test_long_form_uses_five_brave_slots_and_only_ten_openai_slots(tmp_path):

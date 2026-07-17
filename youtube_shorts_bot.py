@@ -174,8 +174,8 @@ class Settings:
     long_form_openai_images: int = 10
     language: str = "en"
     duration: int = 20
-    long_form_min_duration_seconds: int = 300
-    long_form_max_duration_seconds: int = 420
+    long_form_min_duration_seconds: int = 240
+    long_form_max_duration_seconds: int = 300
     long_form_min_scenes: int = 15
     long_form_max_scenes: int = 15
     long_form_timezone: str = "Asia/Bangkok"
@@ -255,8 +255,8 @@ class Settings:
             brave_web_images_per_long_form=brave_long_form_images,
             language=os.getenv("SHORT_LANGUAGE", "en"),
             duration=duration,
-            long_form_min_duration_seconds=max(60, int(os.getenv("LONG_FORM_MIN_DURATION_SECONDS", "300"))),
-            long_form_max_duration_seconds=max(60, int(os.getenv("LONG_FORM_MAX_DURATION_SECONDS", "420"))),
+            long_form_min_duration_seconds=max(60, int(os.getenv("LONG_FORM_MIN_DURATION_SECONDS", "240"))),
+            long_form_max_duration_seconds=max(60, int(os.getenv("LONG_FORM_MAX_DURATION_SECONDS", "300"))),
             long_form_min_scenes=cls.long_form_openai_images + brave_long_form_images,
             long_form_max_scenes=cls.long_form_openai_images + brave_long_form_images,
             long_form_timezone=os.getenv("LONG_FORM_TIMEZONE", "Asia/Bangkok").strip() or "Asia/Bangkok",
@@ -295,6 +295,9 @@ class Settings:
 class Scene:
     duration: float
     visual_prompt: str
+    # Literal web image search phrase naming the real person/place/object.
+    # Only the generation prompt must avoid real people; the search may name them.
+    search_query: str = ""
 
 
 @dataclass
@@ -334,7 +337,11 @@ class ShortPlan:
             except (KeyError, TypeError, ValueError) as exc:
                 raise BotError("Kế hoạch có cảnh thiếu hoặc sai duration.") from exc
             visual_prompt = raw_scene.get("visual_prompt") or raw_scene.get("visual_prompt_alt")
-            scenes.append(Scene(duration=duration, visual_prompt=str(visual_prompt or "")))
+            scenes.append(Scene(
+                duration=duration,
+                visual_prompt=str(visual_prompt or ""),
+                search_query=str(raw_scene.get("search_query") or "").strip(),
+            ))
         if not scenes or any(not scene.visual_prompt or scene.duration <= 0 for scene in scenes):
             raise BotError("Kế hoạch có cảnh không hợp lệ.")
         narration = str(value["narration"])
@@ -913,6 +920,17 @@ WEB_IMAGE_SOURCE_HOSTS = (
     "nasa.gov",
     "loc.gov",
     "si.edu",
+    # Official/government and international-organization sites: their press
+    # photos of real newsmakers are public domain or CC BY with attribution
+    # (attribution is added to the video description automatically).
+    "whitehouse.gov",
+    "defense.gov",
+    "state.gov",
+    "nato.int",
+    "europa.eu",
+    "un.org",
+    "president.gov.ua",
+    "gov.uk",
 )
 
 
@@ -1145,7 +1163,12 @@ LONG_FORM_VISUAL_STYLE_RULES = (
     "Write each visual_prompt as one concrete, self-contained sentence for a horizontal 16:9 documentary image. "
     "Use broadcast documentary variety: wide establishing shots, maps without readable labels, symbolic still lifes, "
     "infrastructure details, screens without legible text, satellite-like views, and contextual crowd-free scenes. "
-    "Avoid readable text, logos, graphic injury, close-up human faces, and dense crowds. "
+    "In visual_prompt avoid readable text, logos, graphic injury, close-up human faces, dense crowds, and names of real people "
+    "(the image generator rejects real public figures). "
+    "Separately, give every scene a search_query: a short literal news-photo search phrase that DOES name the real person, "
+    "place, organization, or object of that beat (e.g. 'Volodymyr Zelenskyy official portrait', 'Ukraine defence ministry building Kyiv'), "
+    "so the pipeline can fetch a real licensed photo of the actual subject first. Scene 1's search_query must name the story's "
+    "central person or place, because scene 1 becomes the thumbnail. "
     "Do not mention Vietnam, Vietnamese people, Vietnamese officials, or Vietnam-related locations."
 )
 
@@ -1439,7 +1462,7 @@ LONG_FORM_PLAN_SCHEMA = '''{
   "hook":"first spoken sentence, <=18 words",
   "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=18 words",
-  "scenes":[{"duration":24.0,"visual_prompt":"horizontal 16:9 documentary image prompt for this chapter beat"}],
+  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 documentary image prompt for this chapter beat","search_query":"2-6 word literal news photo search naming the real person, place, organization, or object of this beat (e.g. 'Zelenskyy press conference Kyiv'); empty string only for purely conceptual beats"}],
   "fact_note":"what uncertainty was preserved or avoided",
   "source_hints":["headline/source lead used from the supplied news context"]
 }'''
@@ -1669,8 +1692,13 @@ def long_form_word_bounds(duration: int) -> tuple[int, int]:
 
 
 def target_long_form_word_bounds(duration: int) -> tuple[int, int]:
-    """Preferred 5–7 minute pacing sent to the writer and reviewer."""
-    return round(duration * 3.0), round(duration * 3.45)
+    """Word budget matched to the measured Google TTS pace (~2.55 words/sec).
+
+    The rendered timeline follows the narration audio, so words-per-second is
+    what actually controls the final video length. The old 3.0-3.45 factor
+    produced ~9-minute videos from a 6.6-minute plan.
+    """
+    return round(duration * 2.4), round(duration * 2.6)
 
 
 def image_scene_prompt_horizontal(visual_prompt: str) -> str:
@@ -1715,7 +1743,10 @@ def normalize_scene_count(plan: ShortPlan, target_count: int) -> None:
         first_duration = round(scene.duration / 2, 2)
         second_duration = round(scene.duration - first_duration, 2)
         scene.duration = first_duration
-        plan.scenes.insert(index + 1, Scene(duration=second_duration, visual_prompt=scene.visual_prompt))
+        plan.scenes.insert(
+            index + 1,
+            Scene(duration=second_duration, visual_prompt=scene.visual_prompt, search_query=scene.search_query),
+        )
     while len(plan.scenes) > target_count:
         extra = plan.scenes.pop()
         plan.scenes[-1].duration = round(plan.scenes[-1].duration + extra.duration, 2)
@@ -1819,8 +1850,8 @@ def plan_long_form(
     min_words, max_words = long_form_word_bounds(duration)
     scene_count = random.randint(min_scenes, max_scenes)
     target_scene_duration = round(duration / scene_count, 2)
-    prompt = f'''Act as a senior YouTube documentary producer and factual script editor.
-Create ONE English long-form YouTube video plan for a horizontal 16:9 video.
+    prompt = f'''Act as a senior YouTube news-digest producer and factual script editor.
+Create ONE English long-form news-digest video plan for a horizontal 16:9 video.
 Target duration: exactly {duration} seconds, about {duration // 60} to {round(duration / 60, 1)} minutes.
 Theme: {theme}
 Allowed domains: {", ".join(LONG_FORM_TOPIC_DOMAINS)}.
@@ -1843,9 +1874,9 @@ Hard rules:
 - NOVELTY REQUIREMENT: Do not reuse the same central person, country pair, place, route, company, conflict, policy, event, or sports team from the existing archive or rejected candidates, even with a different consequence or angle. If a candidate shares the same central subject, choose a genuinely different headline.
 - TITLE REQUIREMENT: The title must explicitly name the central person, country, place, route, company, conflict, policy, event, or sports team — not only its consequence. Put that concrete subject early when possible. Set thumbnail_text to 2-5 bold words that name the same central subject; never use a vague slogan.
 - Use a save/share test: the viewer should finish with at least one clear consequence, comparison, warning sign, or next development they can explain to someone else.
-- Explain the story like a 5-7 minute news documentary: immediate headline payoff, essential context, timeline, what changed, who is affected, competing interpretations, likely next consequences, memorable close.
+- FORMAT: a {duration // 60}-minute NEWS DIGEST, not a deep-dive documentary. Structure: immediate headline payoff, what just happened, essential background in one short chapter, who is affected, one or two brief analysis beats, what to watch next, quick close. Keep analysis light and concrete; skip extended history lessons, competing-interpretation essays, and theory.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
-- Aim for roughly {target_min_words}-{target_max_words} spoken English words, but do not pad the story with filler solely to hit a duration target.
+- WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words and treat {target_max_words} as a hard ceiling — the timeline follows the narration audio, so every extra 100 words adds about 40 seconds to the video. Never pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
 - Visuals: {LONG_FORM_VISUAL_STYLE_RULES}
 - It is acceptable for later scenes to reuse a visual concept if the narration has moved to a new argument, but still provide a visual_prompt for every scene.
@@ -1863,7 +1894,7 @@ Return raw JSON only using exactly this schema:
         )
     )
     review_prompt = f'''Act as the final long-form news, fact, usefulness, and retention editor. Return only JSON.
-Improve the draft below for a {duration}-second horizontal YouTube documentary.
+Improve the draft below for a {duration}-second horizontal YouTube news digest.
 Return exactly:
 {{"quality_check":{{"timeliness_score":1,"clarity_score":1,"public_relevance_score":1,"shareability_score":1,"surprise_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{LONG_FORM_PLAN_SCHEMA}}}
 
@@ -1877,7 +1908,8 @@ Rules:
 - Keep a strong first 20 seconds, then clear chapters with escalation, practical explanation, a surprising but supported payoff, and a reason viewers would save or share the video. The title must explicitly name the central person/place/event/company/route, and thumbnail_text must be 2-5 words that name that same subject rather than a vague teaser.
 - The narration must begin with hook and end with closing_line.
 - The scenes must total exactly {duration} seconds and be horizontal 16:9 visual prompts.
-- Aim for roughly {target_min_words}-{target_max_words} words, but preserve a clear and complete story rather than adding filler solely to hit a duration target.
+- Keep the news-digest format: light, concrete analysis only — no extended history or theory chapters.
+- Aim for roughly {target_min_words}-{target_max_words} words. If the draft narration exceeds {target_max_words} words, cut secondary detail until it fits; the final video length follows the narration audio directly. Never pad with filler.
 
 News context: {json.dumps(news_context, ensure_ascii=False)}
 Existing archive: {json.dumps(past, ensure_ascii=False)}
@@ -2671,31 +2703,74 @@ def long_form_clip_ready(clip: Path, expected_duration: float) -> bool:
 
 
 def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, output_dir: Path) -> int:
+    """Fill every scene image: real web photos first, then OpenAI within budget.
+
+    Pass 1 tries Brave for every scene that has a real-subject search_query
+    (plus the evenly spaced legacy web slots), so real newsmakers appear as
+    themselves. Pass 2 generates the remaining scenes with OpenAI, spreading
+    the image budget across the video so any reused frames never cluster.
+    """
     prepared = 0
-    previous_image: Path | None = None
     web_indexes = distributed_web_image_indexes(len(plan.scenes), client.s.brave_web_images_per_long_form)
+
+    def image_ready(path: Path) -> bool:
+        return path.is_file() and path.stat().st_size >= 1024
+
     for index, scene in enumerate(plan.scenes, start=1):
         image_file = long_form_image_path(output_dir, index)
-        if image_file.is_file() and image_file.stat().st_size >= 1024:
+        if image_ready(image_file):
+            continue
+        if not scene.search_query and index not in web_indexes:
+            continue
+        source = client.image(
+            search_query=scene.search_query or scene.visual_prompt,
+            generation_prompt=image_scene_prompt_horizontal(scene.visual_prompt),
+            destination=image_file,
+            width=1920,
+            height=1080,
+            prefer_web=True,
+            web_only=True,
+        )
+        if source == "web":
+            prepared += 1
+
+    missing = [
+        index for index in range(1, len(plan.scenes) + 1)
+        if not image_ready(long_form_image_path(output_dir, index))
+    ]
+    openai_budget = max(0, client.s.long_form_openai_images)
+    if len(missing) <= openai_budget:
+        openai_indexes = set(missing)
+    else:
+        chosen_positions = distributed_web_image_indexes(len(missing), openai_budget)
+        openai_indexes = {missing[position - 1] for position in chosen_positions}
+
+    previous_image: Path | None = None
+    for index, scene in enumerate(plan.scenes, start=1):
+        image_file = long_form_image_path(output_dir, index)
+        if image_ready(image_file):
             previous_image = image_file
             continue
+        if index not in openai_indexes:
+            LOG.warning(
+                "Long-form image %d has no web result and no OpenAI budget left; reusing the previous visual.",
+                index,
+            )
+            create_fallback_scene_image(image_file, previous_image, width=1920, height=1080)
+            if image_file.stat().st_size < 1024:
+                raise BotError(f"Long-form scene {index} did not produce a valid image.")
+            previous_image = image_file
+            prepared += 1
+            continue
         try:
-            prefer_web = index in web_indexes
-            source = client.image(
-                search_query=scene.visual_prompt,
+            client.image(
+                search_query=scene.search_query or scene.visual_prompt,
                 generation_prompt=image_scene_prompt_horizontal(scene.visual_prompt),
                 destination=image_file,
                 width=1920,
                 height=1080,
-                prefer_web=prefer_web,
-                web_only=prefer_web,
+                prefer_web=False,
             )
-            if source == "missing":
-                LOG.warning(
-                    "Brave did not provide long-form image %d; reusing the previous visual to preserve the 10-image OpenAI cap.",
-                    index,
-                )
-                create_fallback_scene_image(image_file, previous_image, width=1920, height=1080)
         except (ImageGenerationTransientError, ImageGenerationSafetyError) as exc:
             if not client.s.allow_image_fallback_placeholder and not isinstance(exc, ImageGenerationSafetyError):
                 raise BotError(

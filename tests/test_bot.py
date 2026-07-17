@@ -147,6 +147,13 @@ def test_long_form_subject_match_blocks_same_route_with_a_different_angle():
     assert not bot.same_long_form_subject(first, "OpenAI changes the consumer AI market")
 
 
+def test_long_form_subject_match_catches_rephrased_headline_with_partial_overlap():
+    assert bot.same_long_form_subject(
+        "US Iran escalation and the Strait of Hormuz",
+        "Strait of Hormuz blockade and global oil prices",
+    )
+
+
 def test_archive_blocks_repeated_long_form_subject_but_ignores_short_subject(tmp_path):
     archived = bot.ShortPlan.from_dict({
         "topic": "Trump Iran strikes and Strait of Hormuz security risk",
@@ -175,7 +182,27 @@ def test_archive_blocks_repeated_long_form_subject_but_ignores_short_subject(tmp
     assert archive.same_long_form_subject_as(candidate) is not None
 
 
-def test_long_form_lane_avoids_two_recent_lanes(monkeypatch):
+def test_archive_blocks_rephrased_long_form_subject(tmp_path):
+    archived = bot.ShortPlan.from_dict({
+        "topic": "US Iran escalation and the Strait of Hormuz",
+        "angle": "Military escalation", "title": "Iran Strikes Put Hormuz Back at Risk",
+        "description": "#News", "tags": ["News"], "narration": "A script.",
+        "fact_note": "No exaggeration", "source_hints": ["News"],
+        "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
+    })
+    candidate = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz blockade and global oil prices",
+        "angle": "Oil markets", "title": "Hormuz Blockade Sends Oil Prices Soaring",
+        "description": "#News", "tags": ["News"], "narration": "A different script.",
+        "fact_note": "No exaggeration", "source_hints": ["News"],
+        "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
+    })
+    archive = bot.Archive(tmp_path / "shorts.db")
+    archive.reserve(archived, tmp_path / "long-20260714-hormuz")
+    assert archive.same_long_form_subject_as(candidate) is not None
+
+
+def test_long_form_lane_avoids_recent_lanes(monkeypatch):
     past = [
         {"topic": "Trump Iran strikes and Strait of Hormuz risk", "angle": "Military escalation", "title": "Iran Strikes"},
         {"topic": "OpenAI Codex keyboard", "angle": "Consumer technology", "title": "OpenAI Hardware"},
@@ -184,7 +211,7 @@ def test_long_form_lane_avoids_two_recent_lanes(monkeypatch):
 
     lane = bot.choose_long_form_editorial_lane(past)
 
-    assert lane in {"economy_business", "sports"}
+    assert lane not in {"conflicts_defense", "technology"}
 
 
 def test_long_form_news_context_is_filtered_to_assigned_lane():
@@ -196,7 +223,25 @@ def test_long_form_news_context_is_filtered_to_assigned_lane():
     ]
 
     assert bot.news_context_for_lane(context, "technology") == [context[2]]
-    assert bot.news_context_for_lane(context, "world_affairs") == [context[0]]
+    assert bot.news_context_for_lane(context, "conflicts_defense") == [context[0]]
+
+
+def test_fresh_news_context_drops_recently_covered_subjects(monkeypatch):
+    monkeypatch.setattr(bot.random, "shuffle", lambda items: None)
+    past = [{
+        "topic": "US Iran escalation and the Strait of Hormuz",
+        "angle": "Military escalation",
+        "title": "Iran Strikes Put Hormuz Back at Risk",
+    }]
+    covered = bot.recent_long_form_subject_texts(past)
+    context = [
+        {"category": "world", "title": "Strait of Hormuz shipping halted as Iran tensions rise", "summary": ""},
+        {"category": "world", "title": "Spain floods force mass evacuations", "summary": ""},
+    ]
+
+    fresh = bot.fresh_news_context_for_lane(context, "conflicts_defense", covered)
+
+    assert fresh == [context[1]]
 
 
 def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):

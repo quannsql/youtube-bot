@@ -422,7 +422,10 @@ def same_long_form_subject(candidate: str, previous: str) -> bool:
     if smaller == 1:
         token = next(iter(left if len(left) == 1 else right))
         return token in shared and len(token) >= 5
-    return len(shared) >= 2 and len(shared) / smaller >= 0.75
+    # 0.5 instead of a stricter ratio: rephrased headlines about the same
+    # strait/conflict/company share only part of their words, and repeating a
+    # subject is worse for the channel than skipping a borderline candidate.
+    return len(shared) >= 2 and len(shared) / smaller >= 0.5
 
 
 def narration_word_bounds(duration: int) -> tuple[int, int]:
@@ -529,6 +532,15 @@ class Archive:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _matches_long_form_subject(plan: ShortPlan, previous_topic: str, previous_title: str) -> bool:
+        # Two granularities: topic vs topic keeps the word sets small so the
+        # overlap ratio stays meaningful, while topic+title catches subjects
+        # that only appear in the title ("Hormuz" phrasing varies between them).
+        return same_long_form_subject(plan.topic, previous_topic) or same_long_form_subject(
+            f"{plan.topic} {plan.title}", f"{previous_topic} {previous_title}"
+        )
+
     def same_long_form_subject_as(self, plan: ShortPlan, limit: int = 40) -> sqlite3.Row | dict | None:
         if self.is_postgres:
             with self.conn.cursor() as cur:
@@ -538,7 +550,7 @@ class Archive:
                 )
                 rows = cur.fetchall()
                 for previous in rows:
-                    if same_long_form_subject(plan.topic, str(previous["topic"])):
+                    if self._matches_long_form_subject(plan, str(previous["topic"]), str(previous["title"])):
                         return dict(previous)
             return None
         rows = self.conn.execute(
@@ -546,7 +558,7 @@ class Archive:
             ("%long-%", limit),
         ).fetchall()
         for previous in rows:
-            if same_long_form_subject(plan.topic, str(previous["topic"])):
+            if self._matches_long_form_subject(plan, str(previous["topic"]), str(previous["title"])):
                 return previous
         return None
 
@@ -1151,10 +1163,22 @@ LONG_FORM_TOPIC_DOMAINS = (
     "major world news with clear public impact",
 )
 
+# The Shorts --theme default is history-flavoured; long-form is a current-events
+# news digest, so it gets its own default theme unless the user overrides --theme.
+LONG_FORM_DEFAULT_THEME = (
+    "an international current-events news digest rotating across global politics, "
+    "conflicts and defense, economy and business, technology, major sports, and "
+    "consequential world news"
+)
+
 LONG_FORM_EDITORIAL_LANES = {
-    "world_affairs": {
-        "label": "world affairs, politics, elections, wars, defense, or geopolitics",
+    "politics_elections": {
+        "label": "global politics, elections, governments, diplomacy, or major policy decisions",
         "feed_categories": ("top", "world"),
+    },
+    "conflicts_defense": {
+        "label": "wars, military affairs, defense, and geopolitics",
+        "feed_categories": ("world", "top"),
     },
     "economy_business": {
         "label": "global economy, business, trade, markets, companies, or consumer costs",
@@ -1168,12 +1192,22 @@ LONG_FORM_EDITORIAL_LANES = {
         "label": "major international sports with broad public interest",
         "feed_categories": ("sports",),
     },
+    "global_headlines": {
+        "label": "major world news with clear public impact outside politics, war, business, tech, and sports",
+        "feed_categories": ("top", "world"),
+    },
 }
 
 LONG_FORM_LANE_KEYWORDS = {
-    "world_affairs": (
-        "defense", "election", "geopolit", "government", "iran", "israel",
-        "military", "missile", "politic", "strike", "trump", "ukraine", "war",
+    "politics_elections": (
+        "ballot", "campaign", "congress", "diplomat", "election", "government",
+        "law", "minister", "parliament", "policy", "politic", "president",
+        "senate", "summit", "trump", "vote",
+    ),
+    "conflicts_defense": (
+        "army", "attack", "ceasefire", "defense", "drone", "geopolit", "hormuz",
+        "iran", "israel", "military", "missile", "nato", "navy", "nuclear",
+        "russia", "strike", "troop", "ukraine", "war",
     ),
     "economy_business": (
         "airline", "bank", "business", "company", "consumer", "cost", "econom",
@@ -1189,6 +1223,10 @@ LONG_FORM_LANE_KEYWORDS = {
         "game", "league", "match", "nba", "nfl", "olympic", "soccer", "sport",
         "team", "tournament",
     ),
+    "global_headlines": (
+        "accident", "aviation", "crash", "disaster", "earthquake", "evacuation",
+        "flood", "heatwave", "outage", "rescue", "storm", "wildfire",
+    ),
 }
 
 
@@ -1199,7 +1237,7 @@ def classify_long_form_lane(text: str) -> str:
         for lane, keywords in LONG_FORM_LANE_KEYWORDS.items()
     }
     best_lane = max(scores, key=scores.get)
-    return best_lane if scores[best_lane] else "world_affairs"
+    return best_lane if scores[best_lane] else "global_headlines"
 
 
 def choose_long_form_editorial_lane(
@@ -1209,7 +1247,7 @@ def choose_long_form_editorial_lane(
     excluded = set(excluded or ())
     recent_lanes = [
         classify_long_form_lane(f"{row.get('topic', '')} {row.get('angle', '')} {row.get('title', '')}")
-        for row in past[:2]
+        for row in past[:3]
     ]
     candidates = [
         lane for lane in LONG_FORM_EDITORIAL_LANES
@@ -1225,6 +1263,44 @@ def choose_long_form_editorial_lane(
 def news_context_for_lane(news_context: list[dict[str, str]], lane: str) -> list[dict[str, str]]:
     categories = set(LONG_FORM_EDITORIAL_LANES[lane]["feed_categories"])
     return [item for item in news_context if item.get("category") in categories]
+
+
+def recent_long_form_subject_texts(past: list[dict[str, str]], limit: int = 12) -> list[str]:
+    """Topic+title of recent long-form videos; used as a subject cooldown list."""
+    subjects: list[str] = []
+    for row in past[:limit]:
+        text = " ".join(
+            part for part in (str(row.get("topic", "")), str(row.get("title", ""))) if part
+        ).strip()
+        if text:
+            subjects.append(text)
+    return subjects
+
+
+def news_item_covers_recent_subject(item: dict[str, str], covered_subjects: list[str]) -> bool:
+    headline_words = long_form_subject_words(f"{item.get('title', '')} {item.get('summary', '')}")
+    return any(
+        len(headline_words & long_form_subject_words(subject)) >= 2
+        for subject in covered_subjects
+    )
+
+
+def fresh_news_context_for_lane(
+    news_context: list[dict[str, str]],
+    lane: str,
+    covered_subjects: list[str],
+) -> list[dict[str, str]]:
+    """Lane headlines minus recently covered subjects, in random order.
+
+    Shuffling matters: the model anchors on the first (loudest) headline, which
+    is how one dominant story ends up in every video.
+    """
+    fresh = [
+        item for item in news_context_for_lane(news_context, lane)
+        if not news_item_covers_recent_subject(item, covered_subjects)
+    ]
+    random.shuffle(fresh)
+    return fresh
 
 
 CURIOSITY_TOPIC_CATEGORIES = [
@@ -1731,11 +1807,13 @@ def plan_long_form(
     max_scenes: int,
     news_context: list[dict[str, str]] | None = None,
     rejected: list[dict[str, str]] | None = None,
-    editorial_lane: str = "world_affairs",
+    editorial_lane: str = "global_headlines",
+    covered_subjects: list[str] | None = None,
 ) -> ShortPlan:
     past = archive.recent_long_form_context()
     rejected = rejected or []
     news_context = news_context or []
+    covered_subjects = covered_subjects if covered_subjects is not None else recent_long_form_subject_texts(past)
     lane_label = LONG_FORM_EDITORIAL_LANES[editorial_lane]["label"]
     target_min_words, target_max_words = target_long_form_word_bounds(duration)
     min_words, max_words = long_form_word_bounds(duration)
@@ -1749,13 +1827,15 @@ Allowed domains: {", ".join(LONG_FORM_TOPIC_DOMAINS)}.
 Assigned editorial lane for this run: {lane_label}.
 Fresh news context from public RSS headlines: {json.dumps(news_context, ensure_ascii=False)}
 Existing archive: {json.dumps(past, ensure_ascii=False)}
+Recently covered subjects (temporary cooldown list): {json.dumps(covered_subjects, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
 
 Hard rules:
 - Do NOT choose any topic, event, person, location, company, political figure, sports figure, or public controversy related to Vietnam.
+- COOLDOWN RULE: Do not choose any story whose central subject, person, country pair, strait, route, company, conflict, policy, or event overlaps the recently covered subjects list above, even with a completely new angle or consequence. The channel must not publish the same subject twice in a row; pick a genuinely different subject.
 - Stay inside the assigned editorial lane. Choose from its supplied headlines; do not switch back to a recently covered lane merely because it has a louder headline.
-- Randomly evaluate several viable headlines inside the assigned lane before choosing one. Do not always select the first headline in the list.
-- Use the supplied news context as leads and prioritize a recent headline with a clear public consequence. If the context is thin, choose a globally relevant current topic in the same assigned lane and explicitly keep claims broad.
+- Shortlist at least three viable headlines with DIFFERENT central subjects from the news context, then pick one of them at random rather than automatically taking the biggest or most dramatic story. Variety across videos matters more than always covering the single loudest headline.
+- Use the supplied news context as leads. If the context is thin, choose a globally relevant current topic in the same assigned lane that does not overlap the cooldown list, and explicitly keep claims broad.
 - Cover ONLY politics, elections, wars, military affairs, geopolitics, economics, business, trade, markets, consumer technology, cybersecurity, the AI industry, major sports, or major world news. Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries even if they appear in a top-news feed.
 - Do not invent quotes, casualty numbers, market numbers, scores, dates, or source names not present in the context.
 - The result must feel timely, clickable, practical, surprising, and broad-interest, but not sensationalized.
@@ -1790,7 +1870,7 @@ Return exactly:
 Rules:
 - Reject or rewrite any Vietnam-related topic, person, event, or location.
 - Keep the assigned editorial lane: {lane_label}. Do not replace the draft with a story from another lane.
-- Reject a draft that repeats the same central person, country pair, place, route, company, conflict, policy, event, or sports team from the archive or rejected candidates, even if its title and consequence are different.
+- Reject a draft that repeats the same central person, country pair, place, route, company, conflict, policy, event, or sports team from the archive, the rejected candidates, or this cooldown list of recently covered subjects: {json.dumps(covered_subjects, ensure_ascii=False)}. A new angle or consequence does not make a repeated subject acceptable.
 - Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries. Keep only politics, military affairs, economics, business, technology industry, sports, or consequential world news.
 - Keep only claims supportable by the supplied RSS context or clearly phrased as general background.
 - Reject routine announcements or abstract theory unless the script can name the concrete change, affected people, real-world consequence, and what happens next.
@@ -1836,16 +1916,29 @@ def choose_novel_long_form_plan(
     duration: int,
     min_scenes: int,
     max_scenes: int,
-    max_attempts: int = 3,
+    max_attempts: int = 4,
 ) -> ShortPlan | None:
     rejected: list[dict[str, str]] = []
     all_news_context = fetch_trending_news_context()
     past = archive.recent_long_form_context()
+    covered_subjects = recent_long_form_subject_texts(past)
     attempted_lanes: set[str] = set()
-    for _attempt in range(1, max_attempts + 1):
+    attempts = 0
+    while attempts < max_attempts:
         editorial_lane = choose_long_form_editorial_lane(past, attempted_lanes)
         attempted_lanes.add(editorial_lane)
-        news_context = news_context_for_lane(all_news_context, editorial_lane)
+        news_context = fresh_news_context_for_lane(all_news_context, editorial_lane, covered_subjects)
+        if (
+            not news_context
+            and all_news_context
+            and len(attempted_lanes) < len(LONG_FORM_EDITORIAL_LANES)
+        ):
+            LOG.info(
+                "No fresh %s headlines left after the recent-subject cooldown; switching lane.",
+                editorial_lane,
+            )
+            continue
+        attempts += 1
         plan = plan_long_form(
             llm,
             archive,
@@ -1856,6 +1949,7 @@ def choose_novel_long_form_plan(
             news_context,
             rejected,
             editorial_lane,
+            covered_subjects,
         )
         duplicate = archive.same_long_form_subject_as(plan)
         if not duplicate:
@@ -3435,10 +3529,11 @@ def main() -> int:
     tts = GoogleCloudTTS(settings)
     social_tts = OpenAIShortVietnameseTTS(settings)
     if args.long_form or env_forces_long_form:
+        long_form_theme = args.theme if args.theme != parser.get_default("theme") else LONG_FORM_DEFAULT_THEME
         return run_long_form_flow(
             publish=args.publish,
             privacy=args.privacy_status or settings.youtube_privacy,
-            theme=args.theme,
+            theme=long_form_theme,
             settings=settings,
             archive=archive,
             llm=llm,

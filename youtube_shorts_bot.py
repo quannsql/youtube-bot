@@ -165,6 +165,8 @@ class Settings:
     text_attempts: int = 3
     text_retry_backoff_seconds: int = 5
     brave_image_search_endpoint: str = "https://api.search.brave.com/res/v1/images/search"
+    brave_search_attempts: int = 3
+    brave_search_min_interval_seconds: float = 2.0
     image_connect_timeout: int = 30
     image_read_timeout: int = 180
     image_attempts: int = 3
@@ -247,6 +249,10 @@ class Settings:
             text_read_timeout=max(1, int(os.getenv("OPENAI_TEXT_READ_TIMEOUT_SECONDS", "300"))),
             text_attempts=max(1, int(os.getenv("OPENAI_TEXT_ATTEMPTS", "3"))),
             text_retry_backoff_seconds=max(0, int(os.getenv("OPENAI_TEXT_RETRY_BACKOFF_SECONDS", "5"))),
+            brave_search_attempts=max(1, int(os.getenv("BRAVE_SEARCH_ATTEMPTS", "3"))),
+            brave_search_min_interval_seconds=max(
+                0.0, float(os.getenv("BRAVE_SEARCH_MIN_INTERVAL_SECONDS", "2.0"))
+            ),
             image_connect_timeout=int(os.getenv("IMAGE_CONNECT_TIMEOUT_SECONDS", "30")),
             image_read_timeout=int(os.getenv("IMAGE_READ_TIMEOUT_SECONDS", "180")),
             image_attempts=max(1, int(os.getenv("OPENAI_IMAGE_ATTEMPTS", "3"))),
@@ -941,6 +947,94 @@ class BraveImageSearch:
         self.s = settings
         self.used_source_pages: set[str] = set()
         self.sources: list[dict[str, str]] = []
+        self._next_search_at = 0.0
+        self._disabled_for_run = False
+
+    @staticmethod
+    def _first_numeric_header(response: requests.Response, name: str) -> float | None:
+        headers = getattr(response, "headers", {})
+        raw_value = headers.get(name, "") if hasattr(headers, "get") else ""
+        try:
+            return max(0.0, float(str(raw_value).split(",", 1)[0].strip()))
+        except (TypeError, ValueError):
+            return None
+
+    def _wait_for_search_slot(self) -> None:
+        wait_seconds = self._next_search_at - time.monotonic()
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    def _schedule_next_search(self, response: requests.Response, retry_number: int = 0) -> float:
+        """Respect Brave's sliding-window headers and a safe one-request/second default."""
+        delay = self.s.brave_search_min_interval_seconds
+        remaining = self._first_numeric_header(response, "X-RateLimit-Remaining")
+        reset = self._first_numeric_header(response, "X-RateLimit-Reset")
+        retry_after = self._first_numeric_header(response, "Retry-After")
+        if remaining is not None and remaining < 1 and reset is not None:
+            delay = max(delay, reset + 0.05)
+        if retry_after is not None:
+            delay = max(delay, retry_after + 0.05)
+        if retry_number:
+            delay = max(delay, float(2 ** (retry_number - 1)))
+        # Never sleep for a monthly reset. Repeated 429s disable Brave for this
+        # job below, allowing OpenAI/the existing-image fallback to continue.
+        delay = min(delay, 30.0)
+        self._next_search_at = max(self._next_search_at, time.monotonic() + delay)
+        return delay
+
+    def _search(self, query: str) -> requests.Response | None:
+        if self._disabled_for_run:
+            return None
+        for attempt in range(1, self.s.brave_search_attempts + 1):
+            self._wait_for_search_slot()
+            try:
+                response = requests.get(
+                    self.s.brave_image_search_endpoint,
+                    headers={
+                        "Accept": "application/json",
+                        "X-Subscription-Token": self.s.brave_search_api_key,
+                        "User-Agent": "youtube-documentary-bot/1.0",
+                    },
+                    params={
+                        "q": query[:400],
+                        "count": 20,
+                        "country": "ALL",
+                        "search_lang": "en",
+                        "safesearch": "strict",
+                        "spellcheck": "true",
+                    },
+                    timeout=(self.s.image_connect_timeout, 30),
+                )
+            except requests.RequestException as exc:
+                LOG.warning("Brave image search failed; falling back to OpenAI: %s", exc)
+                return None
+
+            status_code = getattr(response, "status_code", 200)
+            delay = self._schedule_next_search(response, retry_number=attempt if status_code == 429 else 0)
+            if status_code != 429:
+                try:
+                    response.raise_for_status()
+                except requests.RequestException as exc:
+                    if status_code in {401, 403}:
+                        self._disabled_for_run = True
+                    LOG.warning("Brave image search failed; falling back to OpenAI: %s", exc)
+                    return None
+                return response
+            if attempt < self.s.brave_search_attempts:
+                LOG.info(
+                    "Brave image search rate-limited (HTTP 429); retrying in %.2fs (attempt %d/%d).",
+                    delay,
+                    attempt + 1,
+                    self.s.brave_search_attempts,
+                )
+
+        self._disabled_for_run = True
+        LOG.warning(
+            "Brave image search remained rate-limited after %d attempts; disabling Brave for the rest "
+            "of this run and falling back to OpenAI.",
+            self.s.brave_search_attempts,
+        )
+        return None
 
     @staticmethod
     def _allowed_url(value: str) -> bool:
@@ -959,27 +1053,12 @@ class BraveImageSearch:
         return (result_height > result_width) == (height > width)
 
     def image(self, query: str, destination: Path, width: int, height: int) -> bool:
-        if not self.s.brave_search_api_key:
+        if not self.s.brave_search_api_key or self._disabled_for_run:
             return False
         try:
-            response = requests.get(
-                self.s.brave_image_search_endpoint,
-                headers={
-                    "Accept": "application/json",
-                    "X-Subscription-Token": self.s.brave_search_api_key,
-                    "User-Agent": "youtube-documentary-bot/1.0",
-                },
-                params={
-                    "q": query[:400],
-                    "count": 20,
-                    "country": "ALL",
-                    "search_lang": "en",
-                    "safesearch": "strict",
-                    "spellcheck": "true",
-                },
-                timeout=(self.s.image_connect_timeout, 30),
-            )
-            response.raise_for_status()
+            response = self._search(query)
+            if response is None:
+                return False
             results = response_json(response).get("results", [])
         except Exception as exc:
             LOG.warning("Brave image search failed; falling back to OpenAI: %s", exc)

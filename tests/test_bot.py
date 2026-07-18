@@ -1011,6 +1011,114 @@ def test_brave_image_search_downloads_trusted_portrait_and_records_source(tmp_pa
     assert client.sources[0]["source_page"].startswith("https://www.pexels.com/")
 
 
+def test_brave_image_search_spaces_requests_using_rate_limit_headers(tmp_path, monkeypatch):
+    clock = {"now": 100.0}
+    waits = []
+
+    class SearchResponse:
+        status_code = 200
+        headers = {"X-RateLimit-Remaining": "0, 999", "X-RateLimit-Reset": "1, 1000"}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": []}
+
+    monkeypatch.setattr(bot.requests, "get", lambda *_args, **_kwargs: SearchResponse())
+    monkeypatch.setattr(bot.time, "monotonic", lambda: clock["now"])
+
+    def fake_sleep(seconds):
+        waits.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(bot.time, "sleep", fake_sleep)
+    client = bot.BraveImageSearch(
+        bot.Settings(brave_search_api_key="brave", brave_search_min_interval_seconds=1.1)
+    )
+
+    assert not client.image("first query", tmp_path / "first.jpg", width=1920, height=1080)
+    assert not client.image("second query", tmp_path / "second.jpg", width=1920, height=1080)
+
+    assert waits == [pytest.approx(1.1)]
+
+
+def test_brave_image_search_retries_429_then_recovers(tmp_path, monkeypatch):
+    clock = {"now": 100.0}
+    waits = []
+    calls = {"count": 0}
+
+    class SearchResponse:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.headers = {"X-RateLimit-Remaining": "0, 999", "X-RateLimit-Reset": "1, 1000"}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise bot.requests.HTTPError(f"HTTP {self.status_code}")
+
+        def json(self):
+            return {"results": []}
+
+    def fake_get(*_args, **_kwargs):
+        calls["count"] += 1
+        return SearchResponse(429 if calls["count"] == 1 else 200)
+
+    def fake_sleep(seconds):
+        waits.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+    monkeypatch.setattr(bot.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(bot.time, "sleep", fake_sleep)
+    client = bot.BraveImageSearch(
+        bot.Settings(
+            brave_search_api_key="brave",
+            brave_search_attempts=3,
+            brave_search_min_interval_seconds=1.1,
+        )
+    )
+
+    assert not client.image("query", tmp_path / "image.jpg", width=1920, height=1080)
+
+    assert calls["count"] == 2
+    assert waits == [pytest.approx(1.1)]
+    assert not client._disabled_for_run
+
+
+def test_brave_image_search_stops_after_repeated_429(tmp_path, monkeypatch):
+    clock = {"now": 100.0}
+    calls = {"count": 0}
+
+    class RateLimitedResponse:
+        status_code = 429
+        headers = {"Retry-After": "1"}
+
+        def raise_for_status(self):
+            raise bot.requests.HTTPError("HTTP 429")
+
+    def fake_get(*_args, **_kwargs):
+        calls["count"] += 1
+        return RateLimitedResponse()
+
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+    monkeypatch.setattr(bot.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(bot.time, "sleep", lambda seconds: clock.__setitem__("now", clock["now"] + seconds))
+    client = bot.BraveImageSearch(
+        bot.Settings(
+            brave_search_api_key="brave",
+            brave_search_attempts=3,
+            brave_search_min_interval_seconds=1.1,
+        )
+    )
+
+    assert not client.image("query", tmp_path / "first.jpg", width=1920, height=1080)
+    assert not client.image("another query", tmp_path / "second.jpg", width=1920, height=1080)
+
+    assert calls["count"] == 3
+    assert client._disabled_for_run
+
+
 def test_distributed_web_images_stay_within_six_visual_budget():
     assert bot.distributed_web_image_indexes(6, 2) == {2, 5}
     assert bot.distributed_web_image_indexes(6, 10) == {1, 2, 3, 4, 5, 6}

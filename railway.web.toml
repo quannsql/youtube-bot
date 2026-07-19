@@ -1,0 +1,12 @@
+# Config-as-code riêng cho service WEB (frontend nhập ý tưởng thủ công).
+# Trong Railway: Service Web -> Settings -> Config-as-code / "Railway Config File"
+# -> đặt path = railway.web.toml. Hai service Cron (Short/Long) vẫn dùng railway.toml.
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+# Server web luôn bật (khác với 2 cron one-shot).
+startCommand = "python -u web_app.py"
+# Là tiến trình chạy dài: nếu crash thì cho Railway tự khởi động lại.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

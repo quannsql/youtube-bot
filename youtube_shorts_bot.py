@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 from zoneinfo import ZoneInfo
 
 import requests
@@ -478,6 +478,13 @@ class Archive:
                 cur.execute("""CREATE TABLE IF NOT EXISTS kv_store (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 )""")
+                cur.execute("""CREATE TABLE IF NOT EXISTS idea_queue (
+                    id SERIAL PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    mode TEXT NOT NULL, idea TEXT NOT NULL, duration INTEGER,
+                    publish BOOLEAN NOT NULL DEFAULT TRUE, privacy TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending', youtube_id TEXT,
+                    output_title TEXT, error TEXT
+                )""")
             self.conn.commit()
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -490,6 +497,13 @@ class Archive:
             )""")
             self.conn.execute("""CREATE TABLE IF NOT EXISTS kv_store (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
+            )""")
+            self.conn.execute("""CREATE TABLE IF NOT EXISTS idea_queue (
+                id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                mode TEXT NOT NULL, idea TEXT NOT NULL, duration INTEGER,
+                publish INTEGER NOT NULL DEFAULT 1, privacy TEXT,
+                status TEXT NOT NULL DEFAULT 'pending', youtube_id TEXT,
+                output_title TEXT, error TEXT
             )""")
             self.conn.commit()
 
@@ -715,6 +729,124 @@ class Archive:
             ("%long-%", *statuses, limit),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # --- Manual idea queue (web frontend) ---------------------------------
+    def enqueue_idea(
+        self, mode: str, idea: str, duration: int | None, publish: bool, privacy: str | None
+    ) -> int:
+        now = datetime.now(UTC).isoformat()
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO idea_queue (created_at, updated_at, mode, idea, duration, publish, privacy, status) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending') RETURNING id",
+                    (now, now, mode, idea, duration, publish, privacy),
+                )
+                record_id = cur.fetchone()[0]
+            self.conn.commit()
+            return int(record_id)
+        cursor = self.conn.execute(
+            "INSERT INTO idea_queue (created_at, updated_at, mode, idea, duration, publish, privacy, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
+            (now, now, mode, idea, duration, 1 if publish else 0, privacy),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def claim_next_idea(self) -> dict[str, Any] | None:
+        """Atomically take the oldest pending idea and mark it processing."""
+        now = datetime.now(UTC).isoformat()
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE idea_queue SET status = 'processing', updated_at = %s "
+                    "WHERE id = (SELECT id FROM idea_queue WHERE status = 'pending' "
+                    "ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *",
+                    (now,),
+                )
+                row = cur.fetchone()
+            self.conn.commit()
+            return dict(row) if row else None
+        row = self.conn.execute(
+            "SELECT * FROM idea_queue WHERE status = 'pending' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        self.conn.execute(
+            "UPDATE idea_queue SET status = 'processing', updated_at = ? WHERE id = ?",
+            (now, row["id"]),
+        )
+        self.conn.commit()
+        claimed = dict(row)
+        claimed["status"] = "processing"
+        return claimed
+
+    def get_idea(self, idea_id: int) -> dict[str, Any] | None:
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT * FROM idea_queue WHERE id = %s", (idea_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        row = self.conn.execute("SELECT * FROM idea_queue WHERE id = ?", (idea_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_idea(
+        self,
+        idea_id: int,
+        status: str,
+        youtube_id: str | None = None,
+        output_title: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE idea_queue SET status = %s, updated_at = %s, "
+                    "youtube_id = COALESCE(%s, youtube_id), "
+                    "output_title = COALESCE(%s, output_title), "
+                    "error = COALESCE(%s, error) WHERE id = %s",
+                    (status, now, youtube_id, output_title, error, idea_id),
+                )
+            self.conn.commit()
+            return
+        self.conn.execute(
+            "UPDATE idea_queue SET status = ?, updated_at = ?, "
+            "youtube_id = COALESCE(?, youtube_id), "
+            "output_title = COALESCE(?, output_title), "
+            "error = COALESCE(?, error) WHERE id = ?",
+            (status, now, youtube_id, output_title, error, idea_id),
+        )
+        self.conn.commit()
+
+    def recent_ideas(self, limit: int = 30) -> list[dict[str, Any]]:
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT * FROM idea_queue ORDER BY id DESC LIMIT %s", (limit,))
+                return [dict(row) for row in cur.fetchall()]
+        rows = self.conn.execute(
+            "SELECT * FROM idea_queue ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recover_stuck_ideas(self) -> int:
+        """Reset ideas left in 'processing' by an interrupted worker back to 'pending'."""
+        now = datetime.now(UTC).isoformat()
+        if self.is_postgres:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE idea_queue SET status = 'pending', updated_at = %s WHERE status = 'processing'",
+                    (now,),
+                )
+                count = cur.rowcount
+            self.conn.commit()
+            return int(count or 0)
+        cursor = self.conn.execute(
+            "UPDATE idea_queue SET status = 'pending', updated_at = ? WHERE status = 'processing'",
+            (now,),
+        )
+        self.conn.commit()
+        return int(cursor.rowcount or 0)
 
 
 class OpenAITextClient:
@@ -1634,6 +1766,41 @@ def fetch_trending_news_context(limit: int = 28) -> list[dict[str, str]]:
     return items[:limit]
 
 
+def fetch_news_for_idea(idea: str, limit: int = 12) -> list[dict[str, str]]:
+    """Google News RSS search for headlines related to a manual idea (used as factual leads)."""
+    query = re.sub(r"\s+", " ", idea or "").strip()[:200]
+    if not query:
+        return []
+    url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    try:
+        response = requests.get(url, timeout=(10, 30))
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+    except Exception as exc:
+        LOG.warning("Could not fetch related news for the idea: %s", exc)
+        return []
+    for item in root.findall(".//item"):
+        title = clean_feed_text(item.findtext("title") or "")
+        if not title:
+            continue
+        key = re.sub(r"\W+", "", title.lower())[:90]
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({
+            "title": title[:220],
+            "summary": clean_feed_text(item.findtext("description") or "")[:320],
+            "published": clean_feed_text(item.findtext("pubDate") or "")[:80],
+            "link": clean_feed_text(item.findtext("link") or "")[:300],
+        })
+        if len(items) >= limit:
+            break
+    LOG.info("Fetched %d related news leads for the manual idea.", len(items))
+    return items
+
+
 def research_brief(
     llm: OpenAITextClient,
     theme: str,
@@ -2073,6 +2240,150 @@ def choose_novel_long_form_plan(
             "switching editorial lane and requesting a different story..."
         )
     return None
+
+
+def plan_short_from_idea(llm: OpenAITextClient, duration: int, user_idea: str) -> ShortPlan:
+    """Build a Short plan around a user-supplied idea, bypassing the auto novelty/significance gates."""
+    target_minimum_words, target_maximum_words = target_narration_word_bounds(duration)
+    prompt = f'''Act as a senior viral documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan.
+The user has explicitly requested THIS exact idea. Build the entire Short around it and do NOT substitute a different topic:
+"""{user_idea}"""
+
+Rules:
+- Treat the user's idea as the mandatory subject, angle, and story. Interpret it faithfully even if it is written in another language; the finished narration is in English.
+- Structure the story in 3 parts: BEGINNING (establish who / where / when / what), MIDDLE (the decision, reveal, conflict, mechanism, or turning point with concrete detail), ENDING (the meaning, consequence, or memorable payoff).
+- Open with a sharp curiosity hook in the first 1.5 seconds. The narration must start verbatim with hook and end verbatim with closing_line.
+- Do NOT invent statistics, dates, quotations, casualty numbers, prices, scores, or source names. Build from general knowledge and stay qualitative when a precise figure is unknown; never fabricate precise facts or citations.
+- TITLE: explicitly name the concrete main subject of the idea (the person, place, event, object, or work), not a vague pronoun. Set thumbnail_text to 2-5 bold words naming that same subject.
+- Split the story into exactly 6 scenes whose durations total exactly {duration}. Aim for roughly {target_minimum_words}-{target_maximum_words} spoken English words; never pad with filler.
+- Every string in the returned JSON must be English (topic, title, description, tags, narration, fact_note, source_hints).
+- Visuals: {VISUAL_STYLE_RULES}
+
+Return raw JSON only using exactly this schema:
+{PLAN_SCHEMA}'''
+    LOG.info("Writing manual-idea Short plan from the user's idea...")
+    draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.6)))
+    review_prompt = f'''Act as the final documentary-story and retention editor for a {duration}-second English YouTube Short. Return only JSON.
+Keep the video centered on the user's requested idea and improve hook, clarity, concreteness, pacing, and the closing line. Return exactly:
+{{"plan":{PLAN_SCHEMA}}}
+Rules:
+- The subject MUST stay the user's idea: """{user_idea}""". Do not swap in a different topic.
+- Do NOT invent statistics, dates, quotations, numbers, prices, scores, or source names; keep it qualitative when a precise figure is unknown.
+- Keep exactly 6 scenes; narration must begin with hook and end with closing_line; aim for {target_minimum_words}-{target_maximum_words} spoken English words.
+- Every string must be English. Make the title explicitly name the main subject and thumbnail_text 2-5 words naming it. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
+    LOG.info("Quality pass: refining the manual Short hook, pacing, and ending...")
+    try:
+        reviewed = extract_json(llm.chat(review_prompt, temperature=0.4))
+        plan_dict = reviewed.get("plan") if isinstance(reviewed.get("plan"), dict) else reviewed
+        plan = ShortPlan.from_dict(plan_dict)
+    except Exception as exc:
+        LOG.warning("Manual Short review pass failed (%s); using the draft.", exc)
+        plan = draft
+    ensure_title_names_main_subject(plan)
+    normalize_scene_count(plan, 6)
+    ensure_long_form_hook_and_closing(plan)
+    rescale_scene_durations(plan, float(duration), "Manual Short plan")
+    words = spoken_word_count(plan.narration)
+    minimum_words, maximum_words = narration_word_bounds(duration)
+    if not minimum_words <= words <= maximum_words:
+        LOG.warning(
+            "Manual Short narration has %d words (comfortable range %d-%d for %ds); rendering it anyway.",
+            words, minimum_words, maximum_words, duration,
+        )
+    LOG.info("Manual Short plan ready: %r (%d scenes, %d words).", plan.title, len(plan.scenes), words)
+    return plan
+
+
+def plan_long_form_from_idea(
+    llm: OpenAITextClient,
+    duration: int,
+    min_scenes: int,
+    max_scenes: int,
+    user_idea: str,
+) -> ShortPlan:
+    """Build a long-form plan around a user-supplied idea, bypassing lane/novelty/Vietnam gates."""
+    target_min_words, target_max_words = target_long_form_word_bounds(duration)
+    min_words, max_words = long_form_word_bounds(duration)
+    scene_count = random.randint(min_scenes, max_scenes)
+    target_scene_duration = round(duration / scene_count, 2)
+    news_context = fetch_news_for_idea(user_idea)
+    manual_visual_rules = (
+        "Write each visual_prompt as one concrete, self-contained sentence for a horizontal 16:9 documentary image. "
+        "Use broadcast documentary variety: wide establishing shots, maps without readable labels, symbolic still lifes, "
+        "infrastructure details, screens without legible text, satellite-like views, and contextual crowd-free scenes. "
+        "In visual_prompt avoid readable text, logos, graphic injury, close-up human faces, dense crowds, and names of real "
+        "people (the image generator rejects real public figures). "
+        "Separately, give every scene a search_query: a short literal photo-search phrase that DOES name the real person, "
+        "place, organization, or object of that beat, so the pipeline can fetch a real licensed photo first. Scene 1's "
+        "search_query must name the story's central person or place, because scene 1 becomes the thumbnail."
+    )
+    prompt = f'''Act as a senior YouTube long-form documentary writer and factual script editor.
+Create ONE English long-form video plan for a horizontal 16:9 video.
+Target duration: exactly {duration} seconds, about {duration // 60} to {round(duration / 60, 1)} minutes.
+The user has explicitly requested THIS exact idea. Build the entire video around it and do NOT substitute a different topic:
+"""{user_idea}"""
+Fresh related news headlines from public RSS (use as factual leads when they fit the idea; ignore unrelated ones): {json.dumps(news_context, ensure_ascii=False)}
+
+Rules:
+- Treat the user's idea as the mandatory subject and thesis. Interpret it faithfully even if it is written in another language; the finished narration is in English.
+- Prefer concrete, current facts drawn from the related news above when they fit the idea, but do not copy unrelated stories and do not fabricate details beyond what the leads support.
+- Structure: a strong hook, clear chapters that escalate, concrete explanation, and a memorable close. The narration must begin verbatim with hook and end verbatim with closing_line.
+- Do NOT invent statistics, dates, quotations, casualty numbers, market data, scores, or source names. Build from general knowledge and stay qualitative when a precise figure is unknown; never fabricate precise facts or citations.
+- TITLE: explicitly name the central person, place, event, company, route, or work of the idea. Set thumbnail_text to 2-5 bold words naming that same subject.
+- WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words. The timeline follows the narration audio, so do not pad with filler.
+- Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
+- Visuals: {manual_visual_rules}
+- It is acceptable for later scenes to reuse a visual concept, but still provide a visual_prompt for every scene.
+
+Return raw JSON only using exactly this schema:
+{LONG_FORM_PLAN_SCHEMA}'''
+    LOG.info("Writing manual-idea long-form plan from the user's idea...")
+    draft = ShortPlan.from_dict(
+        extract_json(
+            llm.chat(
+                prompt,
+                temperature=0.5,
+                reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+            )
+        )
+    )
+    review_prompt = f'''Act as the final long-form documentary and retention editor for a {duration}-second horizontal YouTube video. Return only JSON.
+Keep the video centered on the user's requested idea and improve the hook, chapter flow, concreteness, and closing line. Return exactly:
+{{"plan":{LONG_FORM_PLAN_SCHEMA}}}
+Rules:
+- The subject MUST stay the user's idea: """{user_idea}""". Do not swap in a different topic.
+- Keep only claims supportable by the related news below or clearly phrased as general background; do NOT invent numbers, quotes, dates, or source names.
+- Keep {scene_count} scenes totaling {duration} seconds; narration must begin with hook and end with closing_line; aim for {target_min_words}-{target_max_words} spoken English words.
+- Make the title explicitly name the main subject and thumbnail_text 2-5 words naming it. Preserve this visual direction: {manual_visual_rules}
+Related news: {json.dumps(news_context, ensure_ascii=False)}
+Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
+    LOG.info("Quality pass: refining the manual long-form structure and pacing...")
+    try:
+        reviewed = extract_json(
+            llm.chat(
+                review_prompt,
+                temperature=0.35,
+                reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+            )
+        )
+        plan_dict = reviewed.get("plan") if isinstance(reviewed.get("plan"), dict) else reviewed
+        plan = ShortPlan.from_dict(plan_dict)
+    except Exception as exc:
+        LOG.warning("Manual long-form review pass failed (%s); using the draft.", exc)
+        plan = draft
+    ensure_title_names_main_subject(plan)
+    ensure_long_form_hook_and_closing(plan)
+    normalize_scene_count(plan, scene_count)
+    rescale_scene_durations(plan, float(duration), "Manual long-form plan")
+    words = spoken_word_count(plan.narration)
+    if not min_words <= words <= max_words:
+        LOG.warning(
+            "Manual long-form narration has %d words (safety range %d-%d for %ds); rendering it anyway.",
+            words, min_words, max_words, duration,
+        )
+    LOG.info("Manual long-form plan ready: %r (%d scenes, %d words).", plan.title, len(plan.scenes), words)
+    return plan
 
 
 def plan_social_vietnamese(llm: OpenAITextClient, plan: ShortPlan, duration: int) -> SocialPlan:
@@ -3636,6 +3947,192 @@ def configure_logging(level: str) -> None:
     )
 
 
+def run_manual_short_flow(
+    idea: str,
+    duration: int,
+    publish: bool,
+    privacy: str,
+    settings: Settings,
+    archive: Archive,
+    llm: OpenAITextClient,
+    images: VisualAssetProvider,
+    tts: GoogleCloudTTS,
+    social_tts: OpenAIShortVietnameseTTS,
+) -> tuple[str | None, str]:
+    """Render one Short from a user idea. No daily-limit, novelty, or resume gate. Returns (youtube_id, title)."""
+    plan = plan_short_from_idea(llm, duration, idea)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = DATA_DIR / "generated" / f"manual-{datetime.now():%Y%m%d-%H%M%S}-{slug(plan.topic)}"
+    output_dir.mkdir(parents=True)
+    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    record_id = archive.reserve(plan, output_dir)
+    youtube_id: str | None = None
+    rendered = False
+    try:
+        narration, narration_seconds = prepare_short_english_narration(plan, tts, output_dir)
+        rescale_scene_durations(plan, narration_seconds, "Manual Short English")
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        video = render(plan, images, output_dir, narration_seconds, narration, narration_seconds)
+        append_web_source_credits(plan, images.web_sources)
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if images.web_sources:
+            (output_dir / "web_sources.json").write_text(
+                json.dumps(images.web_sources, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        rendered = True
+        archive.mark(record_id, "rendered")
+        print(f"Đã render (manual Short): {video}")
+        if publish:
+            youtube_id = upload_to_youtube(video, plan, settings, privacy)
+            archive.mark(record_id, "published", youtube_id)
+            print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
+            if settings.youtube_token.exists():
+                archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
+            if social_publish_enabled(settings):
+                social_video, social = prepare_social_video(plan, llm, social_tts, output_dir, settings)
+                social_results = publish_social_video(social_video, social, settings)
+                if social_results:
+                    print(f"Đã publish social: {social_results}")
+            if archive.is_postgres:
+                try:
+                    shutil.rmtree(output_dir)
+                    LOG.info("Cleaned up output directory: %s", output_dir)
+                except Exception as exc:
+                    LOG.warning("Could not clean up %s: %s", output_dir, exc)
+    except Exception:
+        archive.mark(record_id, "upload_failed" if rendered else "failed")
+        raise
+    return youtube_id, plan.title
+
+
+def run_manual_long_form_flow(
+    idea: str,
+    publish: bool,
+    privacy: str,
+    settings: Settings,
+    archive: Archive,
+    llm: OpenAITextClient,
+    images: VisualAssetProvider,
+    tts: GoogleCloudTTS,
+) -> tuple[str | None, str]:
+    """Render one long-form video from a user idea. No due-gate, novelty, or resume gate. Returns (youtube_id, title)."""
+    min_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
+    max_duration = max(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
+    min_scenes = min(settings.long_form_min_scenes, settings.long_form_max_scenes)
+    max_scenes = max(settings.long_form_min_scenes, settings.long_form_max_scenes)
+    duration = random.randint(min_duration, max_duration)
+    plan = plan_long_form_from_idea(llm, duration, min_scenes, max_scenes, idea)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = DATA_DIR / "generated" / f"long-manual-{datetime.now():%Y%m%d-%H%M%S}-{slug(plan.topic)}"
+    output_dir.mkdir(parents=True)
+    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    record_id = archive.reserve(plan, output_dir)
+    youtube_id: str | None = None
+    rendered = False
+    try:
+        narration, narration_seconds = prepare_long_form_narration(plan, tts, output_dir)
+        duration = rescale_scene_durations(plan, narration_seconds, "Manual long-form")
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        prepare_long_form_images(plan, images, output_dir)
+        video = render_long_form_from_assets(plan, output_dir, duration, settings, narration, narration_seconds)
+        append_web_source_credits(plan, images.web_sources)
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if images.web_sources:
+            (output_dir / "web_sources.json").write_text(
+                json.dumps(images.web_sources, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        rendered = True
+        archive.mark(record_id, "rendered")
+        print(f"Rendered manual long-form video: {video}")
+        if publish:
+            results = publish_long_form_video(video, plan, settings, privacy)
+            youtube_id = results.get("youtube")
+            archive.mark(record_id, "published", youtube_id)
+            print(f"Published manual long-form video: {results}")
+            if settings.youtube_token.exists():
+                archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
+            if archive.is_postgres:
+                try:
+                    shutil.rmtree(output_dir)
+                    LOG.info("Cleaned up output directory: %s", output_dir)
+                except Exception as exc:
+                    LOG.warning("Could not clean up %s: %s", output_dir, exc)
+    except Exception:
+        archive.mark(record_id, "upload_failed" if rendered else "failed")
+        raise
+    return youtube_id, plan.title
+
+
+def run_manual_idea(
+    args: argparse.Namespace,
+    settings: Settings,
+    archive: Archive,
+    llm: OpenAITextClient,
+    images: VisualAssetProvider,
+    tts: GoogleCloudTTS,
+    social_tts: OpenAIShortVietnameseTTS,
+) -> int:
+    """Dispatch a manually submitted idea (from --idea text or a --idea-id queue row)."""
+    idea_id: int | None = args.idea_id
+    if idea_id is not None:
+        row = archive.get_idea(idea_id)
+        if not row:
+            raise BotError(f"Khong tim thay idea_queue id={idea_id}.")
+        idea_text = str(row.get("idea") or "").strip()
+        mode = str(row.get("mode") or "short").strip().lower()
+        raw_duration = row.get("duration")
+        duration = int(raw_duration) if raw_duration else settings.duration
+        publish = bool(row.get("publish"))
+        privacy = str(row.get("privacy") or settings.youtube_privacy)
+    else:
+        idea_text = str(args.idea or "").strip()
+        mode = "long" if args.long_form else "short"
+        duration = args.duration or settings.duration
+        publish = args.publish
+        privacy = args.privacy_status or settings.youtube_privacy
+    if not idea_text:
+        raise BotError("Y tuong rong; khong the tao video.")
+    if privacy not in ("private", "unlisted", "public"):
+        privacy = settings.youtube_privacy
+    LOG.info("Manual idea (id=%s, mode=%s, publish=%s): %.80s", idea_id, mode, publish, idea_text)
+
+    if args.dry_run:
+        if mode == "long":
+            min_scenes = min(settings.long_form_min_scenes, settings.long_form_max_scenes)
+            max_scenes = max(settings.long_form_min_scenes, settings.long_form_max_scenes)
+            preview_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
+            plan = plan_long_form_from_idea(llm, preview_duration, min_scenes, max_scenes, idea_text)
+        else:
+            plan = plan_short_from_idea(llm, duration, idea_text)
+        print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    try:
+        if mode == "long":
+            youtube_id, title = run_manual_long_form_flow(
+                idea_text, publish, privacy, settings, archive, llm, images, tts
+            )
+        else:
+            youtube_id, title = run_manual_short_flow(
+                idea_text, duration, publish, privacy, settings, archive, llm, images, tts, social_tts
+            )
+    except Exception as exc:
+        if idea_id is not None:
+            archive.update_idea(idea_id, "failed", error=str(exc)[:2000])
+        raise
+    if idea_id is not None:
+        archive.update_idea(idea_id, "done", youtube_id=youtube_id, output_title=title)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -3655,6 +4152,8 @@ def main() -> int:
     parser.add_argument("--upload-file", type=Path, help="Upload lại MP4 đã render, không tạo nội dung/video mới")
     parser.add_argument("--scheduled", action="store_true", help="Bật giới hạn an toàn theo SCHEDULED_DAILY_LIMIT mỗi ngày UTC")
     parser.add_argument("--long-form", action="store_true", help="Create, render, and optionally publish one horizontal video")
+    parser.add_argument("--idea", type=str, help="Tạo video từ một ý tưởng cụ thể (thủ công) thay vì tự sinh ý tưởng")
+    parser.add_argument("--idea-id", type=int, help="Đọc ý tưởng thủ công từ hàng idea_queue theo id (dùng bởi web frontend)")
     # Accepted temporarily so existing Railway commands do not fail; the pipeline is now always one-shot.
     parser.add_argument("--long-form-mode", choices=("prepare", "finalize", "auto"), default="auto", help=argparse.SUPPRESS)
     parser.add_argument("--long-form-image-budget", type=int, help=argparse.SUPPRESS)
@@ -3682,6 +4181,8 @@ def main() -> int:
     llm = OpenAITextClient(settings)
     tts = GoogleCloudTTS(settings)
     social_tts = OpenAIShortVietnameseTTS(settings)
+    if args.idea is not None or args.idea_id is not None:
+        return run_manual_idea(args, settings, archive, llm, images, tts, social_tts)
     if args.long_form or env_forces_long_form:
         long_form_theme = args.theme if args.theme != parser.get_default("theme") else LONG_FORM_DEFAULT_THEME
         return run_long_form_flow(

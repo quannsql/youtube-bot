@@ -168,3 +168,40 @@ BRAVE_WEB_IMAGES_PER_LONG_FORM=5
 ```
 
 Nội dung video dài dùng Google News RSS làm lead cho tin thế giới, chính trị/quân sự, kinh tế, công nghệ và thể thao. Mỗi lượt được random một lane biên tập và tránh các lane của hai video LONG gần nhất; nếu trùng cùng chủ thể trung tâm dù đổi góc khai thác, bot chuyển lane và thử lại. Feed khoa học đã bị loại; planner cũng từ chối nghiên cứu khoa học, khí hậu, không gian, y khoa, khảo cổ và tin học thuật lọt vào mục tin tổng hợp. Kịch bản ưu tiên thay đổi cụ thể, người bị ảnh hưởng, hệ quả thực tế và diễn biến cần theo dõi; đồng thời tiếp tục loại nội dung liên quan Việt Nam. Mười ảnh OpenAI `low` có chi phí đầu ra khoảng `$0.05/video dài`; Brave không tìm đủ thì visual được lặp lại nên mức OpenAI này không tăng. PostgreSQL lưu lịch và archive, còn toàn bộ media được tạo và hoàn tất trong cùng một lượt chạy.
+
+## Nhập ý tưởng thủ công (frontend web)
+
+Ngoài 2 luồng **auto** (Short Cron + Long Cron chạy như trên, không đổi), bot có thêm **luồng thủ công**: một trang web để bạn tự nhập ý tưởng, sau đó bot viết kịch bản, tạo ảnh, lồng tiếng, render và đăng YouTube y như luồng auto. Ý tưởng thủ công **tự do hoàn toàn** — bỏ qua bộ lọc tầm vóc, chống-trùng, ràng buộc lane tin tức và **cả bộ chặn Việt Nam**; chỉ giữ quy tắc không bịa số liệu/nguồn. Gõ ý tưởng bằng tiếng Việt hay tiếng Anh đều được, video xuất ra tiếng Anh (Short còn tự tạo bản tiếng Việt cho Facebook/TikTok nếu bạn đã bật).
+
+Cách hoạt động: trang web ghi ý tưởng vào bảng `idea_queue` trong cùng PostgreSQL. Một worker chạy nền lần lượt nhặt từng ý tưởng và gọi `python youtube_shorts_bot.py --idea-id <id>` (render tuần tự 1 video một lúc để không quá tải). Trang có bảng theo dõi trạng thái (Chờ → Đang tạo → Xong/Lỗi) kèm link YouTube, tự làm mới mỗi 5 giây.
+
+Chạy thử local:
+
+```powershell
+$env:WEB_ACCESS_TOKEN = "mat-khau-cua-ban"
+python web_app.py
+# Mở http://localhost:8080
+```
+
+Không đặt `WEB_ACCESS_TOKEN` thì trang mở tự do — chỉ nên vậy khi chạy local. Có thể chạy thử kế hoạch mà không tốn ảnh/voice/upload bằng:
+
+```powershell
+python youtube_shorts_bot.py --idea "Câu chuyện xây kênh đào Suez" --dry-run
+python youtube_shorts_bot.py --idea "Trận Điện Biên Phủ 1954" --long-form --dry-run
+```
+
+### Triển khai Railway (service Web thứ 3)
+
+Tạo thêm **một Railway service mới** từ chính repo này (2 service Cron auto giữ nguyên):
+
+1. New Service → Deploy from repo (cùng repo).
+2. **Settings → Custom Start Command**: `python web_app.py`. **KHÔNG** đặt Cron Schedule (service này luôn bật).
+3. **Variables**: copy đúng các biến như service auto (`OPENAI_API_KEY`, `DATABASE_URL` trỏ về cùng PostgreSQL, và các credential Google/YouTube hoặc bản `*_JSON_B64`), rồi thêm:
+
+```dotenv
+WEB_ACCESS_TOKEN=mot-mat-khau-manh
+FLASK_SECRET_KEY=mot-chuoi-ngau-nhien-dai
+# YOUTUBE_PRIVACY_STATUS quyết định mặc định private/unlisted/public trên form.
+```
+
+Railway tự cấp `PORT`; không cần đặt thủ công. Vì dùng chung `DATABASE_URL` với luồng auto, video thủ công vẫn được lưu vào archive nên chống-trùng của luồng auto vẫn tính cả các video này. Container build từ cùng repo nên đã có sẵn `ffmpeg` để render.

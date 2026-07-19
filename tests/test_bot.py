@@ -2098,3 +2098,134 @@ def test_ensure_dejavu_font_creates_files(tmp_path, monkeypatch):
     assert config_file.is_file()
     assert font_file.stat().st_size > 500000
     assert "FONTCONFIG_FILE" in os.environ
+
+
+# --- Manual idea queue + manual planners ---------------------------------- #
+def test_idea_queue_enqueue_claim_and_update(tmp_path):
+    archive = bot.Archive(tmp_path / "shorts.db")
+    i1 = archive.enqueue_idea("short", "Idea one", 55, True, "private")
+    i2 = archive.enqueue_idea("long", "Idea two", None, True, "unlisted")
+    assert i1 != i2
+
+    first = archive.claim_next_idea()
+    assert first["id"] == i1 and first["status"] == "processing" and first["duration"] == 55
+    second = archive.claim_next_idea()
+    assert second["id"] == i2 and second["duration"] is None and second["mode"] == "long"
+    assert archive.claim_next_idea() is None  # nothing pending left
+
+    archive.update_idea(i1, "done", youtube_id="abc123", output_title="Title A")
+    row = archive.get_idea(i1)
+    assert row["status"] == "done" and row["youtube_id"] == "abc123" and row["output_title"] == "Title A"
+    assert len(archive.recent_ideas()) == 2
+
+
+def test_idea_queue_recover_stuck_ideas(tmp_path):
+    archive = bot.Archive(tmp_path / "shorts.db")
+    i1 = archive.enqueue_idea("short", "stuck idea", 60, True, "private")
+    archive.claim_next_idea()
+    assert archive.get_idea(i1)["status"] == "processing"
+
+    recovered = archive.recover_stuck_ideas()
+    assert recovered == 1
+    assert archive.get_idea(i1)["status"] == "pending"
+    assert archive.claim_next_idea()["id"] == i1  # claimable again
+
+
+def test_plan_short_from_idea_seeds_idea_and_normalizes_scenes():
+    idea = "Câu chuyện xây kênh đào Suez và tác động thương mại toàn cầu"
+    plan_json = {
+        "topic": "Suez Canal construction",
+        "angle": "How a desert shortcut reshaped global trade",
+        "title": "The Suez Canal's Hidden Cost",
+        "thumbnail_text": "Suez Canal",
+        "description": "How the Suez Canal reshaped trade. #history #Shorts",
+        "tags": ["history", "shorts"],
+        "hook": "This ditch rerouted the world.",
+        "narration": "This ditch rerouted the world. Workers cut through desert for a decade. Ships suddenly skipped Africa entirely. Trade routes collapsed and reformed. Empires fought to control it. That shortcut still moves your packages today.",
+        "closing_line": "That shortcut still moves your packages today.",
+        "scenes": [
+            {"duration": 15, "visual_prompt": "Wide desert canal at dawn"},
+            {"duration": 15, "visual_prompt": "Workers digging a channel"},
+            {"duration": 15, "visual_prompt": "A ship gliding through the canal"},
+            {"duration": 15, "visual_prompt": "A map showing rerouted trade"},
+        ],
+        "fact_note": "Kept dates general.",
+        "source_hints": ["History archive"],
+    }
+    prompts = []
+
+    class FakeClient:
+        def chat(self, prompt, **kwargs):
+            prompts.append(prompt)
+            return json.dumps(plan_json)
+
+    plan = bot.plan_short_from_idea(FakeClient(), 60, idea)
+    assert len(plan.scenes) == 6  # normalized up to the Short visual budget
+    assert abs(sum(scene.duration for scene in plan.scenes) - 60) < 0.1
+    assert idea in prompts[0]
+    assert "explicitly requested THIS exact idea" in prompts[0]
+
+
+def test_plan_long_form_from_idea_seeds_idea_and_has_no_vietnam_hard_block(monkeypatch):
+    monkeypatch.setattr(bot, "fetch_news_for_idea", lambda *a, **k: [])  # no network in tests
+    idea = "Trận Điện Biên Phủ 1954 và ý nghĩa lịch sử"
+    plan_json = {
+        "topic": "Dien Bien Phu 1954",
+        "angle": "A siege that ended a colonial war",
+        "title": "Dien Bien Phu: The Siege That Changed History",
+        "thumbnail_text": "Dien Bien Phu",
+        "description": "The 1954 siege explained. #history #documentary",
+        "tags": ["history", "documentary"],
+        "hook": "One valley decided a war.",
+        "narration": "One valley decided a war. Troops dug into the hills above a remote basin. Supplies came only by air, and the air was contested. Week by week the ring tightened. When it ended, a colonial era ended with it.",
+        "closing_line": "When it ended, a colonial era ended with it.",
+        "scenes": [
+            {"duration": 75, "visual_prompt": "Wide misty valley basin", "search_query": "Dien Bien Phu valley"},
+            {"duration": 75, "visual_prompt": "Soldiers digging hillside trenches", "search_query": "1954 trench warfare"},
+            {"duration": 75, "visual_prompt": "Cargo plane over mountains", "search_query": "1950s transport plane"},
+            {"duration": 75, "visual_prompt": "A battlefield at dawn", "search_query": "battlefield aftermath 1954"},
+        ],
+        "fact_note": "Kept casualty numbers general.",
+        "source_hints": ["History archive"],
+    }
+    prompts = []
+
+    class FakeClient:
+        long_form_reasoning_effort = "medium"
+
+        def chat(self, prompt, **kwargs):
+            prompts.append(prompt)
+            return json.dumps(plan_json)
+
+    # A Vietnam-related idea must NOT be rejected by the manual planner.
+    plan = bot.plan_long_form_from_idea(FakeClient(), 300, 4, 4, idea)
+    assert len(plan.scenes) == 4
+    assert abs(sum(scene.duration for scene in plan.scenes) - 300) < 0.1
+    assert idea in prompts[0]
+    assert "explicitly requested THIS exact idea" in prompts[0]
+    assert "Fresh related news headlines" in prompts[0]  # news grounding is wired in
+    # The auto-flow Vietnam hard rule must be absent from the manual prompt.
+    assert "public controversy related to Vietnam" not in prompts[0]
+
+
+def test_fetch_news_for_idea_parses_and_dedups(monkeypatch):
+    rss = (
+        b'<?xml version="1.0"?><rss><channel>'
+        b"<item><title>AI firms race to ship models</title><description>Big labs compete</description>"
+        b"<link>http://x/1</link><pubDate>Mon, 01 Jul 2026</pubDate></item>"
+        b"<item><title>AI firms race to ship models</title><description>dup</description><link>http://x/2</link></item>"
+        b"<item><title>Chip supply tightens</title><description>demand up</description><link>http://x/3</link></item>"
+        b"</channel></rss>"
+    )
+
+    class FakeResp:
+        content = rss
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(bot.requests, "get", lambda *a, **k: FakeResp())
+    items = bot.fetch_news_for_idea("AI competition", limit=5)
+    assert len(items) == 2  # duplicate title collapsed
+    assert items[0]["title"].startswith("AI firms")
+    assert items[0]["link"] == "http://x/1"

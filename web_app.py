@@ -32,12 +32,7 @@ from flask import (
     url_for,
 )
 
-from youtube_shorts_bot import (
-    MAX_SHORT_DURATION_SECONDS,
-    MIN_SHORT_DURATION_SECONDS,
-    ROOT,
-    Archive,
-)
+from youtube_shorts_bot import ROOT, Archive
 
 LOG = logging.getLogger("web_app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
@@ -123,8 +118,6 @@ def logout():
 def index():
     return render_template_string(
         INDEX_HTML,
-        min_dur=MIN_SHORT_DURATION_SECONDS,
-        max_dur=MAX_SHORT_DURATION_SECONDS,
         default_privacy=DEFAULT_PRIVACY,
         privacy_choices=PRIVACY_CHOICES,
         require_auth=bool(ACCESS_TOKEN),
@@ -137,26 +130,20 @@ def submit():
     idea = (request.form.get("idea") or "").strip()
     mode = (request.form.get("mode") or "short").strip().lower()
     privacy = (request.form.get("privacy") or DEFAULT_PRIVACY).strip().lower()
-    publish = request.form.get("publish", "on") == "on"
+    publish = request.form.get("publish", "on") in ("on", "true", "1")
 
     if not idea:
-        return redirect(url_for("index"))
+        return jsonify({"ok": False, "error": "Ý tưởng đang trống."}), 400
     if mode not in ("short", "long"):
         mode = "short"
     if privacy not in PRIVACY_CHOICES:
         privacy = DEFAULT_PRIVACY
 
-    duration = None
-    if mode == "short":
-        try:
-            duration = int(request.form.get("duration") or MAX_SHORT_DURATION_SECONDS)
-        except ValueError:
-            duration = MAX_SHORT_DURATION_SECONDS
-        duration = max(MIN_SHORT_DURATION_SECONDS, min(MAX_SHORT_DURATION_SECONDS, duration))
-
-    idea_id = get_archive().enqueue_idea(mode, idea, duration, publish, privacy)
+    # Video luôn khớp theo độ dài giọng đọc, nên không thu "thời lượng" từ form.
+    # Short dùng SHORT_DURATION_SECONDS mặc định cho ngân sách từ (xử lý ở bot).
+    idea_id = get_archive().enqueue_idea(mode, idea, None, publish, privacy)
     LOG.info("Enqueued manual idea id=%s mode=%s publish=%s", idea_id, mode, publish)
-    return redirect(url_for("index"))
+    return jsonify({"ok": True, "id": idea_id})
 
 
 @app.route("/api/jobs")
@@ -245,140 +232,258 @@ def start_worker() -> None:
 # HTML (inline, không CDN)
 # --------------------------------------------------------------------------- #
 BASE_CSS = """
-:root{color-scheme:dark}
+:root{
+  --bg:#0a0c12; --surface:rgba(255,255,255,.035); --border:rgba(255,255,255,.09);
+  --border2:rgba(255,255,255,.06); --text:#e9edf5; --muted:#8b93a7; --faint:#5b6377;
+  --accent:#7c6cff; --grad:linear-gradient(135deg,#8a6bff,#4d8dff);
+  --green:#34d399; --red:#f97066; --blue:#60a5fa; --slate:#94a3b8;
+  --r:16px; --r-sm:11px; color-scheme:dark;
+}
 *{box-sizing:border-box}
-body{margin:0;background:#0e1117;color:#e6edf3;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.5}
-.wrap{max-width:820px;margin:0 auto;padding:24px 16px 64px}
-h1{font-size:22px;margin:8px 0 4px}
-.sub{color:#8b949e;font-size:14px;margin:0 0 24px}
-.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:20px;margin-bottom:20px}
-label{display:block;font-weight:600;font-size:14px;margin:14px 0 6px}
-textarea,input[type=number],select{width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:10px;padding:12px;font-size:15px;font-family:inherit}
-textarea{min-height:120px;resize:vertical}
-.row{display:flex;gap:12px;flex-wrap:wrap}
-.row>.col{flex:1;min-width:150px}
-.modes{display:flex;gap:10px;margin-top:6px}
-.mode-opt{flex:1;border:1px solid #30363d;border-radius:10px;padding:12px;cursor:pointer;text-align:center;background:#0d1117;transition:.15s}
-.mode-opt.active{border-color:#2f81f7;background:#132033}
-.mode-opt small{display:block;color:#8b949e;font-weight:400;margin-top:2px}
-.mode-opt input{display:none}
-.check{display:flex;align-items:center;gap:10px;margin-top:16px;font-size:14px}
-.check input{width:18px;height:18px}
-button.primary{margin-top:20px;width:100%;background:#238636;border:0;color:#fff;font-size:16px;font-weight:600;padding:14px;border-radius:10px;cursor:pointer}
-button.primary:hover{background:#2ea043}
-table{width:100%;border-collapse:collapse;font-size:13.5px}
-th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #21262d;vertical-align:top}
-th{color:#8b949e;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
-.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
-.b-pending{background:#30363d;color:#c9d1d9}
-.b-processing{background:#1f3a5f;color:#79c0ff}
-.b-done{background:#1a3a24;color:#56d364}
-.b-failed{background:#4d1f22;color:#ff7b72}
-.tag{display:inline-block;background:#21262d;color:#adbac7;border-radius:6px;padding:1px 7px;font-size:11.5px;margin-right:4px}
-a{color:#58a6ff}
-.muted{color:#8b949e}
-.topbar{display:flex;justify-content:space-between;align-items:center}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3fb950;margin-right:6px;animation:pulse 1.6s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-.empty{color:#8b949e;text-align:center;padding:24px}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);min-height:100vh;line-height:1.55;
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.bg{position:fixed;inset:0;z-index:-1;background:
+  radial-gradient(1100px 520px at 12% -12%,rgba(124,108,255,.22),transparent 60%),
+  radial-gradient(900px 520px at 105% 0%,rgba(77,141,255,.15),transparent 55%),var(--bg)}
+a{color:inherit}
+.wrap{max-width:760px;margin:0 auto;padding:30px 18px 72px}
+.hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:26px}
+.brand{display:flex;gap:13px;align-items:center}
+.logo{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;font-size:22px;
+  background:var(--grad);box-shadow:0 10px 26px -8px rgba(124,108,255,.75)}
+.brand-name{font-weight:750;font-size:19px;letter-spacing:-.01em}
+.brand-sub{color:var(--muted);font-size:13px}
+.ghost{color:var(--muted);text-decoration:none;font-size:13px;border:1px solid var(--border);
+  padding:8px 14px;border-radius:10px;transition:.15s}
+.ghost:hover{color:var(--text);border-color:var(--accent)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
+  padding:22px;margin-bottom:18px;backdrop-filter:blur(12px);
+  box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 22px 44px -26px rgba(0,0,0,.75)}
+.card-title{font-size:15px;font-weight:700;margin:0 0 16px;letter-spacing:-.01em}
+.lbl{display:block;font-weight:600;font-size:13px;color:var(--muted);margin:18px 0 8px}
+form .lbl:first-child{margin-top:0}
+textarea{width:100%;background:rgba(0,0,0,.26);border:1px solid var(--border);color:var(--text);
+  border-radius:var(--r-sm);padding:14px;font-size:15px;font-family:inherit;min-height:120px;resize:vertical;transition:.15s}
+textarea::placeholder{color:var(--faint)}
+textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,108,255,.18)}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.seg-opt{position:relative;display:flex;flex-direction:column;gap:2px;padding:14px 16px;cursor:pointer;
+  border:1px solid var(--border);border-radius:var(--r-sm);background:rgba(0,0,0,.2);transition:.16s}
+.seg-opt:hover{border-color:rgba(255,255,255,.18)}
+.seg-opt input{position:absolute;opacity:0;pointer-events:none}
+.seg-ico{font-size:20px}
+.seg-tt{font-weight:650;font-size:14.5px}
+.seg-sb{color:var(--muted);font-size:12px}
+.seg-opt.is-active{border-color:transparent;
+  background:linear-gradient(rgba(10,12,18,.62),rgba(10,12,18,.62)) padding-box,var(--grad) border-box;
+  box-shadow:0 0 0 1px rgba(124,108,255,.35),0 12px 28px -16px rgba(124,108,255,.9)}
+.seg-opt.is-active .seg-tt{color:#fff}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:end}
+.sel{position:relative}
+.sel::after{content:"";position:absolute;right:15px;top:50%;width:7px;height:7px;pointer-events:none;
+  border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:translateY(-70%) rotate(45deg)}
+select{width:100%;appearance:none;-webkit-appearance:none;background:rgba(0,0,0,.26);border:1px solid var(--border);
+  color:var(--text);border-radius:var(--r-sm);padding:0 34px 0 14px;height:48px;font-size:14.5px;
+  font-family:inherit;cursor:pointer;text-transform:capitalize}
+select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,108,255,.18)}
+.pub{display:flex;align-items:center;justify-content:space-between;height:48px;padding:0 15px;
+  border:1px solid var(--border);border-radius:var(--r-sm);background:rgba(0,0,0,.26);font-size:14px;color:var(--text);cursor:pointer}
+.switch{position:relative;display:inline-block;width:46px;height:27px;flex:0 0 auto}
+.switch input{opacity:0;width:0;height:0}
+.track{position:absolute;inset:0;background:#2a3140;border-radius:99px;transition:.2s}
+.track::before{content:"";position:absolute;left:3px;top:3px;width:21px;height:21px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked+.track{background:var(--grad)}
+.switch input:checked+.track::before{transform:translateX(19px)}
+.cta{margin-top:22px;width:100%;border:0;border-radius:var(--r-sm);padding:15px;cursor:pointer;color:#fff;
+  font-size:15.5px;font-weight:700;font-family:inherit;background:var(--grad);
+  box-shadow:0 14px 30px -14px rgba(124,108,255,.9);transition:.16s}
+.cta:hover{transform:translateY(-1px);box-shadow:0 18px 36px -14px rgba(124,108,255,1)}
+.cta:active{transform:translateY(0)}
+.cta:disabled{opacity:.72;cursor:default;transform:none}
+.hint{color:var(--faint);font-size:12.5px;margin:13px 2px 0;text-align:center}
+.jobs-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.jobs-head .card-title{margin:0}
+.stats{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:11.5px;font-weight:600;padding:3px 10px;border-radius:99px;border:1px solid var(--border)}
+.chip.c-processing{color:var(--blue)}
+.chip.c-pending{color:var(--slate)}
+.chip.c-done{color:var(--green)}
+.chip.c-failed{color:var(--red)}
+.job{display:flex;gap:13px;align-items:flex-start;padding:15px 4px;border-top:1px solid var(--border2)}
+.job:first-child{border-top:0}
+.job-ico{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;font-size:18px;
+  background:rgba(255,255,255,.05);flex:0 0 auto}
+.job-main{flex:1;min-width:0}
+.job-idea{font-size:14px;line-height:1.45;word-break:break-word}
+.jt{color:var(--muted);font-size:12.5px;margin-top:3px}
+.job-meta{color:var(--faint);font-size:12px;margin-top:5px}
+.job-right{display:flex;flex-direction:column;align-items:flex-end;gap:7px;flex:0 0 auto}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:650;padding:4px 11px;border-radius:99px;white-space:nowrap}
+.p-pending{background:rgba(148,163,184,.14);color:var(--slate)}
+.p-processing{background:rgba(96,165,250,.16);color:var(--blue)}
+.p-done{background:rgba(52,211,153,.15);color:var(--green)}
+.p-failed{background:rgba(249,112,102,.15);color:var(--red)}
+.livedot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.link{color:#fff;text-decoration:none;font-size:12.5px;font-weight:650;background:rgba(255,255,255,.08);
+  padding:6px 12px;border-radius:9px;transition:.15s}
+.link:hover{background:var(--grad)}
+.muted{color:var(--muted);font-size:12.5px}
+.err{color:var(--red);font-size:12px;max-width:190px;text-align:right;display:inline-block}
+.empty{text-align:center;color:var(--muted);padding:38px 12px}
+.empty-ico{font-size:30px;margin-bottom:8px;opacity:.7}
+.skeleton{height:60px;border-radius:12px;margin:9px 0;
+  background:linear-gradient(90deg,rgba(255,255,255,.03),rgba(255,255,255,.07),rgba(255,255,255,.03));
+  background-size:200% 100%;animation:sh 1.3s infinite}
+@keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.ft{text-align:center;color:var(--faint);font-size:12px;margin-top:22px}
+@media(max-width:520px){
+  .grid2{grid-template-columns:1fr}
+  .job-right{flex-direction:row;align-items:center}
+}
 """
 
 LOGIN_HTML = """<!doctype html><html lang=vi><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Đăng nhập · Idea Studio</title>
-<style>""" + BASE_CSS + """</style></head><body><div class=wrap style="max-width:400px;padding-top:80px">
-<h1>🔒 Idea Studio</h1><p class=sub>Nhập mật khẩu để tiếp tục.</p>
-<div class=card><form method=post>
-<label for=token>Mật khẩu</label>
-<input type=password id=token name=token autofocus autocomplete=current-password
- style="width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:10px;padding:12px;font-size:15px">
-{% if error %}<p style="color:#ff7b72;font-size:13px;margin:10px 0 0">{{ error }}</p>{% endif %}
-<button class=primary type=submit>Đăng nhập</button>
-</form></div></div></body></html>"""
+<style>""" + BASE_CSS + """
+.login-wrap{max-width:400px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:24px}
+.pw{width:100%;background:rgba(0,0,0,.26);border:1px solid var(--border);color:var(--text);
+  border-radius:var(--r-sm);padding:14px;font-size:15px;font-family:inherit}
+.pw:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,108,255,.18)}
+</style></head><body><div class="bg"></div>
+<div class="login-wrap">
+  <div class="brand" style="justify-content:center;margin-bottom:22px">
+    <span class="logo">💡</span>
+    <div><div class="brand-name">Idea Studio</div><div class="brand-sub">Đăng nhập để tiếp tục</div></div>
+  </div>
+  <div class="card">
+    <form method=post>
+      <label class="lbl" for=token>Mật khẩu</label>
+      <input class="pw" type=password id=token name=token autofocus autocomplete=current-password>
+      {% if error %}<p style="color:var(--red);font-size:13px;margin:10px 2px 0">{{ error }}</p>{% endif %}
+      <button class="cta" type=submit style="margin-top:18px">Đăng nhập</button>
+    </form>
+  </div>
+</div></body></html>"""
 
 INDEX_HTML = """<!doctype html><html lang=vi><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Idea Studio · YouTube bot</title>
-<style>""" + BASE_CSS + """</style></head><body><div class=wrap>
-<div class=topbar>
-  <div><h1>💡 Idea Studio</h1><p class=sub>Nhập ý tưởng của bạn — bot sẽ tự viết kịch bản, tạo ảnh, lồng tiếng, render và đăng YouTube.</p></div>
-  {% if require_auth %}<a href="{{ url_for('logout') }}" class=muted style="font-size:13px">Đăng xuất</a>{% endif %}
-</div>
-
-<div class=card>
-<form method=post action="{{ url_for('submit') }}">
-  <label for=idea>Ý tưởng của bạn</label>
-  <textarea id=idea name=idea required placeholder="VD: Câu chuyện về việc xây dựng kênh đào Suez và vì sao nó thay đổi thương mại thế giới. (Gõ tiếng Việt hay tiếng Anh đều được — video xuất ra tiếng Anh.)"></textarea>
-
-  <label>Loại video</label>
-  <div class=modes>
-    <label class="mode-opt active" id=opt-short>
-      <input type=radio name=mode value=short checked>📱 Short (dọc)<small>video ngắn 45–60s</small>
-    </label>
-    <label class="mode-opt" id=opt-long>
-      <input type=radio name=mode value=long>🎬 Long-form (ngang)<small>video dài 5–7 phút</small>
-    </label>
-  </div>
-
-  <div class=row>
-    <div class=col id=dur-wrap>
-      <label for=duration>Thời lượng Short (giây)</label>
-      <input type=number id=duration name=duration min="{{ min_dur }}" max="{{ max_dur }}" value="{{ max_dur }}">
+<style>""" + BASE_CSS + """</style></head><body><div class="bg"></div>
+<div class="wrap">
+  <header class="hd">
+    <div class="brand">
+      <span class="logo">💡</span>
+      <div><div class="brand-name">Idea Studio</div><div class="brand-sub">Biến ý tưởng thành video, tự động</div></div>
     </div>
-    <div class=col>
-      <label for=privacy>Chế độ đăng</label>
-      <select id=privacy name=privacy>
-        {% for p in privacy_choices %}
-        <option value="{{ p }}" {% if p == default_privacy %}selected{% endif %}>{{ p }}</option>
-        {% endfor %}
-      </select>
-    </div>
-  </div>
+    {% if require_auth %}<a class="ghost" href="{{ url_for('logout') }}">Đăng xuất</a>{% endif %}
+  </header>
 
-  <label class=check><input type=checkbox name=publish checked> Đăng thẳng lên YouTube sau khi render</label>
-  <button class=primary type=submit>🚀 Tạo video</button>
-</form>
-</div>
+  <section class="card">
+    <h2 class="card-title">Tạo video mới</h2>
+    <form id="ideaForm">
+      <label class="lbl" for="idea">Ý tưởng của bạn</label>
+      <textarea id="idea" name="idea" required placeholder="VD: Sự cạnh tranh khốc liệt giữa các công ty AI…&#10;Gõ tiếng Việt hay tiếng Anh đều được — video xuất ra tiếng Anh."></textarea>
 
-<div class=card>
-  <div class=topbar><h1 style="font-size:17px;margin:0"><span class=dot></span>Hàng đợi &amp; lịch sử</h1>
-  <span class=muted style="font-size:12px">tự làm mới mỗi 5s</span></div>
-  <div id=jobs><p class=empty>Đang tải…</p></div>
-</div>
+      <label class="lbl">Loại video</label>
+      <div class="seg">
+        <label class="seg-opt is-active" data-mode="short">
+          <input type="radio" name="mode" value="short" checked>
+          <span class="seg-ico">📱</span><span class="seg-tt">Short</span><span class="seg-sb">Dọc · video ngắn</span>
+        </label>
+        <label class="seg-opt" data-mode="long">
+          <input type="radio" name="mode" value="long">
+          <span class="seg-ico">🎬</span><span class="seg-tt">Long-form</span><span class="seg-sb">Ngang · 5–7 phút</span>
+        </label>
+      </div>
+
+      <div class="grid2">
+        <div>
+          <label class="lbl" for="privacy">Chế độ đăng YouTube</label>
+          <div class="sel"><select id="privacy" name="privacy">
+            {% for p in privacy_choices %}<option value="{{ p }}" {% if p == default_privacy %}selected{% endif %}>{{ p }}</option>{% endfor %}
+          </select></div>
+        </div>
+        <div>
+          <label class="lbl">Tự đăng lên YouTube</label>
+          <label class="pub"><span>Đăng sau khi render</span>
+            <span class="switch"><input type="checkbox" name="publish" checked><span class="track"></span></span>
+          </label>
+        </div>
+      </div>
+
+      <button class="cta" id="submitBtn" type="submit">Tạo video</button>
+      <p class="hint">⏱️ Độ dài video tự khớp theo giọng đọc — không cần chỉnh thời lượng.</p>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="jobs-head"><h2 class="card-title">Hàng đợi &amp; lịch sử</h2><div class="stats" id="stats"></div></div>
+    <div id="jobs"><div class="skeleton"></div><div class="skeleton"></div></div>
+  </section>
+
+  <footer class="ft">Tự làm mới mỗi 5 giây · mỗi lần render một video</footer>
 </div>
 
 <script>
-// Chuyển đổi giao diện chọn mode + ẩn/hiện ô thời lượng Short.
-const optShort=document.getElementById('opt-short'), optLong=document.getElementById('opt-long'), durWrap=document.getElementById('dur-wrap');
-function syncMode(){
-  const isShort=document.querySelector('input[name=mode]:checked').value==='short';
-  optShort.classList.toggle('active',isShort); optLong.classList.toggle('active',!isShort);
-  durWrap.style.display=isShort?'block':'none';
-}
-document.querySelectorAll('input[name=mode]').forEach(el=>el.addEventListener('change',syncMode)); syncMode();
+const $ = (s, r=document) => r.querySelector(s);
+const form = $('#ideaForm'), btn = $('#submitBtn');
+const segOpts = document.querySelectorAll('.seg-opt');
+segOpts.forEach(o => o.addEventListener('click', () => {
+  segOpts.forEach(x => x.classList.remove('is-active'));
+  o.classList.add('is-active');
+  o.querySelector('input').checked = true;
+}));
 
-const BADGE={pending:['b-pending','Chờ'],processing:['b-processing','Đang tạo…'],done:['b-done','Xong'],failed:['b-failed','Lỗi']};
-function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function fmt(ts){ if(!ts) return ''; const d=new Date(ts); return isNaN(d)?ts:d.toLocaleString('vi-VN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'}); }
-function render(jobs){
-  const box=document.getElementById('jobs');
-  if(!jobs.length){box.innerHTML='<p class=empty>Chưa có ý tưởng nào. Nhập ý tưởng đầu tiên ở trên nhé!</p>';return;}
-  let h='<table><thead><tr><th>Thời gian</th><th>Loại</th><th>Ý tưởng</th><th>Trạng thái</th><th>Kết quả</th></tr></thead><tbody>';
-  for(const j of jobs){
-    const [cls,txt]=BADGE[j.status]||['b-pending',j.status];
-    const modeTag=j.mode==='long'?'🎬 Long':'📱 Short';
-    let result='';
-    if(j.status==='done'&&j.youtube_id){result='<a href="https://youtube.com/watch?v='+esc(j.youtube_id)+'" target=_blank>▶ Xem trên YouTube</a>';}
-    else if(j.status==='done'){result='<span class=muted>đã render</span>';}
-    else if(j.status==='failed'){result='<span style="color:#ff7b72" title="'+esc(j.error)+'">'+esc((j.error||'lỗi').slice(0,60))+'</span>';}
-    else if(j.status==='processing'){result='<span class=muted>đang xử lý…</span>';}
-    const title=j.output_title?'<div class=muted style="margin-top:3px;font-size:12px">'+esc(j.output_title)+'</div>':'';
-    h+='<tr><td class=muted style="white-space:nowrap">'+fmt(j.created_at)+'</td><td><span class=tag>'+modeTag+'</span></td>'+
-       '<td>'+esc((j.idea||'').slice(0,110))+title+'</td>'+
-       '<td><span class="badge '+cls+'">'+esc(txt)+'</span></td><td>'+result+'</td></tr>';
-  }
-  box.innerHTML=h+'</tbody></table>';
+const BADGE = {pending:['pending','Chờ'], processing:['processing','Đang tạo…'], done:['done','Xong'], failed:['failed','Lỗi']};
+function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmt(ts){ if(!ts) return ''; const d = new Date(ts); return isNaN(d) ? ts : d.toLocaleString('vi-VN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'2-digit'}); }
+
+function renderJobs(jobs){
+  const box = $('#jobs'), stats = $('#stats');
+  const c = {pending:0, processing:0, done:0, failed:0};
+  jobs.forEach(j => { c[j.status] = (c[j.status]||0) + 1; });
+  stats.innerHTML =
+    (c.processing ? '<span class="chip c-processing">'+c.processing+' đang tạo</span>' : '') +
+    (c.pending ? '<span class="chip c-pending">'+c.pending+' chờ</span>' : '') +
+    (c.done ? '<span class="chip c-done">'+c.done+' xong</span>' : '') +
+    (c.failed ? '<span class="chip c-failed">'+c.failed+' lỗi</span>' : '');
+  if(!jobs.length){ box.innerHTML = '<div class="empty"><div class="empty-ico">🗂️</div>Chưa có video nào. Nhập ý tưởng đầu tiên phía trên nhé!</div>'; return; }
+  box.innerHTML = jobs.map(j => {
+    const b = BADGE[j.status] || ['pending', j.status];
+    const mi = j.mode === 'long' ? '🎬' : '📱';
+    const mt = j.mode === 'long' ? 'Long-form' : 'Short';
+    let res = '';
+    if(j.status === 'done' && j.youtube_id) res = '<a class="link" href="https://youtube.com/watch?v='+esc(j.youtube_id)+'" target="_blank">▶ YouTube</a>';
+    else if(j.status === 'done') res = '<span class="muted">đã render</span>';
+    else if(j.status === 'failed') res = '<span class="err" title="'+esc(j.error)+'">'+esc((j.error||'lỗi').slice(0,48))+'</span>';
+    else if(j.status === 'processing') res = '<span class="muted">đang xử lý…</span>';
+    const title = j.output_title ? '<div class="jt">'+esc(j.output_title)+'</div>' : '';
+    const dot = j.status === 'processing' ? '<span class="livedot"></span>' : '';
+    return '<div class="job"><div class="job-ico">'+mi+'</div>'
+      + '<div class="job-main"><div class="job-idea">'+esc((j.idea||'').slice(0,120))+'</div>'+title
+      + '<div class="job-meta">'+mt+' · '+fmt(j.created_at)+'</div></div>'
+      + '<div class="job-right"><span class="pill p-'+b[0]+'">'+dot+esc(b[1])+'</span><div>'+res+'</div></div></div>';
+  }).join('');
 }
-async function poll(){ try{const r=await fetch('/api/jobs',{cache:'no-store'}); if(r.ok) render(await r.json());}catch(e){} }
-poll(); setInterval(poll,5000);
+
+async function poll(){ try{ const r = await fetch('/api/jobs',{cache:'no-store'}); if(r.ok) renderJobs(await r.json()); }catch(e){} }
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  if(!$('#idea').value.trim()) return;
+  btn.disabled = true; const old = btn.textContent; btn.textContent = 'Đang gửi…';
+  try{
+    const r = await fetch('/submit', {method:'POST', body:new FormData(form)});
+    const j = await r.json().catch(() => ({}));
+    if(r.ok && j.ok){ $('#idea').value = ''; btn.textContent = '✓ Đã thêm vào hàng đợi'; poll(); }
+    else { btn.textContent = (j && j.error) ? j.error : 'Lỗi, thử lại'; }
+  }catch(e){ btn.textContent = 'Lỗi mạng'; }
+  setTimeout(() => { btn.disabled = false; btn.textContent = old; }, 1600);
+});
+
+poll(); setInterval(poll, 5000);
 </script>
 </body></html>"""
 

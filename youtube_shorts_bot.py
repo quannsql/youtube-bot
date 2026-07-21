@@ -104,10 +104,6 @@ def materialize_credential_file(env_name: str, destination: Path) -> None:
 
 def materialize_railway_credentials() -> None:
     materialize_credential_file(
-        "GOOGLE_TTS_SERVICE_ACCOUNT_JSON_B64",
-        DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
-    )
-    materialize_credential_file(
         "YOUTUBE_CLIENT_SECRETS_JSON_B64",
         DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
     )
@@ -197,15 +193,16 @@ class Settings:
     overlay_video: Path = ROOT / "assets" / "overlay-video.mp4"
     overlay_video_short_width: int = 180
     overlay_video_long_form_width: int = 160
-    overlay_video_margin: int = 36
+    overlay_video_right_margin: int = 96
+    overlay_video_bottom_margin: int = 36
+    overlay_video_corner_radius: int = 18
     overlay_video_loop_gap_seconds: float = 5.0
-    google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
-    google_tts_voice: str = "en-US-Chirp3-HD-Enceladus"
-    google_tts_speaking_rate: float = 1.05
+    openai_tts_voice: str = "nova"
+    openai_tts_speed: float = 1.0
     youtube_client_secrets: Path = DATA_DIR / "client_secrets.json"
     youtube_token: Path = DATA_DIR / "youtube_token.json"
     youtube_privacy: str = "private"
-    social_openai_tts_voice: str = "ash"
+    social_openai_tts_voice: str = "nova"
     social_openai_tts_speed: float = 1.0
     publish_facebook: bool = False
     facebook_graph_version: str = "v25.0"
@@ -286,17 +283,18 @@ class Settings:
             overlay_video=overlay_video,
             overlay_video_short_width=max(64, int(os.getenv("OVERLAY_VIDEO_SHORT_WIDTH", "180"))),
             overlay_video_long_form_width=max(64, int(os.getenv("OVERLAY_VIDEO_LONG_FORM_WIDTH", "160"))),
-            overlay_video_margin=max(0, int(os.getenv("OVERLAY_VIDEO_MARGIN", "36"))),
+            overlay_video_right_margin=max(0, int(os.getenv("OVERLAY_VIDEO_RIGHT_MARGIN", "96"))),
+            overlay_video_bottom_margin=max(0, int(os.getenv("OVERLAY_VIDEO_BOTTOM_MARGIN", "36"))),
+            overlay_video_corner_radius=max(0, int(os.getenv("OVERLAY_VIDEO_CORNER_RADIUS", "18"))),
             overlay_video_loop_gap_seconds=max(
                 0.0, float(os.getenv("OVERLAY_VIDEO_LOOP_GAP_SECONDS", "5.0"))
             ),
-            google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
-            google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Enceladus"),
-            google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
+            openai_tts_voice=os.getenv("OPENAI_TTS_VOICE", "nova").strip() or "nova",
+            openai_tts_speed=min(4.0, max(0.25, float(os.getenv("OPENAI_TTS_SPEED", "1.0")))),
             youtube_client_secrets=DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
             youtube_token=DATA_DIR / os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
             youtube_privacy=os.getenv("YOUTUBE_PRIVACY_STATUS", "private"),
-            social_openai_tts_voice=os.getenv("SOCIAL_OPENAI_TTS_VOICE", "ash").strip() or "ash",
+            social_openai_tts_voice=os.getenv("SOCIAL_OPENAI_TTS_VOICE", "nova").strip() or "nova",
             social_openai_tts_speed=min(4.0, max(0.25, float(os.getenv("SOCIAL_OPENAI_TTS_SPEED", "1.0")))),
             publish_facebook=env_bool("PUBLISH_FACEBOOK", False),
             facebook_graph_version=os.getenv("FACEBOOK_GRAPH_VERSION", "v25.0"),
@@ -1278,67 +1276,32 @@ class VisualAssetProvider:
         return "openai"
 
 
-class GoogleCloudTTS:
-    """Google Cloud Text-to-Speech narration; independent from the image provider."""
+class OpenAITTS:
+    """OpenAI speech generation with a flow-specific voice direction."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        voice: str,
+        speed: float,
+        instructions: str,
+        label: str,
+    ) -> None:
         self.s = settings
-
-    @staticmethod
-    def language_code_for_voice(voice: str) -> str:
-        parts = voice.split("-")
-        return "-".join(parts[:2]) if len(parts) >= 2 else voice
-
-    def speech(self, text: str, destination: Path, voice: str | None = None, speaking_rate: float | None = None) -> None:
-        if not self.s.google_tts_service_account.exists():
-            raise BotError(
-                "Thiếu service-account JSON cho Google TTS: "
-                f"{self.s.google_tts_service_account}. Xem README để tạo file này."
-            )
-        try:
-            from google.cloud import texttospeech
-        except ImportError as exc:
-            raise BotError("Thiếu google-cloud-texttospeech. Chạy: pip install -r requirements.txt") from exc
-        try:
-            selected_voice = voice or self.s.google_tts_voice
-            client = texttospeech.TextToSpeechClient.from_service_account_file(
-                str(self.s.google_tts_service_account)
-            )
-            response = client.synthesize_speech(
-                input=texttospeech.SynthesisInput(text=text),
-                voice=texttospeech.VoiceSelectionParams(
-                    language_code=self.language_code_for_voice(selected_voice),
-                    name=selected_voice,
-                ),
-                audio_config=texttospeech.AudioConfig(
-                    audio_encoding=texttospeech.AudioEncoding.MP3,
-                    speaking_rate=speaking_rate or self.s.google_tts_speaking_rate,
-                ),
-            )
-        except Exception as exc:
-            raise BotError(f"Google Cloud TTS không tạo được giọng đọc: {exc}") from exc
-        destination.write_bytes(response.audio_content)
-
-
-class OpenAIShortVietnameseTTS:
-    """OpenAI TTS used only for Vietnamese Facebook/TikTok Shorts."""
-
-    def __init__(self, settings: Settings) -> None:
-        self.s = settings
+        self.voice = voice
+        self.speed = speed
+        self.instructions = instructions
+        self.label = label
 
     def speech(self, text: str, destination: Path) -> None:
         payload = {
             "model": "gpt-4o-mini-tts",
-            "voice": self.s.social_openai_tts_voice,
+            "voice": self.voice,
             "input": text,
-            "instructions": (
-                "Speak natural Vietnamese from Vietnam for a short documentary social video. "
-                "Use the vibe of a patient teacher: calm, warm, clear, and encouraging. "
-                "Explain each idea with gentle pacing, smooth pauses, and natural intonation. "
-                "Do not sound childish, overly dramatic, or rushed. Do not add, omit, or translate words."
-            ),
+            "instructions": self.instructions,
             "response_format": "mp3",
-            "speed": self.s.social_openai_tts_speed,
+            "speed": self.speed,
         }
         try:
             response = requests.post(
@@ -1351,13 +1314,49 @@ class OpenAIShortVietnameseTTS:
                 timeout=(self.s.text_connect_timeout, self.s.text_read_timeout),
             )
         except requests.RequestException as exc:
-            raise BotError(f"OpenAI TTS tiếng Việt không thể kết nối: {exc}") from exc
+            raise BotError(f"OpenAI TTS ({self.label}) không thể kết nối: {exc}") from exc
         if not response.ok:
             detail = response.text[:500].strip() or "empty response"
-            raise BotError(f"OpenAI TTS tiếng Việt thất bại (HTTP {response.status_code}): {detail}")
+            raise BotError(f"OpenAI TTS ({self.label}) thất bại (HTTP {response.status_code}): {detail}")
         if not response.content:
-            raise BotError("OpenAI TTS tiếng Việt trả audio rỗng.")
+            raise BotError(f"OpenAI TTS ({self.label}) trả audio rỗng.")
         destination.write_bytes(response.content)
+
+
+class OpenAIEnglishNarrationTTS(OpenAITTS):
+    """Nova narration for English YouTube Shorts and long-form videos."""
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(
+            settings,
+            voice=settings.openai_tts_voice,
+            speed=settings.openai_tts_speed,
+            instructions=(
+                "Speak in natural American English with an emo teenager vibe: intimate, slightly moody, "
+                "emotionally honest, and conversational. Keep the documentary narration clear and controlled, "
+                "with subtle dramatic tension and natural pauses. Avoid caricature, exaggerated whining, "
+                "breathiness, or singing. Do not add, omit, or change any words."
+            ),
+            label="English narration",
+        )
+
+
+class OpenAIShortVietnameseTTS(OpenAITTS):
+    """Nova narration for Vietnamese Facebook/TikTok Shorts."""
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(
+            settings,
+            voice=settings.social_openai_tts_voice,
+            speed=settings.social_openai_tts_speed,
+            instructions=(
+                "Speak natural Vietnamese from Vietnam with an emo teenager vibe: intimate, slightly moody, "
+                "emotionally honest, and conversational. Keep the short documentary narration clear and "
+                "controlled, with subtle dramatic tension and natural pauses. Avoid caricature, exaggerated "
+                "whining, breathiness, or singing. Do not add, omit, or translate words."
+            ),
+            label="Vietnamese social narration",
+        )
 
 
 # Chỉ dẫn dành cho LLM khi VIẾT visual_prompt (không phải để gửi cho model ảnh).
@@ -2748,7 +2747,9 @@ def mux_video_audio_with_captions(
         else settings.overlay_video_short_width
     )
     logo_margin = settings.overlay_logo_margin
-    corner_video_margin = settings.overlay_video_margin
+    corner_video_right_margin = settings.overlay_video_right_margin
+    corner_video_bottom_margin = settings.overlay_video_bottom_margin
+    corner_video_radius = min(settings.overlay_video_corner_radius, corner_video_width // 2)
     logo_top_margin = (
         settings.overlay_logo_long_form_top_margin
         if long_form
@@ -2761,13 +2762,25 @@ def mux_video_audio_with_captions(
         target_duration - corner_video_duration > settings.overlay_video_loop_gap_seconds
     )
 
+    corner_video_filter = (
+        f"scale={corner_video_width}:-2:flags=lanczos,setsar=1,format=yuva420p"
+    )
+    if corner_video_radius:
+        corner_video_filter += (
+            ",geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':"
+            "a='if(lte(hypot("
+            f"max(abs(X-W/2)-(W/2-{corner_video_radius}),0),"
+            f"max(abs(Y-H/2)-(H/2-{corner_video_radius}),0)),"
+            f"{corner_video_radius}),255,0)'"
+        )
+
     video_filter = (
         f"[0:v]{ass_video_filter(captions)}[base];"
         f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
         f"[base][logo]overlay=x=W-w-{logo_margin}:y={logo_top_margin}:format=auto[branded];"
-        f"[3:v]scale={corner_video_width}:-2:flags=lanczos,setsar=1,format=yuva420p[corner];"
-        f"[branded][corner]overlay=x=W-w-{corner_video_margin}:"
-        f"y=H-h-{corner_video_margin}:eof_action=repeat:repeatlast=1:"
+        f"[3:v]{corner_video_filter}[corner];"
+        f"[branded][corner]overlay=x=W-w-{corner_video_right_margin}:"
+        f"y=H-h-{corner_video_bottom_margin}:eof_action=repeat:repeatlast=1:"
         "format=auto,format=yuv420p[v];"
         f"[1:a]apad=pad_dur={target_duration}[a]"
     )
@@ -2882,7 +2895,7 @@ def split_text_for_tts(text: str, max_chars: int = 3800) -> list[str]:
 
 
 def synthesize_narration(
-    tts: GoogleCloudTTS,
+    tts: OpenAIEnglishNarrationTTS,
     text: str,
     destination: Path,
     output_dir: Path,
@@ -2934,7 +2947,7 @@ def rescale_scene_durations(plan: ShortPlan, target_duration: float, label: str)
 
 def prepare_short_english_narration(
     plan: ShortPlan,
-    tts: GoogleCloudTTS,
+    tts: OpenAIEnglishNarrationTTS,
     output_dir: Path,
 ) -> tuple[Path, float]:
     narration = output_dir / "narration.mp3"
@@ -2945,7 +2958,7 @@ def prepare_short_english_narration(
 
 def prepare_long_form_narration(
     plan: ShortPlan,
-    tts: GoogleCloudTTS,
+    tts: OpenAIEnglishNarrationTTS,
     output_dir: Path,
 ) -> tuple[Path, float]:
     narration = output_dir / "long_narration.mp3"
@@ -3914,7 +3927,7 @@ def run_long_form_flow(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: GoogleCloudTTS,
+    tts: OpenAIEnglishNarrationTTS,
     force_new: bool = False,
 ) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -4008,7 +4021,7 @@ def run_manual_short_flow(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: GoogleCloudTTS,
+    tts: OpenAIEnglishNarrationTTS,
     social_tts: OpenAIShortVietnameseTTS,
 ) -> tuple[str | None, str]:
     """Render one Short from a user idea. No daily-limit, novelty, or resume gate. Returns (youtube_id, title)."""
@@ -4069,7 +4082,7 @@ def run_manual_long_form_flow(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: GoogleCloudTTS,
+    tts: OpenAIEnglishNarrationTTS,
 ) -> tuple[str | None, str]:
     """Render one long-form video from a user idea. No due-gate, novelty, or resume gate. Returns (youtube_id, title)."""
     min_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
@@ -4129,7 +4142,7 @@ def run_manual_idea(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: GoogleCloudTTS,
+    tts: OpenAIEnglishNarrationTTS,
     social_tts: OpenAIShortVietnameseTTS,
 ) -> int:
     """Dispatch a manually submitted idea (from --idea text or a --idea-id queue row)."""
@@ -4231,7 +4244,7 @@ def main() -> int:
 
     images = VisualAssetProvider(settings)
     llm = OpenAITextClient(settings)
-    tts = GoogleCloudTTS(settings)
+    tts = OpenAIEnglishNarrationTTS(settings)
     social_tts = OpenAIShortVietnameseTTS(settings)
     if args.idea is not None or args.idea_id is not None:
         return run_manual_idea(args, settings, archive, llm, images, tts, social_tts)

@@ -575,7 +575,9 @@ def test_settings_reads_corner_overlay_video_options(monkeypatch):
     monkeypatch.setenv("OVERLAY_VIDEO_FILE", "assets/corner.mp4")
     monkeypatch.setenv("OVERLAY_VIDEO_SHORT_WIDTH", "176")
     monkeypatch.setenv("OVERLAY_VIDEO_LONG_FORM_WIDTH", "144")
-    monkeypatch.setenv("OVERLAY_VIDEO_MARGIN", "28")
+    monkeypatch.setenv("OVERLAY_VIDEO_RIGHT_MARGIN", "84")
+    monkeypatch.setenv("OVERLAY_VIDEO_BOTTOM_MARGIN", "28")
+    monkeypatch.setenv("OVERLAY_VIDEO_CORNER_RADIUS", "16")
     monkeypatch.setenv("OVERLAY_VIDEO_LOOP_GAP_SECONDS", "4.5")
 
     settings = bot.Settings.from_env()
@@ -583,7 +585,9 @@ def test_settings_reads_corner_overlay_video_options(monkeypatch):
     assert settings.overlay_video == bot.ROOT / "assets/corner.mp4"
     assert settings.overlay_video_short_width == 176
     assert settings.overlay_video_long_form_width == 144
-    assert settings.overlay_video_margin == 28
+    assert settings.overlay_video_right_margin == 84
+    assert settings.overlay_video_bottom_margin == 28
+    assert settings.overlay_video_corner_radius == 16
     assert settings.overlay_video_loop_gap_seconds == 4.5
 
 
@@ -599,14 +603,18 @@ def test_settings_reads_scheduled_daily_limit(monkeypatch):
     assert bot.Settings.from_env().scheduled_daily_limit == 6
 
 
-def test_settings_defaults_social_tts_to_openai_ash(monkeypatch):
+def test_settings_defaults_all_tts_to_openai_nova(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.delenv("OPENAI_TTS_VOICE", raising=False)
+    monkeypatch.delenv("OPENAI_TTS_SPEED", raising=False)
     monkeypatch.delenv("SOCIAL_OPENAI_TTS_VOICE", raising=False)
     monkeypatch.delenv("SOCIAL_OPENAI_TTS_SPEED", raising=False)
 
     settings = bot.Settings.from_env()
 
-    assert settings.social_openai_tts_voice == "ash"
+    assert settings.openai_tts_voice == "nova"
+    assert settings.openai_tts_speed == 1.0
+    assert settings.social_openai_tts_voice == "nova"
     assert settings.social_openai_tts_speed == 1.0
 
 
@@ -860,7 +868,10 @@ def test_mux_adds_logo_and_muted_corner_video(
     assert f"scale={logo_width}:-1" in filter_complex
     assert f"overlay=x=W-w-36:y={logo_top_margin}" in filter_complex
     assert f"scale={corner_width}:-2" in filter_complex
-    assert "overlay=x=W-w-36:y=H-h-36" in filter_complex
+    assert "overlay=x=W-w-96:y=H-h-36" in filter_complex
+    assert "geq=lum='p(X,Y)'" in filter_complex
+    assert "W/2-18" in filter_complex
+    assert "H/2-18" in filter_complex
     assert "eof_action=repeat:repeatlast=1" in filter_complex
     assert "format=rgba[logo]" in filter_complex
     assert command.count(str(corner_video)) == 1
@@ -1883,7 +1894,7 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
     monkeypatch.setattr(bot, "Archive", lambda: FakeArchive())
     monkeypatch.setattr(bot, "VisualAssetProvider", lambda settings: object())
     monkeypatch.setattr(bot, "OpenAITextClient", lambda settings: object())
-    monkeypatch.setattr(bot, "GoogleCloudTTS", lambda settings: object())
+    monkeypatch.setattr(bot, "OpenAIEnglishNarrationTTS", lambda settings: object())
 
     def fake_run_long_form_flow(**kwargs):
         called.update(kwargs)
@@ -1896,12 +1907,33 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
     assert called["publish"] is True
 
 
-def test_tts_language_code_supports_english_and_vietnamese_voices():
-    assert bot.GoogleCloudTTS.language_code_for_voice("en-US-Chirp3-HD-Enceladus") == "en-US"
-    assert bot.GoogleCloudTTS.language_code_for_voice("vi-VN-Standard-A") == "vi-VN"
+def test_openai_english_tts_uses_nova_and_emo_teenager_direction(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+        content = b"mp3-bytes"
+        text = ""
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(url=url, headers=headers, payload=json, timeout=timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    destination = tmp_path / "narration_en.mp3"
+    settings = bot.Settings(openai_api_key="openai")
+
+    bot.OpenAIEnglishNarrationTTS(settings).speech("A quiet but dramatic story.", destination)
+
+    assert destination.read_bytes() == b"mp3-bytes"
+    assert captured["payload"]["model"] == "gpt-4o-mini-tts"
+    assert captured["payload"]["voice"] == "nova"
+    assert captured["payload"]["speed"] == 1.0
+    assert "emo teenager vibe" in captured["payload"]["instructions"]
 
 
-def test_openai_short_vietnamese_tts_uses_gpt_4o_mini_tts(tmp_path, monkeypatch):
+def test_openai_short_vietnamese_tts_uses_nova_emo_voice(tmp_path, monkeypatch):
     captured = {}
 
     class FakeResponse:
@@ -1916,7 +1948,7 @@ def test_openai_short_vietnamese_tts_uses_gpt_4o_mini_tts(tmp_path, monkeypatch)
 
     monkeypatch.setattr(bot.requests, "post", fake_post)
     destination = tmp_path / "narration_vi.mp3"
-    settings = bot.Settings(openai_api_key="openai", social_openai_tts_voice="ash")
+    settings = bot.Settings(openai_api_key="openai")
 
     bot.OpenAIShortVietnameseTTS(settings).speech("Xin chào, đây là đoạn đọc tiếng Việt.", destination)
 
@@ -1924,9 +1956,9 @@ def test_openai_short_vietnamese_tts_uses_gpt_4o_mini_tts(tmp_path, monkeypatch)
     assert captured["url"] == "https://api.openai.com/v1/audio/speech"
     assert captured["headers"]["Authorization"] == "Bearer openai"
     assert captured["payload"]["model"] == "gpt-4o-mini-tts"
-    assert captured["payload"]["voice"] == "ash"
+    assert captured["payload"]["voice"] == "nova"
     assert captured["payload"]["speed"] == 1.0
-    assert "patient teacher" in captured["payload"]["instructions"]
+    assert "emo teenager vibe" in captured["payload"]["instructions"]
 
 
 def test_facebook_page_upload_posts_video(tmp_path, monkeypatch):

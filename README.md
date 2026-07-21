@@ -1,6 +1,6 @@
 # YouTube Shorts documentary bot
 
-Python bot tạo và đăng YouTube Shorts tiếng Anh cùng video dài 5–7 phút. Mỗi lượt chạy hoàn thành toàn bộ chu trình: GPT-5.4 mini nghiên cứu/kịch bản → GPT Image 2 và Brave Images tạo visual → Google Cloud Chirp 3 HD tạo narration → FFmpeg ghép → YouTube upload.
+Python bot tạo và đăng YouTube Shorts tiếng Anh cùng video dài 5–7 phút. Mỗi lượt chạy hoàn thành toàn bộ chu trình: GPT-5.4 mini nghiên cứu/kịch bản → GPT Image 2 và Brave Images tạo visual → OpenAI `gpt-4o-mini-tts` tạo narration → FFmpeg ghép → YouTube upload.
 
 Phần text gọi OpenAI Responses API bằng `gpt-5.4-mini`: reasoning `low` cho Shorts và `medium` cho video dài. Khi bật chia sẻ input/output cho đúng OpenAI Project, lưu lượng đủ điều kiện sẽ tự dùng hạn mức token miễn phí hằng ngày; không đưa bí mật hoặc dữ liệu riêng tư vào prompt. Phần tạo ảnh vẫn tính phí riêng và giữ `gpt-image-2` chất lượng `low`.
 
@@ -12,7 +12,7 @@ Brave chỉ giúp tìm ảnh, không tự cấp bản quyền sử dụng. Bot g
 
 Caption được burn-in bằng FFmpeg/ASS sau khi TTS tạo audio, không nhờ model video vẽ chữ. Bot chia narration thành cụm 3-6 từ, canh timing theo duration thực tế của MP3 sau bước chỉnh tempo, rồi lưu `captions_en.ass` và `captions_vi.ass` trong thư mục `generated/...` để dễ kiểm tra.
 
-Logo thương hiệu nền trong suốt từ `overlay-logo.png` được chèn xuyên suốt ở góc trên bên phải của Shorts, video dài và bản social. Video nhỏ đã tối ưu `360×640`, không có audio, được lưu tại `assets/overlay-video.mp4` và chèn ở góc dưới bên phải; mặc định rộng 180 px cho Short và 160 px cho video dài để không che nhiều nội dung chính. Asset được Git theo dõi và đóng gói cùng ứng dụng, nên cả Short, Long và bản thủ công đều dùng được mà không cần Railway Volume. Khi video đầu ra dài hơn overlay quá 5 giây, FFmpeg tự lặp overlay đủ thời lượng; với chênh lệch nhỏ, khung hình cuối được giữ lại thay vì phát lại từ đầu. Có thể chỉnh bằng các biến `OVERLAY_LOGO_*` và `OVERLAY_VIDEO_*`.
+Logo thương hiệu nền trong suốt từ `overlay-logo.png` được chèn xuyên suốt ở góc trên bên phải của Shorts, video dài và bản social. Video nhỏ đã tối ưu `360×640`, không có audio, được lưu tại `assets/overlay-video.mp4` và chèn ở góc dưới bên phải với góc bo nhẹ; mặc định rộng 180 px cho Short, 160 px cho video dài, cách mép phải 96 px và cách đáy 36 px để không bị dính sát cạnh. Asset được Git theo dõi và đóng gói cùng ứng dụng, nên cả Short, Long và bản thủ công đều dùng được mà không cần Railway Volume. Khi video đầu ra dài hơn overlay quá 5 giây, FFmpeg tự lặp overlay đủ thời lượng; với chênh lệch nhỏ, khung hình cuối được giữ lại thay vì phát lại từ đầu. Có thể chỉnh bằng các biến `OVERLAY_LOGO_*` và `OVERLAY_VIDEO_*`.
 
 Topic Short giữ đúng phong cách documentary về nhân vật và sự kiện lịch sử lớn, nền văn minh, chiến tranh, đế chế, kỳ quan thiên nhiên nổi tiếng, kiến trúc biểu tượng, công trình và địa danh quan trọng. Chi tiết nhỏ chỉ được dùng làm lăng kính để giải thích một chủ thể lớn; bot loại tai nạn địa phương, sự cố một công trình, trivia giật gân và giai thoại ít giá trị học hỏi. Thảm họa chỉ đủ điều kiện khi tạo ra ảnh hưởng lâu dài ở cấp quốc gia hoặc quốc tế. Mỗi ứng viên phải đạt tối thiểu 8/10 về tầm vóc chủ thể, ý nghĩa lịch sử và giá trị mở mang kiến thức trước khi được render. Bot không chọn chủ đề độc lập về phát minh/kỹ thuật, động vật, khảo cổ, khám phá khoa học hoặc thám hiểm không gian; chi tiết xây dựng chỉ được dùng để kể về một công trình hay kiến trúc cụ thể. Planner cũng loại góc lý thuyết, hành tinh giả định và ẩn dụ học thuật; không chuyển nội dung thành mẹo tiêu dùng. Video dài chỉ tập trung tin thế giới, chính trị, quân sự, kinh tế, công nghệ và thể thao; không lấy chủ đề khoa học.
 
@@ -77,7 +77,6 @@ Trên máy local, chạy từng lệnh sau. Mỗi lệnh đưa Base64 vào clipb
 Sau mỗi lệnh, trong Railway → **Variables** của service bot, tạo một variable rồi dán clipboard tương ứng:
 
 ```text
-GOOGLE_TTS_SERVICE_ACCOUNT_JSON_B64
 YOUTUBE_CLIENT_SECRETS_JSON_B64
 YOUTUBE_TOKEN_JSON_B64
 ```
@@ -112,15 +111,16 @@ OVERLAY_LOGO_LONG_FORM_TOP_MARGIN=36
 OVERLAY_VIDEO_FILE=assets/overlay-video.mp4
 OVERLAY_VIDEO_SHORT_WIDTH=180
 OVERLAY_VIDEO_LONG_FORM_WIDTH=160
-OVERLAY_VIDEO_MARGIN=36
+OVERLAY_VIDEO_RIGHT_MARGIN=96
+OVERLAY_VIDEO_BOTTOM_MARGIN=36
+OVERLAY_VIDEO_CORNER_RADIUS=18
 OVERLAY_VIDEO_LOOP_GAP_SECONDS=5
 SHORT_DURATION_SECONDS=60
 SCHEDULED_DAILY_LIMIT=2
-GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json
-GOOGLE_TTS_VOICE=en-US-Chirp3-HD-Enceladus
-GOOGLE_TTS_SPEAKING_RATE=1.05
+OPENAI_TTS_VOICE=nova
+OPENAI_TTS_SPEED=1.0
 # Vietnamese Short narration for Facebook/TikTok via OpenAI gpt-4o-mini-tts
-SOCIAL_OPENAI_TTS_VOICE=ash
+SOCIAL_OPENAI_TTS_VOICE=nova
 SOCIAL_OPENAI_TTS_SPEED=1.0
 YOUTUBE_CLIENT_SECRETS=client_secrets.json
 YOUTUBE_TOKEN_FILE=youtube_token.json
@@ -140,7 +140,7 @@ TIKTOK_DISABLE_STITCH=false
 
 `OPENAI_TEXT_ATTEMPTS`/`OPENAI_TEXT_RETRY_BACKOFF_SECONDS` và `OPENAI_IMAGE_ATTEMPTS`/`OPENAI_IMAGE_RETRY_BACKOFF_SECONDS` giúp cron chịu được lỗi mạng/rate-limit tạm thời. Chất lượng và kích thước GPT Image 2 không có biến môi trường để nâng lên, tránh vô tình tiêu credits ở mức `medium/high`.
 
-Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Voice tiếng Việt dùng OpenAI `gpt-4o-mini-tts` với mặc định `ash` và phong cách “patient teacher”; có thể đổi qua `SOCIAL_OPENAI_TTS_VOICE` và `SOCIAL_OPENAI_TTS_SPEED`. Trước khi gọi Brave hoặc GPT Image 2, bot luôn tạo audio tiếng Anh và lấy thời lượng thật làm timeline: các scene sẽ được co/giãn theo audio, nên không cần tạo lại voice chỉ để khớp thời lượng. Bản tiếng Việt cũng tự co/giãn từ visual đã có, không tạo thêm ảnh. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. Nếu Page token hết hạn hoặc bạn muốn bot tự lấy token Page mỗi lần chạy, đặt thêm `FACEBOOK_USER_ACCESS_TOKEN` là long-lived user token có quyền quản lý Page; bot sẽ gọi `/me/accounts` để lấy Page token khớp `FACEBOOK_PAGE_ID`. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
+Narration tiếng Anh của cả Short và Long dùng OpenAI `gpt-4o-mini-tts`, voice `nova`, với chỉ dẫn phong cách “emo teenager” thân mật, hơi trầm và giàu cảm xúc nhưng vẫn rõ ràng. Có thể đổi bằng `OPENAI_TTS_VOICE` và `OPENAI_TTS_SPEED`. Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Voice tiếng Việt cũng mặc định là `nova` với cùng phong cách; có thể đổi qua `SOCIAL_OPENAI_TTS_VOICE` và `SOCIAL_OPENAI_TTS_SPEED`. Trước khi gọi Brave hoặc GPT Image 2, bot luôn tạo audio tiếng Anh và lấy thời lượng thật làm timeline: các scene sẽ được co/giãn theo audio, nên không cần tạo lại voice chỉ để khớp thời lượng. Bản tiếng Việt cũng tự co/giãn từ visual đã có, không tạo thêm ảnh. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. Nếu Page token hết hạn hoặc bạn muốn bot tự lấy token Page mỗi lần chạy, đặt thêm `FACEBOOK_USER_ACCESS_TOKEN` là long-lived user token có quyền quản lý Page; bot sẽ gọi `/me/accounts` để lấy Page token khớp `FACEBOOK_PAGE_ID`. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
 
 Không thêm `BOT_DATA_DIR=.` vào Railway Variables: điều đó sẽ làm bot ghi dữ liệu vào filesystem tạm thay vì Volume. Để kiểm tra file trên Volume, Railway CLI hỗ trợ `railway volume files list /`.
 

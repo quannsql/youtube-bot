@@ -603,17 +603,17 @@ def test_settings_reads_scheduled_daily_limit(monkeypatch):
     assert bot.Settings.from_env().scheduled_daily_limit == 6
 
 
-def test_settings_defaults_all_tts_to_openai_nova(monkeypatch):
+def test_settings_defaults_english_to_google_leda_and_social_to_openai_nova(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
-    monkeypatch.delenv("OPENAI_TTS_VOICE", raising=False)
-    monkeypatch.delenv("OPENAI_TTS_SPEED", raising=False)
+    monkeypatch.delenv("GOOGLE_TTS_VOICE", raising=False)
+    monkeypatch.delenv("GOOGLE_TTS_SPEAKING_RATE", raising=False)
     monkeypatch.delenv("SOCIAL_OPENAI_TTS_VOICE", raising=False)
     monkeypatch.delenv("SOCIAL_OPENAI_TTS_SPEED", raising=False)
 
     settings = bot.Settings.from_env()
 
-    assert settings.openai_tts_voice == "nova"
-    assert settings.openai_tts_speed == 1.0
+    assert settings.google_tts_voice == "en-US-Chirp3-HD-Leda"
+    assert settings.google_tts_speaking_rate == 1.05
     assert settings.social_openai_tts_voice == "nova"
     assert settings.social_openai_tts_speed == 1.0
 
@@ -1894,7 +1894,7 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
     monkeypatch.setattr(bot, "Archive", lambda: FakeArchive())
     monkeypatch.setattr(bot, "VisualAssetProvider", lambda settings: object())
     monkeypatch.setattr(bot, "OpenAITextClient", lambda settings: object())
-    monkeypatch.setattr(bot, "OpenAIEnglishNarrationTTS", lambda settings: object())
+    monkeypatch.setattr(bot, "GoogleCloudTTS", lambda settings: object())
 
     def fake_run_long_form_flow(**kwargs):
         called.update(kwargs)
@@ -1907,30 +1907,8 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
     assert called["publish"] is True
 
 
-def test_openai_english_tts_uses_nova_and_emo_teenager_direction(tmp_path, monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        ok = True
-        status_code = 200
-        content = b"mp3-bytes"
-        text = ""
-
-    def fake_post(url, headers, json, timeout):
-        captured.update(url=url, headers=headers, payload=json, timeout=timeout)
-        return FakeResponse()
-
-    monkeypatch.setattr(bot.requests, "post", fake_post)
-    destination = tmp_path / "narration_en.mp3"
-    settings = bot.Settings(openai_api_key="openai")
-
-    bot.OpenAIEnglishNarrationTTS(settings).speech("A quiet but dramatic story.", destination)
-
-    assert destination.read_bytes() == b"mp3-bytes"
-    assert captured["payload"]["model"] == "gpt-4o-mini-tts"
-    assert captured["payload"]["voice"] == "nova"
-    assert captured["payload"]["speed"] == 1.0
-    assert "emo teenager vibe" in captured["payload"]["instructions"]
+def test_google_tts_language_code_supports_chirp_3_hd_leda():
+    assert bot.GoogleCloudTTS.language_code_for_voice("en-US-Chirp3-HD-Leda") == "en-US"
 
 
 def test_openai_short_vietnamese_tts_uses_nova_emo_voice(tmp_path, monkeypatch):

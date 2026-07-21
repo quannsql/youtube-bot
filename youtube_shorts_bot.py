@@ -104,6 +104,10 @@ def materialize_credential_file(env_name: str, destination: Path) -> None:
 
 def materialize_railway_credentials() -> None:
     materialize_credential_file(
+        "GOOGLE_TTS_SERVICE_ACCOUNT_JSON_B64",
+        DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
+    )
+    materialize_credential_file(
         "YOUTUBE_CLIENT_SECRETS_JSON_B64",
         DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
     )
@@ -197,8 +201,9 @@ class Settings:
     overlay_video_bottom_margin: int = 36
     overlay_video_corner_radius: int = 18
     overlay_video_loop_gap_seconds: float = 5.0
-    openai_tts_voice: str = "nova"
-    openai_tts_speed: float = 1.0
+    google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
+    google_tts_voice: str = "en-US-Chirp3-HD-Leda"
+    google_tts_speaking_rate: float = 1.05
     youtube_client_secrets: Path = DATA_DIR / "client_secrets.json"
     youtube_token: Path = DATA_DIR / "youtube_token.json"
     youtube_privacy: str = "private"
@@ -289,8 +294,14 @@ class Settings:
             overlay_video_loop_gap_seconds=max(
                 0.0, float(os.getenv("OVERLAY_VIDEO_LOOP_GAP_SECONDS", "5.0"))
             ),
-            openai_tts_voice=os.getenv("OPENAI_TTS_VOICE", "nova").strip() or "nova",
-            openai_tts_speed=min(4.0, max(0.25, float(os.getenv("OPENAI_TTS_SPEED", "1.0")))),
+            google_tts_service_account=DATA_DIR / os.getenv(
+                "GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"
+            ),
+            google_tts_voice=(
+                os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Leda").strip()
+                or "en-US-Chirp3-HD-Leda"
+            ),
+            google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
             youtube_client_secrets=DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
             youtube_token=DATA_DIR / os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
             youtube_privacy=os.getenv("YOUTUBE_PRIVACY_STATUS", "private"),
@@ -1276,6 +1287,54 @@ class VisualAssetProvider:
         return "openai"
 
 
+class GoogleCloudTTS:
+    """Google Cloud Text-to-Speech narration for English YouTube videos."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.s = settings
+
+    @staticmethod
+    def language_code_for_voice(voice: str) -> str:
+        parts = voice.split("-")
+        return "-".join(parts[:2]) if len(parts) >= 2 else voice
+
+    def speech(
+        self,
+        text: str,
+        destination: Path,
+        voice: str | None = None,
+        speaking_rate: float | None = None,
+    ) -> None:
+        if not self.s.google_tts_service_account.exists():
+            raise BotError(
+                "Thiếu service-account JSON cho Google TTS: "
+                f"{self.s.google_tts_service_account}. Xem README để tạo file này."
+            )
+        try:
+            from google.cloud import texttospeech
+        except ImportError as exc:
+            raise BotError("Thiếu google-cloud-texttospeech. Chạy: pip install -r requirements.txt") from exc
+        try:
+            selected_voice = voice or self.s.google_tts_voice
+            client = texttospeech.TextToSpeechClient.from_service_account_file(
+                str(self.s.google_tts_service_account)
+            )
+            response = client.synthesize_speech(
+                input=texttospeech.SynthesisInput(text=text),
+                voice=texttospeech.VoiceSelectionParams(
+                    language_code=self.language_code_for_voice(selected_voice),
+                    name=selected_voice,
+                ),
+                audio_config=texttospeech.AudioConfig(
+                    audio_encoding=texttospeech.AudioEncoding.MP3,
+                    speaking_rate=speaking_rate or self.s.google_tts_speaking_rate,
+                ),
+            )
+        except Exception as exc:
+            raise BotError(f"Google Cloud TTS không tạo được giọng đọc: {exc}") from exc
+        destination.write_bytes(response.audio_content)
+
+
 class OpenAITTS:
     """OpenAI speech generation with a flow-specific voice direction."""
 
@@ -1321,24 +1380,6 @@ class OpenAITTS:
         if not response.content:
             raise BotError(f"OpenAI TTS ({self.label}) trả audio rỗng.")
         destination.write_bytes(response.content)
-
-
-class OpenAIEnglishNarrationTTS(OpenAITTS):
-    """Nova narration for English YouTube Shorts and long-form videos."""
-
-    def __init__(self, settings: Settings) -> None:
-        super().__init__(
-            settings,
-            voice=settings.openai_tts_voice,
-            speed=settings.openai_tts_speed,
-            instructions=(
-                "Speak in natural American English with an emo teenager vibe: intimate, slightly moody, "
-                "emotionally honest, and conversational. Keep the documentary narration clear and controlled, "
-                "with subtle dramatic tension and natural pauses. Avoid caricature, exaggerated whining, "
-                "breathiness, or singing. Do not add, omit, or change any words."
-            ),
-            label="English narration",
-        )
 
 
 class OpenAIShortVietnameseTTS(OpenAITTS):
@@ -2895,7 +2936,7 @@ def split_text_for_tts(text: str, max_chars: int = 3800) -> list[str]:
 
 
 def synthesize_narration(
-    tts: OpenAIEnglishNarrationTTS,
+    tts: GoogleCloudTTS,
     text: str,
     destination: Path,
     output_dir: Path,
@@ -2947,7 +2988,7 @@ def rescale_scene_durations(plan: ShortPlan, target_duration: float, label: str)
 
 def prepare_short_english_narration(
     plan: ShortPlan,
-    tts: OpenAIEnglishNarrationTTS,
+    tts: GoogleCloudTTS,
     output_dir: Path,
 ) -> tuple[Path, float]:
     narration = output_dir / "narration.mp3"
@@ -2958,7 +2999,7 @@ def prepare_short_english_narration(
 
 def prepare_long_form_narration(
     plan: ShortPlan,
-    tts: OpenAIEnglishNarrationTTS,
+    tts: GoogleCloudTTS,
     output_dir: Path,
 ) -> tuple[Path, float]:
     narration = output_dir / "long_narration.mp3"
@@ -3927,7 +3968,7 @@ def run_long_form_flow(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: OpenAIEnglishNarrationTTS,
+    tts: GoogleCloudTTS,
     force_new: bool = False,
 ) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -4021,7 +4062,7 @@ def run_manual_short_flow(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: OpenAIEnglishNarrationTTS,
+    tts: GoogleCloudTTS,
     social_tts: OpenAIShortVietnameseTTS,
 ) -> tuple[str | None, str]:
     """Render one Short from a user idea. No daily-limit, novelty, or resume gate. Returns (youtube_id, title)."""
@@ -4082,7 +4123,7 @@ def run_manual_long_form_flow(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: OpenAIEnglishNarrationTTS,
+    tts: GoogleCloudTTS,
 ) -> tuple[str | None, str]:
     """Render one long-form video from a user idea. No due-gate, novelty, or resume gate. Returns (youtube_id, title)."""
     min_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
@@ -4142,7 +4183,7 @@ def run_manual_idea(
     archive: Archive,
     llm: OpenAITextClient,
     images: VisualAssetProvider,
-    tts: OpenAIEnglishNarrationTTS,
+    tts: GoogleCloudTTS,
     social_tts: OpenAIShortVietnameseTTS,
 ) -> int:
     """Dispatch a manually submitted idea (from --idea text or a --idea-id queue row)."""
@@ -4244,7 +4285,7 @@ def main() -> int:
 
     images = VisualAssetProvider(settings)
     llm = OpenAITextClient(settings)
-    tts = OpenAIEnglishNarrationTTS(settings)
+    tts = GoogleCloudTTS(settings)
     social_tts = OpenAIShortVietnameseTTS(settings)
     if args.idea is not None or args.idea_id is not None:
         return run_manual_idea(args, settings, archive, llm, images, tts, social_tts)

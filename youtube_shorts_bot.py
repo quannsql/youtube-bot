@@ -194,6 +194,11 @@ class Settings:
     overlay_logo_margin: int = 36
     overlay_logo_short_top_margin: int = 72
     overlay_logo_long_form_top_margin: int = 36
+    overlay_video: Path = ROOT / "assets" / "overlay-video.mp4"
+    overlay_video_short_width: int = 180
+    overlay_video_long_form_width: int = 160
+    overlay_video_margin: int = 36
+    overlay_video_loop_gap_seconds: float = 5.0
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
     google_tts_voice: str = "en-US-Chirp3-HD-Enceladus"
     google_tts_speaking_rate: float = 1.05
@@ -221,6 +226,9 @@ class Settings:
         overlay_logo = Path(os.getenv("OVERLAY_LOGO_FILE", "overlay-logo.png"))
         if not overlay_logo.is_absolute():
             overlay_logo = ROOT / overlay_logo
+        overlay_video = Path(os.getenv("OVERLAY_VIDEO_FILE", "assets/overlay-video.mp4"))
+        if not overlay_video.is_absolute():
+            overlay_video = ROOT / overlay_video
         if not openai_api_key:
             raise BotError("Thiếu OPENAI_API_KEY cho OpenAI text và GPT Image 2.")
         duration = duration_override or int(os.getenv("SHORT_DURATION_SECONDS", "60"))
@@ -275,6 +283,13 @@ class Settings:
             overlay_logo_margin=max(0, int(os.getenv("OVERLAY_LOGO_MARGIN", "36"))),
             overlay_logo_short_top_margin=max(0, int(os.getenv("OVERLAY_LOGO_SHORT_TOP_MARGIN", "72"))),
             overlay_logo_long_form_top_margin=max(0, int(os.getenv("OVERLAY_LOGO_LONG_FORM_TOP_MARGIN", "36"))),
+            overlay_video=overlay_video,
+            overlay_video_short_width=max(64, int(os.getenv("OVERLAY_VIDEO_SHORT_WIDTH", "180"))),
+            overlay_video_long_form_width=max(64, int(os.getenv("OVERLAY_VIDEO_LONG_FORM_WIDTH", "160"))),
+            overlay_video_margin=max(0, int(os.getenv("OVERLAY_VIDEO_MARGIN", "36"))),
+            overlay_video_loop_gap_seconds=max(
+                0.0, float(os.getenv("OVERLAY_VIDEO_LOOP_GAP_SECONDS", "5.0"))
+            ),
             google_tts_service_account=DATA_DIR / os.getenv("GOOGLE_TTS_SERVICE_ACCOUNT_FILE", "google_tts_service_account.json"),
             google_tts_voice=os.getenv("GOOGLE_TTS_VOICE", "en-US-Chirp3-HD-Enceladus"),
             google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
@@ -2718,21 +2733,42 @@ def mux_video_audio_with_captions(
     logo = settings.overlay_logo
     if not logo.is_file():
         raise BotError(f"Không tìm thấy logo overlay: {logo}")
+    corner_video = settings.overlay_video
+    if not corner_video.is_file():
+        raise BotError(f"Không tìm thấy video overlay: {corner_video}")
+
     logo_width = (
         settings.overlay_logo_long_form_width
         if long_form
         else settings.overlay_logo_short_width
     )
-    margin = settings.overlay_logo_margin
-    top_margin = (
+    corner_video_width = (
+        settings.overlay_video_long_form_width
+        if long_form
+        else settings.overlay_video_short_width
+    )
+    logo_margin = settings.overlay_logo_margin
+    corner_video_margin = settings.overlay_video_margin
+    logo_top_margin = (
         settings.overlay_logo_long_form_top_margin
         if long_form
         else settings.overlay_logo_short_top_margin
     )
+    corner_video_duration = media_duration(corner_video)
+    if corner_video_duration <= 0:
+        raise BotError(f"Video overlay không có thời lượng hợp lệ: {corner_video}")
+    should_loop_corner_video = (
+        target_duration - corner_video_duration > settings.overlay_video_loop_gap_seconds
+    )
+
     video_filter = (
         f"[0:v]{ass_video_filter(captions)}[base];"
         f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
-        f"[base][logo]overlay=x=W-w-{margin}:y={top_margin}:format=auto,format=yuv420p[v];"
+        f"[base][logo]overlay=x=W-w-{logo_margin}:y={logo_top_margin}:format=auto[branded];"
+        f"[3:v]scale={corner_video_width}:-2:flags=lanczos,setsar=1,format=yuva420p[corner];"
+        f"[branded][corner]overlay=x=W-w-{corner_video_margin}:"
+        f"y=H-h-{corner_video_margin}:eof_action=repeat:repeatlast=1:"
+        "format=auto,format=yuv420p[v];"
         f"[1:a]apad=pad_dur={target_duration}[a]"
     )
     command = [
@@ -2740,6 +2776,22 @@ def mux_video_audio_with_captions(
         "-i", str(visuals),
         "-i", str(narration),
         "-loop", "1", "-i", str(logo),
+    ]
+    if should_loop_corner_video:
+        command.extend(["-stream_loop", "-1"])
+        LOG.info(
+            "Looping %.2fs corner overlay video to cover %.2fs output.",
+            corner_video_duration,
+            target_duration,
+        )
+    else:
+        LOG.info(
+            "Using %.2fs corner overlay video once for %.2fs output; the final frame fills any small gap.",
+            corner_video_duration,
+            target_duration,
+        )
+    command.extend([
+        "-i", str(corner_video),
         "-filter_complex", video_filter,
         "-map", "[v]",
         "-map", "[a]",
@@ -2750,7 +2802,7 @@ def mux_video_audio_with_captions(
         "-c:a", "aac",
         "-movflags", "+faststart",
         str(output),
-    ]
+    ])
     if timeout_seconds is None:
         run(command)
     else:

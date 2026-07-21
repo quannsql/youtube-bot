@@ -570,6 +570,23 @@ def test_settings_accepts_48_second_duration(monkeypatch):
     assert settings.text_long_form_reasoning_effort == "medium"
 
 
+def test_settings_reads_corner_overlay_video_options(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.setenv("OVERLAY_VIDEO_FILE", "assets/corner.mp4")
+    monkeypatch.setenv("OVERLAY_VIDEO_SHORT_WIDTH", "176")
+    monkeypatch.setenv("OVERLAY_VIDEO_LONG_FORM_WIDTH", "144")
+    monkeypatch.setenv("OVERLAY_VIDEO_MARGIN", "28")
+    monkeypatch.setenv("OVERLAY_VIDEO_LOOP_GAP_SECONDS", "4.5")
+
+    settings = bot.Settings.from_env()
+
+    assert settings.overlay_video == bot.ROOT / "assets/corner.mp4"
+    assert settings.overlay_video_short_width == 176
+    assert settings.overlay_video_long_form_width == 144
+    assert settings.overlay_video_margin == 28
+    assert settings.overlay_video_loop_gap_seconds == 4.5
+
+
 def test_audio_led_short_keeps_word_target_as_guidance_not_a_hard_gate():
     assert bot.target_narration_word_bounds(60) == (180, 207)
     assert bot.narration_word_bounds(60) == (90, 244)
@@ -792,36 +809,61 @@ def test_publish_long_form_uploads_the_prepared_custom_thumbnail(tmp_path, monke
 
 
 @pytest.mark.parametrize(
-    ("long_form", "expected_width", "expected_top_margin"),
-    [(False, 220, 72), (True, 220, 36)],
+    ("long_form", "target_duration", "logo_width", "logo_top_margin", "corner_width", "expect_loop"),
+    [
+        (False, 60, 220, 72, 180, False),
+        (True, 300, 220, 36, 160, True),
+    ],
 )
-def test_mux_adds_transparent_logo_at_top_right(
-    tmp_path, monkeypatch, long_form, expected_width, expected_top_margin
+def test_mux_adds_logo_and_muted_corner_video(
+    tmp_path,
+    monkeypatch,
+    long_form,
+    target_duration,
+    logo_width,
+    logo_top_margin,
+    corner_width,
+    expect_loop,
 ):
     logo = tmp_path / "overlay-logo.png"
     logo.write_bytes(b"png")
+    corner_video = tmp_path / "corner.mp4"
+    corner_video.write_bytes(b"video")
     captured = {}
+    monkeypatch.setattr(bot, "media_duration", lambda path: 56.006 if path == corner_video else 0)
     monkeypatch.setattr(bot, "run", lambda command: captured.setdefault("command", command))
-    settings = bot.Settings(openai_api_key="openai", overlay_logo=logo)
+    settings = bot.Settings(
+        openai_api_key="openai",
+        overlay_logo=logo,
+        overlay_video=corner_video,
+    )
 
     bot.mux_video_audio_with_captions(
         tmp_path / "visuals.mp4",
         tmp_path / "narration.mp3",
         tmp_path / "captions.ass",
         tmp_path / "output.mp4",
-        60,
+        target_duration,
         settings,
         long_form=long_form,
     )
 
     command = captured["command"]
     filter_complex = command[command.index("-filter_complex") + 1]
-    assert command[command.index("-loop"):command.index("-filter_complex")] == [
-        "-loop", "1", "-i", str(logo)
-    ]
-    assert f"scale={expected_width}:-1" in filter_complex
-    assert f"overlay=x=W-w-36:y={expected_top_margin}" in filter_complex
+    logo_input = command.index(str(logo))
+    assert command[logo_input - 3:logo_input + 1] == ["-loop", "1", "-i", str(logo)]
+    assert command[command.index(str(corner_video)) - 1] == "-i"
+    assert ("-stream_loop" in command) is expect_loop
+    if expect_loop:
+        loop_option = command.index("-stream_loop")
+        assert command[loop_option:loop_option + 3] == ["-stream_loop", "-1", "-i"]
+    assert f"scale={logo_width}:-1" in filter_complex
+    assert f"overlay=x=W-w-36:y={logo_top_margin}" in filter_complex
+    assert f"scale={corner_width}:-2" in filter_complex
+    assert "overlay=x=W-w-36:y=H-h-36" in filter_complex
+    assert "eof_action=repeat:repeatlast=1" in filter_complex
     assert "format=rgba[logo]" in filter_complex
+    assert command.count(str(corner_video)) == 1
 
 
 def test_mux_requires_overlay_logo(tmp_path, monkeypatch):
@@ -829,6 +871,27 @@ def test_mux_requires_overlay_logo(tmp_path, monkeypatch):
     settings = bot.Settings(openai_api_key="openai", overlay_logo=tmp_path / "missing.png")
 
     with pytest.raises(bot.BotError, match="Không tìm thấy logo overlay"):
+        bot.mux_video_audio_with_captions(
+            tmp_path / "visuals.mp4",
+            tmp_path / "narration.mp3",
+            tmp_path / "captions.ass",
+            tmp_path / "output.mp4",
+            60,
+            settings,
+        )
+
+
+def test_mux_requires_corner_overlay_video(tmp_path, monkeypatch):
+    logo = tmp_path / "overlay-logo.png"
+    logo.write_bytes(b"png")
+    monkeypatch.setattr(bot, "run", lambda _command: pytest.fail("ffmpeg must not run"))
+    settings = bot.Settings(
+        openai_api_key="openai",
+        overlay_logo=logo,
+        overlay_video=tmp_path / "missing.mp4",
+    )
+
+    with pytest.raises(bot.BotError, match="Không tìm thấy video overlay"):
         bot.mux_video_audio_with_captions(
             tmp_path / "visuals.mp4",
             tmp_path / "narration.mp3",
@@ -1604,6 +1667,8 @@ def test_long_form_render_uses_lighter_scene_scale_and_timeout(tmp_path, monkeyp
     bot.long_form_image_path(tmp_path, 1).write_bytes(b"i" * 2048)
     logo = tmp_path / "overlay-logo.png"
     logo.write_bytes(b"p" * 2048)
+    corner_video = tmp_path / "corner.mp4"
+    corner_video.write_bytes(b"v" * 2048)
     commands = []
 
     def fake_run(command, timeout_seconds=None):
@@ -1612,13 +1677,14 @@ def test_long_form_render_uses_lighter_scene_scale_and_timeout(tmp_path, monkeyp
 
     monkeypatch.setattr(bot, "require_tools", lambda: None)
     monkeypatch.setattr(bot, "long_form_clip_ready", lambda *_args: False)
+    monkeypatch.setattr(bot, "media_duration", lambda _path: 10.0)
     monkeypatch.setattr(bot, "run", fake_run)
 
     bot.render_long_form_from_assets(
         plan,
         tmp_path,
         10,
-        bot.Settings(overlay_logo=logo),
+        bot.Settings(overlay_logo=logo, overlay_video=corner_video),
         tmp_path / "long_narration.mp3",
         10,
     )
@@ -1645,6 +1711,8 @@ def test_long_form_render_replaces_an_unrenderable_scene_with_previous_visual(tm
     second_image.write_bytes(b"second" * 512)
     logo = tmp_path / "overlay-logo.png"
     logo.write_bytes(b"p" * 2048)
+    corner_video = tmp_path / "corner.mp4"
+    corner_video.write_bytes(b"v" * 2048)
     failed_once = False
 
     def fake_run(command, timeout_seconds=None):
@@ -1657,13 +1725,14 @@ def test_long_form_render_replaces_an_unrenderable_scene_with_previous_visual(tm
 
     monkeypatch.setattr(bot, "require_tools", lambda: None)
     monkeypatch.setattr(bot, "long_form_clip_ready", lambda *_args: False)
+    monkeypatch.setattr(bot, "media_duration", lambda _path: 10.0)
     monkeypatch.setattr(bot, "run", fake_run)
 
     bot.render_long_form_from_assets(
         plan,
         tmp_path,
         20,
-        bot.Settings(overlay_logo=logo),
+        bot.Settings(overlay_logo=logo, overlay_video=corner_video),
         tmp_path / "long_narration.mp3",
         20,
     )
@@ -1681,10 +1750,12 @@ def test_short_form_render_uses_lighter_scene_scale_and_timeout(tmp_path, monkey
     })
     logo = tmp_path / "overlay-logo.png"
     logo.write_bytes(b"p" * 2048)
+    corner_video = tmp_path / "corner.mp4"
+    corner_video.write_bytes(b"v" * 2048)
     commands = []
 
     class FakeImages:
-        s = bot.Settings(overlay_logo=logo)
+        s = bot.Settings(overlay_logo=logo, overlay_video=corner_video)
 
         def image(self, *_args, **kwargs):
             kwargs["destination"].write_bytes(b"i" * 2048)
@@ -1722,10 +1793,12 @@ def test_short_form_render_replaces_an_unrenderable_scene_with_previous_visual(t
     second_image.write_bytes(b"second" * 512)
     logo = tmp_path / "overlay-logo.png"
     logo.write_bytes(b"p" * 2048)
+    corner_video = tmp_path / "corner.mp4"
+    corner_video.write_bytes(b"v" * 2048)
     failed_once = False
 
     class FakeImages:
-        s = bot.Settings(overlay_logo=logo)
+        s = bot.Settings(overlay_logo=logo, overlay_video=corner_video)
 
         def image(self, *_args, **_kwargs):
             pytest.fail("Existing images must be reused")

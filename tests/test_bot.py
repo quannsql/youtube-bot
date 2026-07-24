@@ -202,46 +202,16 @@ def test_archive_blocks_rephrased_long_form_subject(tmp_path):
     assert archive.same_long_form_subject_as(candidate) is not None
 
 
-def test_long_form_lane_avoids_recent_lanes(monkeypatch):
-    past = [
-        {"topic": "Trump Iran strikes and Strait of Hormuz risk", "angle": "Military escalation", "title": "Iran Strikes"},
-        {"topic": "OpenAI Codex keyboard", "angle": "Consumer technology", "title": "OpenAI Hardware"},
-    ]
-    monkeypatch.setattr(bot.random, "choice", lambda candidates: candidates[0])
+def test_long_form_explainer_category_avoids_repeats_within_run():
+    first = bot.choose_long_form_explainer_category()
+    assert first in bot.LONG_FORM_EXPLAINER_CATEGORIES
 
-    lane = bot.choose_long_form_editorial_lane(past)
+    # When every category but the last is excluded, the helper must pick that last one.
+    excluded = set(bot.LONG_FORM_EXPLAINER_CATEGORIES[:-1])
+    assert bot.choose_long_form_explainer_category(excluded) == bot.LONG_FORM_EXPLAINER_CATEGORIES[-1]
 
-    assert lane not in {"conflicts_defense", "technology"}
-
-
-def test_long_form_news_context_is_filtered_to_assigned_lane():
-    context = [
-        {"category": "world", "title": "World headline"},
-        {"category": "business", "title": "Business headline"},
-        {"category": "technology", "title": "Technology headline"},
-        {"category": "sports", "title": "Sports headline"},
-    ]
-
-    assert bot.news_context_for_lane(context, "technology") == [context[2]]
-    assert bot.news_context_for_lane(context, "conflicts_defense") == [context[0]]
-
-
-def test_fresh_news_context_drops_recently_covered_subjects(monkeypatch):
-    monkeypatch.setattr(bot.random, "shuffle", lambda items: None)
-    past = [{
-        "topic": "US Iran escalation and the Strait of Hormuz",
-        "angle": "Military escalation",
-        "title": "Iran Strikes Put Hormuz Back at Risk",
-    }]
-    covered = bot.recent_long_form_subject_texts(past)
-    context = [
-        {"category": "world", "title": "Strait of Hormuz shipping halted as Iran tensions rise", "summary": ""},
-        {"category": "world", "title": "Spain floods force mass evacuations", "summary": ""},
-    ]
-
-    fresh = bot.fresh_news_context_for_lane(context, "conflicts_defense", covered)
-
-    assert fresh == [context[1]]
+    # If all are excluded it still returns a valid category rather than crashing.
+    assert bot.choose_long_form_explainer_category(set(bot.LONG_FORM_EXPLAINER_CATEGORIES)) in bot.LONG_FORM_EXPLAINER_CATEGORIES
 
 
 def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
@@ -479,38 +449,6 @@ def test_choose_novel_plan_retries_abstract_candidate(tmp_path, monkeypatch):
 
     assert result == concrete
     assert "editorial_rejection" in rejected_seen[1][0]
-
-
-def test_long_form_news_feeds_exclude_science(monkeypatch):
-    requested_urls = []
-
-    class FakeResponse:
-        def __init__(self, content):
-            self.content = content
-
-        def raise_for_status(self):
-            return None
-
-    def fake_get(url, **_kwargs):
-        requested_urls.append(url)
-        unique_title = f"Headline from feed {len(requested_urls)}"
-        rss = (
-            f"<rss><channel><item><title>{unique_title}</title>"
-            "<description>Concrete public impact</description>"
-            "<pubDate>Tue, 14 Jul 2026 06:00:00 GMT</pubDate>"
-            "<link>https://example.com</link></item></channel></rss>"
-        ).encode()
-        return FakeResponse(rss)
-
-    monkeypatch.setattr(bot.requests, "get", fake_get)
-
-    context = bot.fetch_trending_news_context(limit=5)
-
-    assert len(requested_urls) == 5
-    assert all("SCIENCE" not in url for url in requested_urls)
-    assert {item["category"] for item in context} == {"top", "world", "business", "technology", "sports"}
-    assert all(item["published"] for item in context)
-    assert all("science" not in domain.lower() for domain in bot.LONG_FORM_TOPIC_DOMAINS)
 
 
 def test_archive_counts_jobs_created_today(tmp_path):
@@ -1238,36 +1176,36 @@ def test_split_text_for_tts_chunks_long_script():
     assert all(len(chunk) <= 560 for chunk in chunks)
 
 
-def test_plan_long_form_accepts_current_events_documentary(tmp_path):
+def test_plan_long_form_builds_educational_explainer(tmp_path):
     narration = (
-        "This shipping shock is now bigger than one canal. "
-            + " ".join("Energy prices, insurance costs, rerouted ships, and military risk are changing global trade." for _ in range(77))
-        + " The real story is not one headline, but the fragile map underneath modern commerce."
+        "Before farming existed, early humans survived on skill alone. "
+        + " ".join("They hunted large animals together and gathered wild plants, roots, and berries to stay alive." for _ in range(77))
+        + " Every meal was earned by knowing the land better than any predator."
     )
     plan = {
-        "topic": "Red Sea shipping disruption",
-        "angle": "How rerouted ships expose fragile trade networks",
-        "title": "The Shipping Crisis Rewriting Global Trade",
-        "description": "A current-events documentary explainer. AI-assisted production. #Economy #Geopolitics",
-        "tags": ["Economy", "Geopolitics"],
-        "hook": "This shipping shock is now bigger than one canal.",
+        "topic": "How prehistoric humans survived",
+        "angle": "The daily survival skills of early humans",
+        "title": "How Prehistoric Humans Actually Survived",
+        "description": "An educational explainer. AI-assisted production. #History #Prehistory",
+        "tags": ["History", "Prehistory"],
+        "hook": "Before farming existed, early humans survived on skill alone.",
         "narration": narration,
-        "closing_line": "The real story is not one headline, but the fragile map underneath modern commerce.",
+        "closing_line": "Every meal was earned by knowing the land better than any predator.",
         "scenes": [
-            {"duration": 75, "visual_prompt": "A container ship crossing rough open water at sunrise."},
-            {"duration": 75, "visual_prompt": "A port crane silhouetted against a busy global shipping terminal."},
-            {"duration": 75, "visual_prompt": "An abstract insurance ledger beside a nautical chart without readable text."},
-            {"duration": 75, "visual_prompt": "A wide documentary view of stacked containers under storm clouds."},
+            {"duration": 75, "visual_prompt": "Stick-figure hunters throwing spears at a stick-figure mammoth near a cave."},
+            {"duration": 75, "visual_prompt": "A stick figure gathering berries into a woven basket beside bushes."},
+            {"duration": 75, "visual_prompt": "Stick figures making fire with sticks around a small campfire."},
+            {"duration": 75, "visual_prompt": "A stick-figure family walking across open grassland toward distant hills."},
         ],
-        "fact_note": "Avoids precise casualty, price, or route claims not in the supplied context.",
-        "source_hints": ["Google News RSS shipping headlines"],
+        "fact_note": "Stays qualitative; avoids invented dates or numbers.",
+        "source_hints": ["General prehistory knowledge"],
     }
 
     class FakeClient:
         def __init__(self):
             self.responses = [
                 plan,
-                {"quality_check": {"timeliness_score": 8, "clarity_score": 9}, "plan": plan},
+                {"quality_check": {"clarity_score": 9, "engagement_score": 8}, "plan": plan},
             ]
 
         def chat(self, _prompt, temperature=0.55, reasoning_effort=None):
@@ -1276,54 +1214,42 @@ def test_plan_long_form_accepts_current_events_documentary(tmp_path):
     result = bot.plan_long_form(
         FakeClient(),
         bot.Archive(tmp_path / "shorts.db"),
-        "global current events",
+        "educational explainer channel",
         300,
         4,
         4,
-        [{"category": "world", "title": "Shipping routes face renewed pressure", "summary": "Global route disruptions continue."}],
+        bot.LONG_FORM_EXPLAINER_CATEGORIES[1],
     )
 
     assert result.title == plan["title"]
     assert sum(scene.duration for scene in result.scenes) == 300
 
 
-def test_plan_long_form_expands_too_short_script(tmp_path):
-    short_plan = {
-        "topic": "Global chip export controls",
-        "angle": "Why supply chains are adapting",
-        "title": "The Chip Rule Reshaping Tech Supply Chains",
-        "description": "A current-events documentary explainer. AI-assisted production. #Technology #Economy",
-        "tags": ["Technology", "Economy"],
-        "hook": "The chip race is no longer just about faster devices.",
-        "narration": "The chip race is no longer just about faster devices. " + "Supply chains are changing. " * 90 + "The next shortage may begin long before a factory runs out of parts.",
-        "closing_line": "The next shortage may begin long before a factory runs out of parts.",
+def test_plan_long_form_explainer_meets_word_budget(tmp_path):
+    plan = {
+        "topic": "How the Earth formed",
+        "angle": "From a spinning dust cloud to a living planet",
+        "title": "How the Earth Formed From a Cloud of Dust",
+        "description": "An educational explainer. AI-assisted production. #Earth #Science",
+        "tags": ["Earth", "Science"],
+        "hook": "The ground under your feet began as a spinning cloud of dust.",
+        "narration": "The ground under your feet began as a spinning cloud of dust. " + "Gravity slowly pulled dust and rock together until a young planet took shape. " * 60 + "Over billions of years that hot ball of rock became the living world we know.",
+        "closing_line": "Over billions of years that hot ball of rock became the living world we know.",
         "scenes": [
-            {"duration": 75, "visual_prompt": "A horizontal documentary view of a semiconductor cleanroom corridor."},
-            {"duration": 75, "visual_prompt": "A cargo terminal with sealed electronics containers at dusk."},
-            {"duration": 75, "visual_prompt": "A symbolic circuit board beside a world map without readable labels."},
-            {"duration": 75, "visual_prompt": "A wide shot of industrial machinery under cool light."},
+            {"duration": 75, "visual_prompt": "A stick-figure narrator pointing at a swirling cloud of dust and rock in space."},
+            {"duration": 75, "visual_prompt": "Simple rocks clumping together into a small round planet, flat vector style."},
+            {"duration": 75, "visual_prompt": "A glowing molten planet slowly cooling into solid ground."},
+            {"duration": 75, "visual_prompt": "A stick figure standing on green grass under a blue sky."},
         ],
-        "fact_note": "Avoids unsupported company-specific claims.",
-        "source_hints": ["Technology RSS headlines"],
+        "fact_note": "Stays qualitative; avoids invented precise ages.",
+        "source_hints": ["General earth-science knowledge"],
     }
-    expanded_plan = dict(short_plan)
-    expanded_plan["narration"] = (
-        expanded_plan["hook"]
-        + " "
-        + " ".join(
-            "Governments, manufacturers, cloud companies, and equipment suppliers are all adjusting because advanced chips now sit inside military systems, data centers, vehicles, phones, and industrial machines."
-            for _ in range(36)
-        )
-        + " "
-        + expanded_plan["closing_line"]
-    )
 
     class FakeClient:
         def __init__(self):
             self.responses = [
-                short_plan,
-                {"quality_check": {"timeliness_score": 8, "clarity_score": 8}, "plan": short_plan},
-                {"plan": expanded_plan},
+                plan,
+                {"quality_check": {"clarity_score": 9, "engagement_score": 8}, "plan": plan},
             ]
 
         def chat(self, _prompt, temperature=0.55, reasoning_effort=None):
@@ -1332,11 +1258,11 @@ def test_plan_long_form_expands_too_short_script(tmp_path):
     result = bot.plan_long_form(
         FakeClient(),
         bot.Archive(tmp_path / "shorts.db"),
-        "global current events",
+        "educational explainer channel",
         300,
         4,
         4,
-        [{"category": "technology", "title": "Chip rules reshape supply chains", "summary": "Technology companies adapt."}],
+        bot.LONG_FORM_EXPLAINER_CATEGORIES[3],
     )
 
     assert bot.spoken_word_count(result.narration) >= bot.long_form_word_bounds(300)[0]

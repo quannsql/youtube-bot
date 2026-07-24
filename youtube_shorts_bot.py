@@ -172,7 +172,10 @@ class Settings:
     image_attempts: int = 3
     image_retry_backoff_seconds: int = 10
     brave_web_images_per_short: int = 2
-    brave_web_images_per_long_form: int = 5
+    # Stick-figure explainer long-form generates every beat as an illustration by
+    # default; real web photos are fetched only for scenes the planner tags with a
+    # search_query (a genuinely famous real place/landmark/artifact).
+    brave_web_images_per_long_form: int = 0
     long_form_openai_images: int = 10
     language: str = "en"
     duration: int = 20
@@ -224,7 +227,7 @@ class Settings:
     @classmethod
     def from_env(cls, duration_override: int | None = None) -> "Settings":
         openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        brave_long_form_images = min(10, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "5"))))
+        brave_long_form_images = min(10, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "0"))))
         overlay_logo = Path(os.getenv("OVERLAY_LOGO_FILE", "overlay-logo.png"))
         if not overlay_logo.is_absolute():
             overlay_logo = ROOT / overlay_logo
@@ -1425,20 +1428,22 @@ IMAGE_STYLE_SUFFIX = (
 )
 
 LONG_FORM_IMAGE_STYLE_SUFFIX = (
-    "cinematic photorealistic documentary photograph, natural lighting, "
-    "wide establishing composition, ultra-detailed, sharp focus, 8k, horizontal 16:9"
+    "minimalist stick-figure line illustration, simple black stick-figure people with clear expressive poses, "
+    "clean flat vector style, bold outlines, plain solid pastel background, simple recognizable props and scenery, "
+    "friendly educational explainer illustration, horizontal 16:9, no text, no words, no letters"
 )
 
 LONG_FORM_VISUAL_STYLE_RULES = (
-    "Write each visual_prompt as one concrete, self-contained sentence for a horizontal 16:9 documentary image. "
-    "Use broadcast documentary variety: wide establishing shots, maps without readable labels, symbolic still lifes, "
-    "infrastructure details, screens without legible text, satellite-like views, and contextual crowd-free scenes. "
-    "In visual_prompt avoid readable text, logos, graphic injury, close-up human faces, dense crowds, and names of real people "
-    "(the image generator rejects real public figures). "
-    "Separately, give every scene a search_query: a short literal news-photo search phrase that DOES name the real person, "
-    "place, organization, or object of that beat (e.g. 'Volodymyr Zelenskyy official portrait', 'Ukraine defence ministry building Kyiv'), "
-    "so the pipeline can fetch a real licensed photo of the actual subject first. Scene 1's search_query must name the story's "
-    "central person or place, because scene 1 becomes the thumbnail. "
+    "This is a stick-figure EXPLAINER channel. Write each visual_prompt as one concrete, self-contained sentence describing a "
+    "MINIMALIST STICK-FIGURE illustration that literally acts out what the narration covers at this exact beat: show the specific "
+    "action, people, animals, objects, and setting as simple black stick figures in clear poses, plus a few simple recognizable "
+    "props and scenery so the idea reads instantly (e.g. 'stick-figure hunters throwing spears at a stick-figure mammoth beside a "
+    "cave', 'a stick figure gathering berries into a woven basket', 'a stick-figure king handing a scroll to a kneeling stick figure'). "
+    "Vary the composition and the number of figures between scenes and keep each image easy to read at a glance. "
+    "In visual_prompt avoid readable text, logos, and the names of real people; show roles and actions instead (a king, a soldier, an early human, a scientist). "
+    "Give a scene a search_query ONLY when a real photo of a genuinely famous real PLACE, landmark, building, map, or artifact would "
+    "help the explanation (e.g. 'Great Pyramid of Giza', 'Western Wall Jerusalem', 'Colosseum Rome'); leave search_query empty for "
+    "ordinary actions, people, animals, and concepts, which must stay stick-figure illustrations. Most beats should be stick-figure illustrations. "
     "Do not mention Vietnam, Vietnamese people, Vietnamese officials, or Vietnam-related locations."
 )
 
@@ -1447,115 +1452,32 @@ VIETNAM_BLOCKLIST = (
     "da nang", "nguyen", "pham", "tran ", "vo ", "to lam",
 )
 
-LONG_FORM_TOPIC_DOMAINS = (
-    "global politics and elections outside Vietnam",
-    "wars, military affairs, defense, and geopolitics",
-    "global economy, business, trade, and markets",
-    "consumer technology, cybersecurity, AI industry, and major tech companies",
-    "major international sports",
-    "major world news with clear public impact",
+LONG_FORM_EXPLAINER_CATEGORIES = (
+    "Human history and civilizations, ancient to modern: how a people, empire, kingdom, dynasty, or era lived, rose, or fell.",
+    "Prehistory and early humans: how prehistoric people and early humans survived — hunting, gathering, fire, tools, shelter, clothing, and migration.",
+    "Peoples, cultures, and religions: the origin, journey, beliefs, and defining moments of a people or faith, explained factually and respectfully.",
+    "Earth, nature, and science explainers: how the Earth, its oceans, continents, climate, or life formed and how a major natural force works.",
+    "The universe and space: how the cosmos, stars, planets, or the solar system came to be and how they work.",
+    "Wars, battles, revolutions, and turning points, past or present: what happened, why it happened, and what changed.",
+    "Notable figures, past or present: who they were, what they did, and why they still matter.",
+    "Major events and phenomena, past or present: a clear explanation of what happened and why it mattered.",
+    "Origins and how things came to be: how world-shaping things and ideas — writing, money, cities, farming, trade, great inventions, institutions — actually began and spread.",
 )
 
-# The Shorts --theme default is history-flavoured; long-form is a current-events
-# news digest, so it gets its own default theme unless the user overrides --theme.
+# Long-form is an educational explainer channel with stick-figure visuals, so it
+# gets its own default theme unless the user overrides --theme.
 LONG_FORM_DEFAULT_THEME = (
-    "an international current-events news digest rotating across global politics, "
-    "conflicts and defense, economy and business, technology, major sports, and "
-    "consequential world news"
+    "an educational explainer channel that clearly explains events, subjects, and how things came to be — "
+    "across human history and civilizations, prehistory and early humans, peoples and cultures, the Earth and "
+    "nature, space, wars and turning points, and notable figures and events, past and present"
 )
 
-LONG_FORM_EDITORIAL_LANES = {
-    "politics_elections": {
-        "label": "global politics, elections, governments, diplomacy, or major policy decisions",
-        "feed_categories": ("top", "world"),
-    },
-    "conflicts_defense": {
-        "label": "wars, military affairs, defense, and geopolitics",
-        "feed_categories": ("world", "top"),
-    },
-    "economy_business": {
-        "label": "global economy, business, trade, markets, companies, or consumer costs",
-        "feed_categories": ("business",),
-    },
-    "technology": {
-        "label": "consumer technology, cybersecurity, AI industry, or major technology companies",
-        "feed_categories": ("technology",),
-    },
-    "sports": {
-        "label": "major international sports with broad public interest",
-        "feed_categories": ("sports",),
-    },
-    "global_headlines": {
-        "label": "major world news with clear public impact outside politics, war, business, tech, and sports",
-        "feed_categories": ("top", "world"),
-    },
-}
 
-LONG_FORM_LANE_KEYWORDS = {
-    "politics_elections": (
-        "ballot", "campaign", "congress", "diplomat", "election", "government",
-        "law", "minister", "parliament", "policy", "politic", "president",
-        "senate", "summit", "trump", "vote",
-    ),
-    "conflicts_defense": (
-        "army", "attack", "ceasefire", "defense", "drone", "geopolit", "hormuz",
-        "iran", "israel", "military", "missile", "nato", "navy", "nuclear",
-        "russia", "strike", "troop", "ukraine", "war",
-    ),
-    "economy_business": (
-        "airline", "bank", "business", "company", "consumer", "cost", "econom",
-        "finance", "fuel", "inflation", "market", "oil", "price", "shipping",
-        "stock", "trade",
-    ),
-    "technology": (
-        "ai ", "android", "apple", "chip", "codex", "cyber", "google", "microsoft",
-        "openai", "semiconductor", "software", "tech", "xbox",
-    ),
-    "sports": (
-        "athlete", "basketball", "championship", "cup", "fifa", "final", "football",
-        "game", "league", "match", "nba", "nfl", "olympic", "soccer", "sport",
-        "team", "tournament",
-    ),
-    "global_headlines": (
-        "accident", "aviation", "crash", "disaster", "earthquake", "evacuation",
-        "flood", "heatwave", "outage", "rescue", "storm", "wildfire",
-    ),
-}
-
-
-def classify_long_form_lane(text: str) -> str:
-    normalized = f" {unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode().lower()} "
-    scores = {
-        lane: sum(1 for keyword in keywords if keyword in normalized)
-        for lane, keywords in LONG_FORM_LANE_KEYWORDS.items()
-    }
-    best_lane = max(scores, key=scores.get)
-    return best_lane if scores[best_lane] else "global_headlines"
-
-
-def choose_long_form_editorial_lane(
-    past: list[dict[str, str]],
-    excluded: set[str] | None = None,
-) -> str:
+def choose_long_form_explainer_category(excluded: set[str] | None = None) -> str:
+    """Pick an explainer topic area, avoiding the ones already tried this run."""
     excluded = set(excluded or ())
-    recent_lanes = [
-        classify_long_form_lane(f"{row.get('topic', '')} {row.get('angle', '')} {row.get('title', '')}")
-        for row in past[:3]
-    ]
-    candidates = [
-        lane for lane in LONG_FORM_EDITORIAL_LANES
-        if lane not in excluded and lane not in recent_lanes
-    ]
-    if not candidates:
-        candidates = [lane for lane in LONG_FORM_EDITORIAL_LANES if lane not in excluded]
-    if not candidates:
-        candidates = list(LONG_FORM_EDITORIAL_LANES)
-    return random.choice(candidates)
-
-
-def news_context_for_lane(news_context: list[dict[str, str]], lane: str) -> list[dict[str, str]]:
-    categories = set(LONG_FORM_EDITORIAL_LANES[lane]["feed_categories"])
-    return [item for item in news_context if item.get("category") in categories]
+    candidates = [category for category in LONG_FORM_EXPLAINER_CATEGORIES if category not in excluded]
+    return random.choice(candidates or list(LONG_FORM_EXPLAINER_CATEGORIES))
 
 
 def recent_long_form_subject_texts(past: list[dict[str, str]], limit: int = 12) -> list[str]:
@@ -1568,32 +1490,6 @@ def recent_long_form_subject_texts(past: list[dict[str, str]], limit: int = 12) 
         if text:
             subjects.append(text)
     return subjects
-
-
-def news_item_covers_recent_subject(item: dict[str, str], covered_subjects: list[str]) -> bool:
-    headline_words = long_form_subject_words(f"{item.get('title', '')} {item.get('summary', '')}")
-    return any(
-        len(headline_words & long_form_subject_words(subject)) >= 2
-        for subject in covered_subjects
-    )
-
-
-def fresh_news_context_for_lane(
-    news_context: list[dict[str, str]],
-    lane: str,
-    covered_subjects: list[str],
-) -> list[dict[str, str]]:
-    """Lane headlines minus recently covered subjects, in random order.
-
-    Shuffling matters: the model anchors on the first (loudest) headline, which
-    is how one dominant story ends up in every video.
-    """
-    fresh = [
-        item for item in news_context_for_lane(news_context, lane)
-        if not news_item_covers_recent_subject(item, covered_subjects)
-    ]
-    random.shuffle(fresh)
-    return fresh
 
 
 CURIOSITY_TOPIC_CATEGORIES = [
@@ -1635,22 +1531,6 @@ MINOR_SHORT_STORY_TERMS = (
     "one tank failed",
     "small town disaster",
     "underbuilt tank",
-)
-
-SCIENCE_NEWS_BLOCKLIST = (
-    "archaeologists",
-    "archaeology",
-    "asteroid",
-    "clinical trial",
-    "exoplanet",
-    "fossil discovery",
-    "medical study",
-    "nasa mission",
-    "new species",
-    "researchers discover",
-    "scientists discover",
-    "space telescope",
-    "study finds",
 )
 
 # Trục ĐỊNH DẠNG kể chuyện — độc lập với chủ đề, quyết định "kiểu" video để phá thế đơn điệu.
@@ -1724,18 +1604,18 @@ PLAN_SCHEMA = '''{
 }'''
 
 LONG_FORM_PLAN_SCHEMA = '''{
-  "topic":"specific current global topic, not related to Vietnam",
+  "topic":"specific subject/event/process to explain, not related to Vietnam",
   "angle":"specific explanatory angle with broad viewer appeal",
-  "title":"<=100 chars, English, clickable but factual, explicitly names the main person/place/event/company/route",
+  "title":"<=100 chars, English, clickable but factual, explicitly names the main subject/people/event/place/figure",
   "thumbnail_text":"2-5 words, names the same main subject for large thumbnail text",
   "description":"English YouTube description with exactly 2 hashtags and a brief AI-assisted disclosure",
   "tags":["exactly 2 tags"],
   "hook":"first spoken sentence, <=18 words",
   "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=18 words",
-  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 documentary image prompt for this chapter beat","search_query":"2-6 word literal news photo search naming the real person, place, organization, or object of this beat (e.g. 'Zelenskyy press conference Kyiv'); empty string only for purely conceptual beats"}],
+  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 stick-figure illustration prompt that literally acts out this beat (specific stick-figure people, actions, props, and setting)","search_query":"leave empty for stick-figure beats; set to a 2-5 word photo search ONLY for a genuinely famous real place, landmark, building, map, or artifact (e.g. 'Great Pyramid of Giza')"}],
   "fact_note":"what uncertainty was preserved or avoided",
-  "source_hints":["headline/source lead used from the supplied news context"]
+  "source_hints":["credible general-knowledge lead for later verification"]
 }'''
 
 RESEARCH_SCHEMA = '''{
@@ -1775,55 +1655,6 @@ def clean_feed_text(value: str) -> str:
     value = re.sub(r"<[^>]+>", " ", value)
     value = re.sub(r"&(?:amp|quot|apos|lt|gt);", " ", value)
     return re.sub(r"\s+", " ", value).strip()
-
-
-def fetch_trending_news_context(limit: int = 28) -> list[dict[str, str]]:
-    feeds = {
-        "top": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
-        "world": "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en",
-        "business": "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
-        "technology": "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en",
-        "sports": "https://news.google.com/rss/headlines/section/topic/SPORTS?hl=en-US&gl=US&ceid=US:en",
-    }
-    items: list[dict[str, str]] = []
-    seen: set[str] = set()
-    per_feed_limit = max(1, (limit + len(feeds) - 1) // len(feeds))
-    for category, url in feeds.items():
-        try:
-            response = requests.get(url, timeout=(10, 30))
-            response.raise_for_status()
-            root = ET.fromstring(response.content)
-        except Exception as exc:
-            LOG.warning("Could not fetch %s news RSS: %s", category, exc)
-            continue
-        category_items = 0
-        for item in root.findall(".//item"):
-            title = clean_feed_text(item.findtext("title") or "")
-            summary = clean_feed_text(item.findtext("description") or "")
-            link = clean_feed_text(item.findtext("link") or "")
-            published = clean_feed_text(item.findtext("pubDate") or "")
-            normalized_news = f"{title} {summary}".lower()
-            if (
-                not title
-                or mentions_vietnam(normalized_news)
-                or any(term in normalized_news for term in SCIENCE_NEWS_BLOCKLIST)
-            ):
-                continue
-            key = re.sub(r"\W+", "", title.lower())[:90]
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append({
-                "category": category,
-                "title": title[:220],
-                "summary": summary[:320],
-                "published": published[:80],
-                "link": link[:300],
-            })
-            category_items += 1
-            if category_items >= per_feed_limit:
-                break
-    return items[:limit]
 
 
 def fetch_news_for_idea(idea: str, limit: int = 12) -> list[dict[str, str]]:
@@ -2142,56 +1973,48 @@ def plan_long_form(
     duration: int,
     min_scenes: int,
     max_scenes: int,
-    news_context: list[dict[str, str]] | None = None,
+    topic_category: str | None = None,
     rejected: list[dict[str, str]] | None = None,
-    editorial_lane: str = "global_headlines",
     covered_subjects: list[str] | None = None,
 ) -> ShortPlan:
     past = archive.recent_long_form_context()
     rejected = rejected or []
-    news_context = news_context or []
     covered_subjects = covered_subjects if covered_subjects is not None else recent_long_form_subject_texts(past)
-    lane_label = LONG_FORM_EDITORIAL_LANES[editorial_lane]["label"]
+    topic_category = topic_category or random.choice(list(LONG_FORM_EXPLAINER_CATEGORIES))
     target_min_words, target_max_words = target_long_form_word_bounds(duration)
     min_words, max_words = long_form_word_bounds(duration)
     scene_count = random.randint(min_scenes, max_scenes)
     target_scene_duration = round(duration / scene_count, 2)
-    prompt = f'''Act as a senior YouTube news-digest producer and factual script editor.
-Create ONE English long-form news-digest video plan for a horizontal 16:9 video.
+    prompt = f'''Act as a senior educational explainer writer and factual script editor for a stick-figure explainer YouTube channel.
+Create ONE English long-form explainer video plan for a horizontal 16:9 video that clearly explains a single subject, event, people, place, or process so a general viewer walks away understanding it.
 Target duration: exactly {duration} seconds, about {duration // 60} to {round(duration / 60, 1)} minutes.
 Theme: {theme}
-Allowed domains: {", ".join(LONG_FORM_TOPIC_DOMAINS)}.
-Assigned editorial lane for this run: {lane_label}.
-Fresh news context from public RSS headlines: {json.dumps(news_context, ensure_ascii=False)}
+Assigned topic area for this run: {topic_category}
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Recently covered subjects (temporary cooldown list): {json.dumps(covered_subjects, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
 
 Hard rules:
-- Do NOT choose any topic, event, person, location, company, political figure, sports figure, or public controversy related to Vietnam.
-- COOLDOWN RULE: Do not choose any story whose central subject, person, country pair, strait, route, company, conflict, policy, or event overlaps the recently covered subjects list above, even with a completely new angle or consequence. The channel must not publish the same subject twice in a row; pick a genuinely different subject.
-- Stay inside the assigned editorial lane. Choose from its supplied headlines; do not switch back to a recently covered lane merely because it has a louder headline.
-- Shortlist at least three viable headlines with DIFFERENT central subjects from the news context, then pick one of them at random rather than automatically taking the biggest or most dramatic story. Variety across videos matters more than always covering the single loudest headline.
-- Use the supplied news context as leads. If the context is thin, choose a globally relevant current topic in the same assigned lane that does not overlap the cooldown list, and explicitly keep claims broad.
-- Cover ONLY politics, elections, wars, military affairs, geopolitics, economics, business, trade, markets, consumer technology, cybersecurity, the AI industry, major sports, or major world news. Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries even if they appear in a top-news feed.
-- Do not invent quotes, casualty numbers, market numbers, scores, dates, or source names not present in the context.
-- The result must feel timely, clickable, practical, surprising, and broad-interest, but not sensationalized.
-- Select a story with a concrete change: who acted, what changed, who pays or benefits, what viewers should watch next, and why it matters now. Reject routine speeches, procedural updates, and abstract policy theory with no visible consequence.
-- NOVELTY REQUIREMENT: Do not reuse the same central person, country pair, place, route, company, conflict, policy, event, or sports team from the existing archive or rejected candidates, even with a different consequence or angle. If a candidate shares the same central subject, choose a genuinely different headline.
-- TITLE REQUIREMENT: The title must explicitly name the central person, country, place, route, company, conflict, policy, event, or sports team — not only its consequence. Put that concrete subject early when possible. Set thumbnail_text to 2-5 bold words that name the same central subject; never use a vague slogan.
-- Use a save/share test: the viewer should finish with at least one clear consequence, comparison, warning sign, or next development they can explain to someone else.
-- FORMAT: a {duration // 60}-minute NEWS DIGEST, not a deep-dive documentary. Structure: immediate headline payoff, what just happened, essential background in one short chapter, who is affected, one or two brief analysis beats, what to watch next, quick close. Keep analysis light and concrete; skip extended history lessons, competing-interpretation essays, and theory.
-- HOOK: the first spoken sentence must be a specific, scroll-stopping statement that names the concrete subject and the stakes. No vague throat-clearing like "The world is changing" — front-load the single most surprising or consequential fact so a viewer knows in five seconds exactly who and what this is about.
-- CLARITY: write plain, vivid spoken English for a general viewer with no background. One clear idea per sentence, define any name or term the moment it first appears, and use concrete cause-and-effect and everyday comparisons instead of jargon or abstract analysis. A distracted viewer must be able to follow it on the first listen.
+- Pick ONE clear, specific, fascinating subject inside the assigned topic area — for example how prehistoric humans survived, the story and journey of the Jewish people, how the Earth formed, a famous war or its turning point, or how a world-changing thing came to be. Subjects may be historical OR present-day.
+- Do NOT center the video on Vietnam or any Vietnam-related person, place, or event.
+- COOLDOWN RULE: Do not choose a subject that overlaps the recently covered subjects, the existing archive, or the rejected candidates above, even with a new angle. Pick a genuinely different subject each time.
+- This is EXPLAINER content, not a news bulletin. Actually teach the viewer: what it is, who/where/when, how it happened or works step by step, and why it matters.
+- STRUCTURE: a strong hook, then clear chapters that build in logical order — set the scene (context) → explain the core in simple, concrete steps → show why it matters → a memorable close. Escalate curiosity; keep every chapter concrete and easy to picture.
+- ACCURACY: rely on well-established general knowledge. Do NOT invent precise statistics, dates, quotations, casualty numbers, or source names. Stay qualitative when a precise figure is uncertain; never fabricate facts or citations.
+- Treat sensitive peoples, cultures, and religions with respect and neutrality: explain and inform, never judge, mock, or push a viewpoint.
+- HOOK: the first spoken sentence must be a specific, scroll-stopping statement that names the concrete subject and the intriguing question. No vague throat-clearing like "History is full of mysteries" — front-load the single most surprising or important idea.
+- CLARITY: write plain, vivid spoken English for a general viewer with no background. One clear idea per sentence, define any name or term the moment it first appears, and use concrete cause-and-effect and everyday comparisons instead of jargon. A distracted viewer must be able to follow it on the first listen.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
+- TITLE REQUIREMENT: the title must explicitly name the concrete subject (the people, event, place, figure, or process), not only a vague promise. Put that subject early. Set thumbnail_text to 2-5 bold words that name the same subject; never use a vague slogan.
+- Use a save/share test: the viewer should finish able to explain the subject to a friend in a sentence or two.
 - WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words and treat {target_max_words} as a hard ceiling — the timeline follows the narration audio, so every extra 100 words adds about 40 seconds to the video. Never pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
 - Visuals: {LONG_FORM_VISUAL_STYLE_RULES}
-- It is acceptable for later scenes to reuse a visual concept if the narration has moved to a new argument, but still provide a visual_prompt for every scene.
+- It is acceptable for later scenes to reuse a visual concept if the narration has moved to a new point, but still provide a visual_prompt for every scene.
 
 Return raw JSON only using exactly this schema:
 {LONG_FORM_PLAN_SCHEMA}'''
-    LOG.info("Writing long-form current-events documentary plan...")
+    LOG.info("Writing long-form educational explainer plan...")
     draft = ShortPlan.from_dict(
         extract_json(
             llm.chat(
@@ -2201,30 +2024,27 @@ Return raw JSON only using exactly this schema:
             )
         )
     )
-    review_prompt = f'''Act as the final long-form news, fact, usefulness, and retention editor. Return only JSON.
-Improve the draft below for a {duration}-second horizontal YouTube news digest.
+    review_prompt = f'''Act as the final explainer, fact, clarity, and retention editor. Return only JSON.
+Improve the draft below into a stronger {duration}-second horizontal YouTube explainer video.
 Return exactly:
-{{"quality_check":{{"timeliness_score":1,"clarity_score":1,"public_relevance_score":1,"shareability_score":1,"surprise_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{LONG_FORM_PLAN_SCHEMA}}}
+{{"quality_check":{{"clarity_score":1,"engagement_score":1,"completeness_score":1,"accuracy_risk":"short note","changes":["short note"]}},"plan":{LONG_FORM_PLAN_SCHEMA}}}
 
 Rules:
-- Reject or rewrite any Vietnam-related topic, person, event, or location.
-- Keep the assigned editorial lane: {lane_label}. Do not replace the draft with a story from another lane.
-- Reject a draft that repeats the same central person, country pair, place, route, company, conflict, policy, event, or sports team from the archive, the rejected candidates, or this cooldown list of recently covered subjects: {json.dumps(covered_subjects, ensure_ascii=False)}. A new angle or consequence does not make a repeated subject acceptable.
-- Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries. Keep only politics, military affairs, economics, business, technology industry, sports, or consequential world news.
-- Keep only claims supportable by the supplied RSS context or clearly phrased as general background.
-- Reject routine announcements or abstract theory unless the script can name the concrete change, affected people, real-world consequence, and what happens next.
-- The hook (first spoken sentence) must be a specific, scroll-stopping statement that names the concrete subject and the stakes, not vague throat-clearing; rewrite any weak or generic opening. Then keep clear chapters with escalation, practical explanation, a surprising but supported payoff, and a reason viewers would save or share the video. The title must explicitly name the central person/place/event/company/route, and thumbnail_text must be 2-5 words that name that same subject rather than a vague teaser.
-- Rewrite any sentence a general viewer could not follow on first listen: prefer plain spoken English, one idea per sentence, defined terms, and concrete comparisons over jargon or abstract analysis.
+- Reject or rewrite any Vietnam-related subject, person, event, or location.
+- Reject a draft that repeats a subject from the archive, the rejected candidates, or this cooldown list of recently covered subjects: {json.dumps(covered_subjects, ensure_ascii=False)}. A new angle does not make a repeated subject acceptable.
+- Keep only well-established, general-knowledge claims; cut any invented statistic, date, quotation, casualty number, or source name, and stay qualitative when a figure is uncertain.
+- Treat sensitive peoples, cultures, and religions with respect and neutrality; explain, never judge or push a viewpoint.
+- The hook (first spoken sentence) must be a specific, scroll-stopping statement that names the concrete subject and the intriguing question, not vague throat-clearing; rewrite any weak opening. Then keep clear chapters that build understanding step by step, a satisfying payoff, and a reason viewers would save or share the video. The title must explicitly name the concrete subject, and thumbnail_text must be 2-5 words that name that same subject rather than a vague teaser.
+- Rewrite any sentence a general viewer could not follow on first listen: prefer plain spoken English, one idea per sentence, defined terms, and concrete comparisons over jargon.
 - The narration must begin with hook and end with closing_line.
-- The scenes must total exactly {duration} seconds and be horizontal 16:9 visual prompts.
-- Keep the news-digest format: light, concrete analysis only — no extended history or theory chapters.
+- The scenes must total exactly {duration} seconds and be stick-figure explainer visual prompts (with a real-photo search_query only for genuinely famous real places, landmarks, or artifacts).
+- Keep it a clear explainer that teaches the subject; do not turn it into a dry list or an abstract essay.
 - Aim for roughly {target_min_words}-{target_max_words} words. If the draft narration exceeds {target_max_words} words, cut secondary detail until it fits; the final video length follows the narration audio directly. Never pad with filler.
 
-News context: {json.dumps(news_context, ensure_ascii=False)}
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
-    LOG.info("Quality pass: checking long-form timeliness, structure, and Vietnam exclusion...")
+    LOG.info("Quality pass: checking long-form clarity, structure, and Vietnam exclusion...")
     reviewed = extract_json(
         llm.chat(
             review_prompt,
@@ -2241,11 +2061,11 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     validate_long_form_plan(plan, duration, min_words, max_words, scene_count)
     quality = reviewed.get("quality_check", {})
     LOG.info(
-        "Long-form plan ready: %r (%d scenes, %d words, timeliness %s/10).",
+        "Long-form explainer plan ready: %r (%d scenes, %d words, clarity %s/10).",
         plan.title,
         len(plan.scenes),
         spoken_word_count(plan.narration),
-        quality.get("timeliness_score", "?"),
+        quality.get("clarity_score", "?"),
     )
     return plan
 
@@ -2260,26 +2080,12 @@ def choose_novel_long_form_plan(
     max_attempts: int = 4,
 ) -> ShortPlan | None:
     rejected: list[dict[str, str]] = []
-    all_news_context = fetch_trending_news_context()
     past = archive.recent_long_form_context()
     covered_subjects = recent_long_form_subject_texts(past)
-    attempted_lanes: set[str] = set()
-    attempts = 0
-    while attempts < max_attempts:
-        editorial_lane = choose_long_form_editorial_lane(past, attempted_lanes)
-        attempted_lanes.add(editorial_lane)
-        news_context = fresh_news_context_for_lane(all_news_context, editorial_lane, covered_subjects)
-        if (
-            not news_context
-            and all_news_context
-            and len(attempted_lanes) < len(LONG_FORM_EDITORIAL_LANES)
-        ):
-            LOG.info(
-                "No fresh %s headlines left after the recent-subject cooldown; switching lane.",
-                editorial_lane,
-            )
-            continue
-        attempts += 1
+    attempted_categories: set[str] = set()
+    for _attempt in range(1, max_attempts + 1):
+        topic_category = choose_long_form_explainer_category(attempted_categories)
+        attempted_categories.add(topic_category)
         plan = plan_long_form(
             llm,
             archive,
@@ -2287,9 +2093,8 @@ def choose_novel_long_form_plan(
             duration,
             min_scenes,
             max_scenes,
-            news_context,
+            topic_category,
             rejected,
-            editorial_lane,
             covered_subjects,
         )
         duplicate = archive.same_long_form_subject_as(plan)
@@ -2300,7 +2105,7 @@ def choose_novel_long_form_plan(
         rejected.append(rejection_context(plan, duplicate))
         print(
             f"Long-form subject duplicated ({duplicate['title']!r}); "
-            "switching editorial lane and requesting a different story..."
+            "requesting a different explainer topic..."
         )
     return None
 
@@ -2371,16 +2176,8 @@ def plan_long_form_from_idea(
     scene_count = random.randint(min_scenes, max_scenes)
     target_scene_duration = round(duration / scene_count, 2)
     news_context = fetch_news_for_idea(user_idea)
-    manual_visual_rules = (
-        "Write each visual_prompt as one concrete, self-contained sentence for a horizontal 16:9 documentary image. "
-        "Use broadcast documentary variety: wide establishing shots, maps without readable labels, symbolic still lifes, "
-        "infrastructure details, screens without legible text, satellite-like views, and contextual crowd-free scenes. "
-        "In visual_prompt avoid readable text, logos, graphic injury, close-up human faces, dense crowds, and names of real "
-        "people (the image generator rejects real public figures). "
-        "Separately, give every scene a search_query: a short literal photo-search phrase that DOES name the real person, "
-        "place, organization, or object of that beat, so the pipeline can fetch a real licensed photo first. Scene 1's "
-        "search_query must name the story's central person or place, because scene 1 becomes the thumbnail."
-    )
+    # Keep the manual (user-idea) long-form videos in the same stick-figure explainer style as the auto flow.
+    manual_visual_rules = LONG_FORM_VISUAL_STYLE_RULES
     prompt = f'''Act as a senior YouTube long-form documentary writer and factual script editor.
 Create ONE English long-form video plan for a horizontal 16:9 video.
 Target duration: exactly {duration} seconds, about {duration // 60} to {round(duration / 60, 1)} minutes.

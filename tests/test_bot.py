@@ -265,26 +265,21 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "Ancient Gears Predicted Eclipses" in prompts[0]
     assert "Rejected candidates from this run" in prompts[0]
     assert "Ancient Greek Gears That Predicted Eclipses" in prompts[0]
-    assert "Clickability filter" in prompts[0]
-    assert "viewer_question" in prompts[0]
-    assert "procedural report" in prompts[0]
-    assert "low-stakes" in prompts[0]
-    assert "Concrete/retellability test" in prompts[0]
-    assert "classroom theory" in prompts[0]
+    assert "COMPARISON YouTube Short" in prompts[0]
     assert "Fame & clarity gate" in prompts[0]
     assert "subject_fame_score" in prompts[0]
-    assert "quirky local incident" in prompts[0]
-    assert "viewer_question, stakes, and thumbnail_hint" in prompts[1]
-    assert "viewer_payoff" in prompts[1]
-    assert "FAME & CLARITY REQUIREMENT" in prompts[1]
+    assert "Neutrality" in prompts[0]
+    assert "OPPOSING or rival" in prompts[0]
+    assert "COMPARISON YouTube Short" in prompts[1]
+    assert "subject_a" in prompts[1]
     assert "TITLE REQUIREMENT" in prompts[1]
     assert "thumbnail_text" in prompts[1]
-    assert "worth remembering or sharing" in prompts[1]
-    assert "photorealistic" in prompts[1]
-    assert "Preserve this visual direction" in prompts[2]
-    assert "dry topics that lack a strong concrete story" in prompts[2]
-    assert "obscure local incidents" in prompts[2]
-    assert "concreteness_score" in prompts[2]
+    assert '"focus"' in prompts[1]
+    assert "NEUTRALITY" in prompts[1]
+    assert "fairness_score" in prompts[2]
+    assert "NEUTRALITY" in prompts[2]
+    assert '"focus"' in prompts[2]
+    assert "subject_a_image_query" in prompts[2]
 
 
 def test_choose_novel_plan_passes_duplicate_candidate_to_retry(tmp_path, monkeypatch):
@@ -401,23 +396,26 @@ def test_short_editorial_filter_accepts_famous_present_day_subject():
     assert bot.short_editorial_rejection_reason(plan) is None
 
 
-def test_short_categories_mix_famous_past_and_present():
-    categories = " ".join(bot.CURIOSITY_TOPIC_CATEGORIES).lower()
+def test_short_categories_are_diverse_comparison_matchups():
+    categories = " ".join(bot.COMPARISON_TOPIC_CATEGORIES).lower()
 
-    # Famous subjects from the PAST are still covered.
-    assert "historical figures" in categories
-    assert "major historical events" in categories
-    assert "natural wonders" in categories
-    # ...and famous subjects from the PRESENT are now covered too.
-    assert "today" in categories
-    assert "companies" in categories
-    assert "record-breaking" in categories
-    # Still excludes low-value consumer-tip and clickbait drift.
-    assert "money and consumer surprises" not in categories
-    assert "shopping" not in categories
-    assert "scams" not in categories
-    assert "consumer tips" not in categories
-    assert "astronomy" not in categories
+    # Every category is a two-subject comparison ("vs" / rival / opposing).
+    assert len(bot.COMPARISON_TOPIC_CATEGORIES) >= 5
+    assert " vs " in categories
+    for keyword in ("rival", "brands", "political", "places", "technolog", "everyday"):
+        assert keyword in categories
+    # The user's example matchups appear as guidance.
+    assert "coca-cola vs pepsi" in categories
+    assert "republicans vs democrats" in categories
+    assert "north pole vs south pole" in categories
+
+
+def test_get_random_topic_rule_requests_two_neutral_subjects():
+    rule = bot.get_random_topic_rule()
+    assert "COMPARISON" in rule
+    assert "TWO" in rule
+    assert "neutral" in rule.lower()
+    assert "winner" in rule.lower()  # instructs NOT to declare a winner
 
 
 def test_choose_novel_plan_retries_abstract_candidate(tmp_path, monkeypatch):
@@ -790,28 +788,12 @@ def test_publish_long_form_uploads_the_prepared_custom_thumbnail(tmp_path, monke
     assert captured["kwargs"]["thumbnail"] == thumbnail
 
 
-@pytest.mark.parametrize(
-    ("long_form", "target_duration", "logo_width", "logo_top_margin", "corner_width", "expect_loop"),
-    [
-        (False, 60, 220, 72, 180, False),
-    ],
-)
-def test_mux_adds_logo_and_muted_corner_video(
-    tmp_path,
-    monkeypatch,
-    long_form,
-    target_duration,
-    logo_width,
-    logo_top_margin,
-    corner_width,
-    expect_loop,
-):
+def test_mux_short_adds_logo_and_drops_corner_video(tmp_path, monkeypatch):
     logo = tmp_path / "overlay-logo.png"
     logo.write_bytes(b"png")
     corner_video = tmp_path / "corner.mp4"
     corner_video.write_bytes(b"video")
     captured = {}
-    monkeypatch.setattr(bot, "media_duration", lambda path: 56.006 if path == corner_video else 0)
     monkeypatch.setattr(bot, "run", lambda command: captured.setdefault("command", command))
     settings = bot.Settings(
         openai_api_key="openai",
@@ -824,30 +806,22 @@ def test_mux_adds_logo_and_muted_corner_video(
         tmp_path / "narration.mp3",
         tmp_path / "captions.ass",
         tmp_path / "output.mp4",
-        target_duration,
+        60,
         settings,
-        long_form=long_form,
     )
 
     command = captured["command"]
     filter_complex = command[command.index("-filter_complex") + 1]
     logo_input = command.index(str(logo))
     assert command[logo_input - 3:logo_input + 1] == ["-loop", "1", "-i", str(logo)]
-    assert command[command.index(str(corner_video)) - 1] == "-i"
-    assert ("-stream_loop" in command) is expect_loop
-    if expect_loop:
-        loop_option = command.index("-stream_loop")
-        assert command[loop_option:loop_option + 3] == ["-stream_loop", "-1", "-i"]
-    assert f"scale={logo_width}:-1" in filter_complex
-    assert f"overlay=x=W-w-36:y={logo_top_margin}" in filter_complex
-    assert f"scale={corner_width}:-2" in filter_complex
-    assert "overlay=x=W-w-96:y=H-h-36" in filter_complex
-    assert "geq=lum='p(X,Y)'" in filter_complex
-    assert "W/2-18" in filter_complex
-    assert "H/2-18" in filter_complex
-    assert "eof_action=repeat:repeatlast=1" in filter_complex
+    assert "scale=220:-1" in filter_complex  # short logo width
+    assert "overlay=x=W-w-36:y=72" in filter_complex  # short logo top margin
     assert "format=rgba[logo]" in filter_complex
-    assert command.count(str(corner_video)) == 1
+    # The corner overlay video is gone for Shorts too — logo only.
+    assert str(corner_video) not in command
+    assert "-stream_loop" not in command
+    assert "[3:v]" not in filter_complex
+    assert "eof_action=repeat" not in filter_complex
 
 
 def test_mux_requires_overlay_logo(tmp_path, monkeypatch):
@@ -855,27 +829,6 @@ def test_mux_requires_overlay_logo(tmp_path, monkeypatch):
     settings = bot.Settings(openai_api_key="openai", overlay_logo=tmp_path / "missing.png")
 
     with pytest.raises(bot.BotError, match="Không tìm thấy logo overlay"):
-        bot.mux_video_audio_with_captions(
-            tmp_path / "visuals.mp4",
-            tmp_path / "narration.mp3",
-            tmp_path / "captions.ass",
-            tmp_path / "output.mp4",
-            60,
-            settings,
-        )
-
-
-def test_mux_requires_corner_overlay_video(tmp_path, monkeypatch):
-    logo = tmp_path / "overlay-logo.png"
-    logo.write_bytes(b"png")
-    monkeypatch.setattr(bot, "run", lambda _command: pytest.fail("ffmpeg must not run"))
-    settings = bot.Settings(
-        openai_api_key="openai",
-        overlay_logo=logo,
-        overlay_video=tmp_path / "missing.mp4",
-    )
-
-    with pytest.raises(bot.BotError, match="Không tìm thấy video overlay"):
         bot.mux_video_audio_with_captions(
             tmp_path / "visuals.mp4",
             tmp_path / "narration.mp3",
@@ -1446,6 +1399,79 @@ def test_scene_parser_keeps_real_subject_search_query():
 
     assert plan.scenes[0].search_query == "Zelenskyy press conference"
     assert plan.scenes[1].search_query == ""
+
+
+def test_plan_parser_keeps_comparison_fields_and_scene_focus():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Coca-Cola vs Pepsi", "angle": "The real differences", "title": "Coca-Cola vs Pepsi",
+        "subject_a": "Coca-Cola", "subject_b": "Pepsi",
+        "subject_a_image_query": "Coca-Cola logo can", "subject_b_image_query": "Pepsi logo can",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Two colas, one endless rivalry.", "narration": "Two colas, one endless rivalry. Close.",
+        "closing_line": "Close.",
+        "scenes": [
+            {"duration": 5, "focus": "both", "visual_prompt": "the matchup"},
+            {"duration": 5, "focus": "A", "visual_prompt": "coke point"},
+            {"duration": 5, "focus": "b", "visual_prompt": "pepsi point"},
+            {"duration": 5, "focus": "sideways", "visual_prompt": "invalid focus falls back"},
+        ],
+        "fact_note": "Note", "source_hints": ["Source"],
+    })
+
+    assert bot.is_comparison_plan(plan)
+    assert plan.subject_a == "Coca-Cola" and plan.subject_b == "Pepsi"
+    assert plan.subject_a_image_query == "Coca-Cola logo can"
+    assert [s.focus for s in plan.scenes] == ["both", "a", "b", ""]  # invalid focus dropped to ""
+
+
+def test_ensure_comparison_fields_derives_subjects_and_assigns_focus():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Mercedes-Benz vs BMW: The Rivalry", "angle": "German car giants", "title": "Mercedes-Benz vs BMW",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Two German legends.", "narration": "Two German legends. Close.", "closing_line": "Close.",
+        "scenes": [{"duration": 4, "visual_prompt": f"point {i}"} for i in range(6)],
+        "fact_note": "Note", "source_hints": ["Source"],
+    })
+
+    bot.ensure_comparison_fields(plan)
+
+    # Hyphenated names survive the "A vs B" split.
+    assert plan.subject_a == "Mercedes-Benz" and plan.subject_b == "BMW"
+    # Missing image queries fall back to the subject names.
+    assert plan.subject_a_image_query == "Mercedes-Benz"
+    focuses = [s.focus for s in plan.scenes]
+    assert focuses[0] == "both" and focuses[-1] == "both"
+    assert focuses[1:-1] == ["a", "b", "a", "b"]  # middle beats alternate
+
+
+def test_build_comparison_scene_image_writes_valid_frames(tmp_path):
+    from PIL import Image
+
+    subject_a = tmp_path / "subject_a.jpg"
+    subject_b = tmp_path / "subject_b.jpg"
+    Image.new("RGB", (400, 400), (200, 30, 30)).save(subject_a)
+    Image.new("RGB", (400, 400), (20, 90, 200)).save(subject_b)
+
+    for focus in ("a", "b", "both"):
+        out = tmp_path / f"scene_{focus}.jpg"
+        bot.build_comparison_scene_image(
+            subject_a, subject_b, "Coca-Cola", "Pepsi", focus,
+            bot.ROOT / "assets" / "pointer_side.png",
+            bot.ROOT / "assets" / "pointer_both.png",
+            out,
+        )
+        assert out.is_file() and out.stat().st_size >= 1024
+        assert Image.open(out).size == (1080, 1920)
+
+    # A missing subject image must not crash — it becomes a solid color panel.
+    out = tmp_path / "scene_fallback.jpg"
+    bot.build_comparison_scene_image(
+        tmp_path / "missing.jpg", subject_b, "Nike", "Adidas", "a",
+        bot.ROOT / "assets" / "pointer_side.png",
+        bot.ROOT / "assets" / "pointer_both.png",
+        out,
+    )
+    assert out.is_file() and out.stat().st_size >= 1024
 
 
 def test_long_form_images_prefer_real_web_photos_for_named_subjects(tmp_path):

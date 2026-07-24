@@ -204,6 +204,9 @@ class Settings:
     overlay_video_bottom_margin: int = 36
     overlay_video_corner_radius: int = 18
     overlay_video_loop_gap_seconds: float = 5.0
+    # Cartoon stick-figure "pointer" assets used by the comparison Short layout.
+    comparison_pointer_side: Path = ROOT / "assets" / "pointer_side.png"
+    comparison_pointer_both: Path = ROOT / "assets" / "pointer_both.png"
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
     google_tts_voice: str = "en-US-Chirp3-HD-Leda"
     google_tts_speaking_rate: float = 1.05
@@ -335,6 +338,9 @@ class Scene:
     # Literal web image search phrase naming the real person/place/object.
     # Only the generation prompt must avoid real people; the search may name them.
     search_query: str = ""
+    # Comparison Short only: which compared subject this beat is about — "a", "b",
+    # or "both". Drives which way the stick figure points and which panel is lit.
+    focus: str = ""
 
 
 @dataclass
@@ -359,6 +365,12 @@ class ShortPlan:
     fascination_score: int = 0
     clarity_score: int = 0
     appeal_reason: str = ""
+    # Comparison Short only: the two contrasted subjects and the web image searches
+    # for a recognizable picture of each (left panel = A, right panel = B).
+    subject_a: str = ""
+    subject_b: str = ""
+    subject_a_image_query: str = ""
+    subject_b_image_query: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ShortPlan":
@@ -378,12 +390,18 @@ class ShortPlan:
             except (KeyError, TypeError, ValueError) as exc:
                 raise BotError("Kế hoạch có cảnh thiếu hoặc sai duration.") from exc
             visual_prompt = raw_scene.get("visual_prompt") or raw_scene.get("visual_prompt_alt")
+            focus = str(raw_scene.get("focus") or "").strip().lower()
+            if focus not in ("a", "b", "both"):
+                focus = ""
             scenes.append(Scene(
                 duration=duration,
                 visual_prompt=str(visual_prompt or ""),
                 search_query=str(raw_scene.get("search_query") or "").strip(),
+                focus=focus,
             ))
-        if not scenes or any(not scene.visual_prompt or scene.duration <= 0 for scene in scenes):
+        # A scene is valid if it can be rendered: either a normal visual_prompt, or a
+        # comparison focus ("a"/"b"/"both") that drives the compared-subjects layout.
+        if not scenes or any(scene.duration <= 0 or (not scene.visual_prompt and not scene.focus) for scene in scenes):
             raise BotError("Kế hoạch có cảnh không hợp lệ.")
         narration = str(value["narration"])
         sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", narration) if part.strip()]
@@ -398,6 +416,10 @@ class ShortPlan:
             fascination_score=max(0, min(10, int(value.get("fascination_score") or 0))),
             clarity_score=max(0, min(10, int(value.get("clarity_score") or 0))),
             appeal_reason=str(value.get("appeal_reason") or "")[:500],
+            subject_a=str(value.get("subject_a") or "").strip()[:60],
+            subject_b=str(value.get("subject_b") or "").strip()[:60],
+            subject_a_image_query=str(value.get("subject_a_image_query") or "").strip()[:120],
+            subject_b_image_query=str(value.get("subject_b_image_query") or "").strip()[:120],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1498,16 +1520,14 @@ def recent_long_form_subject_texts(past: list[dict[str, str]], limit: int = 12) 
     return subjects
 
 
-CURIOSITY_TOPIC_CATEGORIES = [
-    "World-famous historical figures outside Vietnam (rulers, generals, scientists, artists, explorers, founders): reveal one documented decision, rivalry, secret, failure, or turning point that most people never learned. Pick a name a global audience already recognizes, then surprise them with a true detail inside that fame.",
-    "Globally famous people of today outside Vietnam (heads of state, tech founders, athletes, musicians, actors, billionaires, cultural icons): tell one true, surprising, easy-to-follow fact, decision, rise, or turning point that reveals how they got so big or what few people realize about them. Use only well-established facts, never rumors, private gossip, or unverified claims.",
-    "Major historical events, wars, empires, and revolutions outside Vietnam that changed a nation, region, or the world: tell one decisive moment, overlooked mistake, unlikely twist, betrayal, or consequence that changed the recognizable outcome.",
-    "Major recent and current world events outside Vietnam with huge public attention (large-scale conflicts, elections, disasters, breakthroughs, cultural moments everyone is talking about): explain the one clear, surprising angle a general viewer would want to understand and share. Stay with widely reported, well-established facts and never invent numbers, quotes, or dates.",
-    "Iconic companies, brands, products, and technologies that shaped the modern world (past or present): tell the origin, the make-or-break decision, the rise, the comeback, or the collapse behind a name almost everyone knows.",
-    "World wonders, iconic architecture, landmarks, and megaprojects, ancient or modern: explain how a named landmark or megaproject was built, its hardest problem, its symbolism, human cost, or a decisive episode in its story. Choose globally recognizable works, not an ordinary local building.",
-    "World-renowned natural wonders and extreme geography: focus on a named, widely recognized place, how its defining feature formed, what makes it exceptional, or a record it holds.",
-    "Famous civilizations, empires, lost cities, and legendary mysteries: center on a widely known civilization, ruler, capital, monument, conflict, collapse, or surviving record, and clearly separate solid evidence from legend.",
-    "Record-breaking feats, superlatives, and staggering scales (biggest, oldest, fastest, deadliest, richest, most expensive) tied to a famous named subject: build the story around the one jaw-dropping number or comparison and what it really means.",
+COMPARISON_TOPIC_CATEGORIES = [
+    "Rival brands or companies people take sides on: two famous competing brands, products, or chains (e.g. Coca-Cola vs Pepsi, Nike vs Adidas, McDonald's vs Burger King, Apple vs Samsung).",
+    "Opposing political sides in a country: two well-known rival parties or camps (e.g. US Republicans vs Democrats, and the two main rival parties in other big countries), compared factually and neutrally with no endorsement.",
+    "Opposite or contrasting places: two famous places, regions, or extremes people compare (e.g. North Pole vs South Pole, New York vs Los Angeles, one famous country vs another).",
+    "Famous rival people: two well-known rival figures — leaders, athletes, artists, inventors, or thinkers (e.g. Messi vs Ronaldo, Edison vs Tesla) — comparing what set each apart.",
+    "Rival technologies or platforms: two competing systems people pick sides on (e.g. iPhone vs Android, PlayStation vs Xbox, Mac vs PC).",
+    "Everyday A-vs-B people wonder about: two familiar contrasting things from daily life (e.g. coffee vs tea, cats vs dogs, cardio vs weights, butter vs margarine).",
+    "Big historical, sporting, or cultural rivalries and opposites: two famous opposing sides, empires, teams, or icons of the same kind that invite a clear 'what's the difference / which is better' comparison.",
 ]
 
 ABSTRACT_SHORT_TOPIC_TERMS = (
@@ -1539,46 +1559,18 @@ MINOR_SHORT_STORY_TERMS = (
     "underbuilt tank",
 )
 
-# Trục ĐỊNH DẠNG kể chuyện — độc lập với chủ đề, quyết định "kiểu" video để phá thế đơn điệu.
-NARRATIVE_FORMATS = [
-    "MYSTERY: pose a genuine unsolved question and walk through the leading explanation.",
-    "SUPERLATIVE / RECORD: reveal the most extreme example of something (biggest, oldest, deadliest, fastest) and why it holds that record.",
-    "HOW-IT-WORKS: reveal the hidden mechanism behind a familiar phenomenon, object, or process, step by step.",
-    "RISE-AND-FALL: tell the arc of how something great emerged, peaked, and collapsed.",
-    "MYTH-BUSTER: state a widely believed 'fact' and correct it with the real evidence.",
-    "HIDDEN-IN-PLAIN-SIGHT: expose a surprising secret or backstory behind something ordinary the viewer already knows.",
-    "ORIGIN STORY: trace where a world-changing thing, idea, or creature actually came from.",
-    "NUMBER-SHOCK: build the whole video around one staggering, hard-to-believe statistic or scale comparison.",
-    "TRANSFORMATION: show a dramatic before-and-after change in a place, species, or technology over time.",
-    "WHAT-IF / CONSEQUENCE: explore a real turning point and the outsized consequences that followed (or almost did).",
-]
-
-# Trục KIỂU TIÊU ĐỀ — buộc tiêu đề xoay vòng, không phải lúc nào cũng "Why did...".
-TITLE_STYLES = [
-    "a bold declarative statement (NOT a question), e.g. 'This Lake Turns Animals to Stone'",
-    "a curiosity-gap teaser that withholds the payoff, e.g. 'The Metal That Ended an Empire'",
-    "a superlative claim, e.g. 'The Loneliest Tree on Earth'",
-    "a short question — but only occasionally, and vary the opening word (not always 'Why')",
-    "a surprising number or scale hook, e.g. '600 Years, One Unsolved Blueprint'",
-    "a vivid noun phrase naming the subject and its twist, e.g. 'The Library That Erased Itself'",
-]
-
-
 def get_random_topic_rule() -> str:
-    category = random.choice(CURIOSITY_TOPIC_CATEGORIES)
-    narrative_format = random.choice(NARRATIVE_FORMATS)
-    title_style = random.choice(TITLE_STYLES)
+    category = random.choice(COMPARISON_TOPIC_CATEGORIES)
     return (
-        f"CRITICAL INSTRUCTION: For this specific video, you MUST strictly focus ONLY on this sub-category: **{category}**. "
-        "Do not write about anything outside of this category. "
-        f"NARRATIVE FORMAT for this video (shape the whole story around it, do not force it into a generic mystery): **{narrative_format}** "
-        f"TITLE STYLE to aim for: **{title_style}**. "
-        "Only about one in three videos should use a question title; prefer confident declarative or teaser titles otherwise, "
-        "and never begin the title with 'Why' unless the narrative format is genuinely MYSTERY. "
-        "Choose a FAMOUS, instantly recognizable subject first — a person, place, event, company, brand, or landmark that a global audience already knows — from EITHER the past OR the present, then find one true, surprising detail inside it. A famous name people already care about beats an obscure but 'important' one. "
-        "Reject obscure local accidents, one-building or one-company mishaps, no-name anecdotes, and trivia about subjects nobody recognizes. Also reject academic theories, unnamed hypothetical systems or planets, and metaphorical thesis-style angles — every video must be about a concrete, nameable, well-known subject. "
-        "The surprising detail must be true and easy to explain in plain words; never trade clarity for cleverness. "
-        "Do not hardcode the exact examples, but generate similarly captivating concepts."
+        "CRITICAL: This is a COMPARISON Short. For this video, pick TWO specific, famous, OPPOSING or rival subjects "
+        f"from this category: **{category}** "
+        "Both subjects must be instantly recognizable to a broad global audience so a real photo or logo of each is easy to find. "
+        "Name subject A and subject B explicitly, and give a short web image search for a recognizable picture of each. "
+        "Compare ONLY the few most important, most interesting, most-argued-about differences between them — not an exhaustive checklist. "
+        "Every point must be a clear, well-established fact told in plain words a general viewer grasps instantly. "
+        "Stay neutral and factual: do NOT declare an overall 'winner', push an opinion, or take a political side; lay out the key contrasts and let the viewer decide. "
+        "Do not compare Vietnam-related subjects. Pick a fresh matchup not already in the archive, and keep the matchups diverse across videos. "
+        "Do not hardcode the exact examples; generate similarly curiosity-sparking matchups."
     )
 
 
@@ -1599,14 +1591,22 @@ def recent_title_openers(past: list[dict[str, str]], limit: int = 8) -> str:
 
 
 PLAN_SCHEMA = '''{
-  "topic":"short English topic", "angle":"specific surprising angle", "title":"<=100 chars and explicitly names the concrete main subject", "thumbnail_text":"2-5 words, names the same main subject",
+  "topic":"short English topic naming both subjects, e.g. 'Coca-Cola vs Pepsi'",
+  "subject_a":"first subject's short display name, ideally <=16 chars, e.g. 'Coca-Cola'",
+  "subject_b":"second (rival/opposite) subject's short display name, e.g. 'Pepsi'",
+  "subject_a_image_query":"2-5 word web image search for a clear, recognizable picture or logo of subject A, e.g. 'Coca-Cola logo can'",
+  "subject_b_image_query":"2-5 word web image search for a clear, recognizable picture or logo of subject B, e.g. 'Pepsi logo can'",
+  "angle":"the curiosity angle of the matchup",
+  "title":"<=100 chars, explicitly names both subjects, e.g. 'Coca-Cola vs Pepsi: The Real Differences'",
+  "thumbnail_text":"2-5 words naming the matchup, e.g. 'Coca vs Pepsi'",
   "description":"English description with exactly 2 hashtags", "tags":["exactly 2 tags"],
-  "hook":"first spoken sentence, <=12 words", "narration":"English narration that begins with hook and ends with closing_line",
-  "closing_line":"last spoken sentence, <=14 words",
-  "scenes":[{"duration":5.5,"visual_prompt":"English photorealistic documentary image prompt: one concrete subject + setting, describe only what IS in frame; vary the shot type between scenes"}],
-  "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"],
+  "hook":"first spoken sentence, <=12 words, that sets up the A-vs-B matchup",
+  "narration":"English narration that begins with hook and ends with closing_line, comparing the two subjects point by point",
+  "closing_line":"last spoken sentence, <=14 words, a neutral wrap-up that does NOT declare a winner",
+  "scenes":[{"duration":5.5,"focus":"a","visual_prompt":"the one key comparison point being made about the focused subject in this beat"}],
+  "fact_note":"what uncertainty was avoided", "source_hints":["credible lead"],
   "subject_fame_score":9, "fascination_score":9, "clarity_score":9,
-  "appeal_reason":"one sentence on why this famous subject plus surprising angle will hook a general viewer"
+  "appeal_reason":"one sentence on why this matchup will hook a general viewer"
 }'''
 
 LONG_FORM_PLAN_SCHEMA = '''{
@@ -1625,19 +1625,20 @@ LONG_FORM_PLAN_SCHEMA = '''{
 }'''
 
 RESEARCH_SCHEMA = '''{
-  "curiosity_frame":"match the assigned narrative format: mystery, record/superlative, hidden mechanism, rise-and-fall, myth correction, hidden origin, staggering number, dramatic transformation, or consequence",
-  "viewer_question":"the single clickable hook this Short delivers — phrase it as a question ONLY if the format is a mystery, otherwise as a bold promise or reveal statement", "stakes":"why a broad viewer should care",
-  "thumbnail_hint":"2-4 words for a vivid thumbnail concept",
-  "concrete_anchor":"the named person, place, object, event, rule, mistake, price, or feature at the center of the story",
-  "viewer_payoff":"the concrete answer, historical insight, construction detail, discovery, decision, or consequence the viewer learns",
-  "share_trigger":"the one-sentence fact a viewer would repeat to a friend",
-  "surprise_payoff":"the specific reveal that makes the hook worth watching",
-  "central_claim":"one defensible claim", "evidence_points":["fact 1","fact 2","fact 3"],
-  "uncertainty":"what must be qualified or omitted", "fresh_angle":"a non-repetitive narrative angle",
+  "subject_a":"first famous subject of the matchup",
+  "subject_b":"the second, opposing or rival famous subject",
+  "matchup_hook":"the single curiosity hook of comparing A vs B, phrased to make a viewer click",
+  "why_famous":"one line on why both subjects are widely recognized",
+  "key_contrasts":["main difference 1 stated as A vs B","main difference 2","main difference 3","main difference 4"],
+  "shared_ground":"one true thing the two have in common (optional context)",
+  "surprise":"the single most surprising or most-argued-about contrast",
+  "subject_a_image_query":"2-5 word web search for a recognizable image or logo of A",
+  "subject_b_image_query":"2-5 word web search for a recognizable image or logo of B",
+  "uncertainty":"what must be qualified or omitted",
   "subject_fame_score":9, "fascination_score":9, "clarity_score":9,
-  "appeal_reason":"why this famous subject and its surprising angle will make a general viewer click and share",
-  "source_leads":["credible primary institution, archive, museum, or research body"],
-  "avoid":["specific overclaim or cliché to avoid"]
+  "appeal_reason":"why this matchup makes a general viewer click and share",
+  "source_leads":["credible lead for later verification"],
+  "avoid":["a bias or overclaim to avoid, e.g. declaring an overall winner or taking a political side"]
 }'''
 
 
@@ -1707,21 +1708,19 @@ def research_brief(
 ) -> dict[str, Any]:
     past = past or []
     rejected = rejected or []
-    prompt = f'''Act as a high-retention research editor for an English general-audience YouTube Short.
+    prompt = f'''Act as a high-retention research editor for an English general-audience COMPARISON YouTube Short.
 Theme: {theme}
 Use your reasoning internally before responding. Return only JSON using this schema:
 {RESEARCH_SCHEMA}
 Topic strategy: {topic_rule}
-Rules: Choose one specific, evidence-based topic built on a FAMOUS, instantly recognizable subject — a named person, place, event, company, brand, landmark, or work a general global audience already knows — from EITHER the past OR the present. It must deliver a concrete surprise an ordinary viewer can grasp in seconds. Do not invent sources, data, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it.
-Fame & clarity gate: the central SUBJECT must be genuinely famous or widely recognized (subject_fame_score at least 6), the surprising angle must be share-worthy (fascination_score at least 6), and the whole story must be easy for a general viewer to follow in one pass (clarity_score at least 7). Score honestly and never inflate to rescue a weak candidate. An obscure subject dressed up in dramatic wording fails this gate even if it feels "important".
-Reject a candidate if its central subject is obscure or unrecognizable to a broad audience — a quirky local incident, isolated industrial accident, one-building failure, municipal episode, or a shocking number attached to a subject nobody knows. Famous present-day people, events, companies, and places are welcome; use only well-established public facts, never private gossip, rumor, or anything unverified.
-Prefer one specific revealing detail INSIDE a famous subject: a decision or turning point in a well-known person's life (past or present), a twist in a major event or war, the make-or-break moment of an iconic company or product, a structural challenge in a landmark, or a defining feature of a renowned place. The detail is the storytelling lens; the subject's fame is what makes viewers click.
-Concrete/retellability test: silently reject the candidate unless it passes at least THREE of these tests: (1) centers a named, recognizable person, event, place, structure, company, product, or work; (2) contains one documented decision, moment, obstacle, mistake, turning point, hidden feature, or record; (3) delivers a surprising answer that can be retold to a friend in one plain sentence; (4) has a vivid scene or object that can be shown clearly; (5) makes a general viewer think "I did not know that" about a name they already recognize.
-Clickability filter: before selecting the topic, silently reject candidates that sound like a procedural report, a routine measurement update, a narrow technical footnote, a low-stakes institutional detail, a classroom theory, a speculative planetary scenario, or an academic concept with no concrete story. Never frame a person as a metaphorical "processing engine" and never build the story around carrying capacity, systems theory, a conceptual framework, or an unnamed planet. The final viewer_question should feel like a specific, surprising documentary story someone would click, save, or share without already knowing the subject.
-Novelty rule: The topic and fresh_angle must be materially different from every item in the existing archive and rejected candidates below. Do not choose the same object, event, artifact, site, person, mechanism, or central claim. If a broad theme keeps pointing to the same subject, switch domains within the theme.
+Rules: Pick TWO specific, famous, OPPOSING or rival subjects (subject_a and subject_b) that a broad global audience instantly recognizes, so a real photo or logo of each is easy to find. Identify the few most important, most interesting, most-argued-about differences between them (key_contrasts) — each a clear, well-established fact, not an exhaustive checklist. Give a 2-5 word web image search for a recognizable picture/logo of each. Do not invent sources, data, dates, quotations, or expert opinions.
+Fame & clarity gate: both subjects must be genuinely famous (subject_fame_score at least 6), the matchup must be share-worthy (fascination_score at least 6), and every contrast must be easy for a general viewer to follow in one pass (clarity_score at least 7). Score honestly and never inflate to rescue a weak matchup.
+Neutrality: stay factual and even-handed. Do NOT declare an overall winner, push an opinion, or take a political or ideological side. For political or sensitive matchups, describe each side's real positions plainly and neutrally.
+Reject a matchup if either subject is obscure or unrecognizable, if the two are not genuinely opposed or comparable, or if the contrasts are trivial, private gossip, or unverifiable. Do not compare Vietnam-related subjects.
+Novelty rule: The matchup (subject_a vs subject_b) must be materially different from every item in the existing archive and rejected candidates below. Pick a genuinely fresh pairing rather than reframing a past one.
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
-    LOG.info("Research pass: selecting a defensible, novel story angle…")
+    LOG.info("Research pass: selecting a fresh, recognizable comparison matchup…")
     return extract_json(llm.chat(prompt, temperature=0.35))
 
 
@@ -1745,39 +1744,36 @@ def plan_short(
     brief = research_brief(llm, theme, topic_rule, past, rejected)
     target_minimum_words, target_maximum_words = target_narration_word_bounds(duration)
     minimum_words, maximum_words = narration_word_bounds(duration)
-    prompt = f'''Act as a senior viral documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
+    prompt = f'''Act as a senior viral short-video writer. Create ONE highly watchable {duration}-second English-language COMPARISON YouTube Short from the editorial brief below.
 Theme: {theme}
-Audience: curious general English-speaking viewers, not academics or specialists. Keep the channel centered on FAMOUS, instantly recognizable subjects from the past OR the present: legendary and current world figures, major events old and new, iconic companies, brands and products, renowned natural wonders, iconic architecture, major landmarks and monuments, and record-breaking feats.
+Audience: curious general English-speaking viewers. Every Short compares TWO famous, opposing or rival subjects (A vs B) and lays out ONLY their main, most-argued-about differences so viewers can decide for themselves.
 Topic strategy: {topic_rule}
 {opener_rule}
-Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel specific, surprising, and worth remembering or sharing in the assigned narrative format — not a neutral encyclopedia entry, classroom lesson, consumer tip, or abstract theory.
-FAME & CLARITY REQUIREMENT: Keep honest subject_fame_score and fascination_score of at least 6/10 and clarity_score of at least 7/10. The subject must be a name a broad audience already recognizes, and the story must be effortless to follow on the first watch. Reject obscure subjects and trivia dressed up with dramatic language; do not sacrifice clarity for cleverness.
-The topic, angle, title, and hook must name or clearly point to the brief's concrete_anchor. Fully deliver the viewer_payoff, share_trigger, and surprise_payoff. A viewer should be able to retell the core story in one plain sentence.
-TITLE REQUIREMENT: The title must explicitly name the concrete_anchor — the actual person, landmark, place, structure, event, civilization, object, or discovery — rather than hiding it behind "this", "that", "the secret", or a generic mystery phrase. Make the named subject appear early in the title whenever natural. For example, write "The Three Gorges Dam's Hidden Problem", not "The Dam Nobody Saw Coming". Set thumbnail_text to 2-5 bold words that name the same subject; it is not a vague slogan.
-Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
-CRITICAL NARRATIVE RULE: The story must strictly follow a 3-part structure:
-1. BEGINNING (Context): Immediately establish the facts: Who? Where? When? What happened? Never jump straight into a mystery without setting the scene.
-2. MIDDLE (Story and reveal): Show the decision, construction challenge, obstacle, mistake, discovery, conflict, hidden feature, cause, or turning point using concrete details and simple cause-and-effect.
-3. ENDING (Meaning): Deliver the promised answer and finish with why it matters, the lasting consequence, a striking comparison, or a memorable fact worth retelling.
-Ensure the narration flows logically and is highly accessible to a general audience.
-Use plain spoken language, define any necessary technical term immediately, keep one main idea per sentence, and replace abstract filler with concrete cause-and-effect or scale comparisons. Fully pay off the opening hook before the closing line.
-Do not use thesis-like angles such as "X as a human engine," "a planet locking itself into a climate trap," "hacking Earth's carrying capacity," or similar metaphorical academic framing. Every Short must center on a concrete, nameable, well-known subject; avoid abstract theory, obscure scientific studies, unnamed animals, and dry academic discoveries with no famous subject attached. Famous inventions, products, companies, and technologies are welcome when they are household names told as a human story. Construction details are allowed only when they directly explain a named landmark, monument, building, bridge, dam, palace, temple, or other architectural work.
-Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
-Visuals: {VISUAL_STYLE_RULES}
-Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
-Split the story into exactly 6 scenes whose total duration is exactly {duration}. Reusing a visual concept is acceptable when it helps continuity, but every scene still needs a concrete visual_prompt. For a {duration}-second Short, aim for roughly {target_minimum_words}–{target_maximum_words} spoken English words. This is a preferred pace, not a reason to pad a clear story with filler.
-Every string in the returned JSON must be English, including topic, title, description, tags, narration, fact_note, and source_hints.
-The existing archive and rejected candidates below must not be repeated or merely reframed. Return raw JSON only using exactly this schema:
+Use the brief's subject_a, subject_b, matchup_hook, key_contrasts, and surprise. Set subject_a and subject_b to short display names, and subject_a_image_query / subject_b_image_query to 2-5 word web searches for a recognizable picture or logo of each.
+FAME & CLARITY REQUIREMENT: keep honest subject_fame_score and fascination_score at least 6/10 and clarity_score at least 7/10. Both names must be instantly recognizable and every point effortless to follow on the first watch.
+NEUTRALITY: do NOT declare a winner, push an opinion, or take a political side; present each side's key facts evenly. The closing_line must be a neutral wrap-up, not a verdict.
+TITLE REQUIREMENT: the title must explicitly name BOTH subjects, e.g. 'Coca-Cola vs Pepsi: The Real Differences'. Set thumbnail_text to 2-5 words naming the matchup.
+STRUCTURE — exactly 6 scenes whose durations total exactly {duration}:
+- Scene 1 (focus "both"): the hook — introduce the A-vs-B matchup and why it is interesting.
+- Scenes 2-5 (focus alternates "a" and "b"): each delivers ONE key contrast and clearly talks about the subject in focus, so the narration on "a" beats is about subject A and on "b" beats is about subject B.
+- Scene 6 (focus "both"): the closing_line — a neutral wrap-up.
+Set every scene's "focus" to "a", "b", or "both" to match which subject that beat is about, and put the one key point of that beat in visual_prompt.
+The narration must start verbatim with hook and end verbatim with closing_line, in plain spoken English, one clear idea per sentence, only the most important and prominent points.
+Facts: use only well-established public facts and the brief's key_contrasts; never invent numbers, dates, quotes, or sources.
+For a {duration}-second Short, aim for roughly {target_minimum_words}-{target_maximum_words} spoken English words. This is a pace, not a reason to pad.
+Every string in the returned JSON must be English. Do not reuse a matchup from the archive or rejected candidates below. Return raw JSON only using exactly this schema:
 {PLAN_SCHEMA}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
-    LOG.info("Writing pass: turning the research brief into a short-form story…")
+    LOG.info("Writing pass: turning the research brief into a comparison Short…")
     draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.65)))
-    review_prompt = f'''Act as the final fact, documentary-story, and retention editor. Think deeply but return only JSON.
-Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
-{{"quality_check":{{"hook_score":1,"clarity_score":1,"concreteness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"subject_fame_score":1,"fascination_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, consumer-tip drift, academic framing, speculative planetary scenarios, obscure local incidents, no-name trivia, and dry topics that lack a strong concrete story. Score honestly: a candidate below 6/10 on subject fame or fascination, or below 7/10 on clarity, must be rejected or rewritten rather than rescued with dramatic wording. The subject must be a famous, recognizable name (past or present); rewrite any abstract or no-name angle into a story about a well-known person/place/event/company/structure, and if that is impossible, replace it with a better candidate from the assigned category. Make the hook immediately intriguing, the middle concrete, and the closing line memorable enough to retell or share. Use plain, simple spoken English and ensure the narration clearly pays off the hook so an ordinary viewer follows it effortlessly on the first watch. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. The title must explicitly name the concrete_anchor, never a pronoun-only or generic subject; thumbnail_text must be 2-5 words naming that same main subject. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+    review_prompt = f'''Act as the final fact, comparison, and retention editor. Think deeply but return only JSON.
+Improve the draft below into a stronger {duration}-second English COMPARISON YouTube Short. Return exactly:
+{{"quality_check":{{"hook_score":1,"clarity_score":1,"fairness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"subject_fame_score":1,"fascination_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
+Keep only well-established facts about each subject; cut invented numbers, dates, quotes, or sources. Both subjects must be famous and instantly recognizable (subject_fame_score at least 6); the matchup share-worthy (fascination_score at least 6); every point effortless to follow (clarity_score at least 7). Reject a matchup below these bars rather than rescue it with hype.
+NEUTRALITY: the script must not declare a winner, push an opinion, or take a political side; make each side's points even and factual, and keep the closing_line neutral.
+The title must name BOTH subjects; thumbnail_text 2-5 words naming the matchup. subject_a, subject_b, subject_a_image_query, and subject_b_image_query must be set with recognizable image searches. Keep exactly 6 scenes totaling {duration}, each with a "focus" of "a"/"b"/"both" matching which subject the narration covers in that beat (scene 1 and the last scene are "both", middle scenes alternate "a" and "b"). {opener_rule}The narration must begin with hook and end with closing_line, use plain spoken English, and cover only the main, prominent contrasts.
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
@@ -1794,6 +1790,9 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
         plan.clarity_score = int(review_quality.get("clarity_score") or 0)
     ensure_title_names_main_subject(plan)
     normalize_scene_count(plan, 6)
+    ensure_comparison_fields(plan)
+    if not is_comparison_plan(plan):
+        LOG.warning("Comparison Short is missing subject_a/subject_b; the layout will fall back to plain scenes.")
     quality = reviewed.get("quality_check", {})
     LOG.info("Quality pass complete — hook %s/10, clarity %s/10.", quality.get("hook_score", "?"), quality.get("clarity_score", "?"))
     scene_total = sum(scene.duration for scene in plan.scenes)
@@ -1865,6 +1864,50 @@ def title_mentions_main_subject(plan: ShortPlan) -> bool:
     return not anchor_terms or bool(anchor_terms & title_terms)
 
 
+def is_comparison_plan(plan: ShortPlan) -> bool:
+    """A comparison Short is one that names both compared subjects."""
+    return bool(plan.subject_a and plan.subject_b)
+
+
+def _split_versus(text: str) -> tuple[str, str] | None:
+    match = re.search(r"(.+?)\s+(?:vs\.?|versus)\s+(.+)", text or "", flags=re.I)
+    if not match:
+        return None
+    # Split only on a colon or a spaced dash (subtitle separators) so hyphenated
+    # names like "Coca-Cola" or "Mercedes-Benz" stay intact.
+    a = match.group(1).split(":")[-1].strip()
+    b = re.split(r"\s[–—-]\s|:", match.group(2), maxsplit=1)[0].strip()
+    if a and b:
+        return a[:60], b[:60]
+    return None
+
+
+def ensure_comparison_fields(plan: ShortPlan) -> None:
+    """Fill in the two subjects and per-scene focus for a comparison Short."""
+    if not (plan.subject_a and plan.subject_b):
+        for text in (plan.topic, plan.title, plan.thumbnail_text):
+            pair = _split_versus(text)
+            if pair:
+                plan.subject_a = plan.subject_a or pair[0]
+                plan.subject_b = plan.subject_b or pair[1]
+                break
+    if not plan.subject_a_image_query:
+        plan.subject_a_image_query = plan.subject_a
+    if not plan.subject_b_image_query:
+        plan.subject_b_image_query = plan.subject_b
+    # First and last beats introduce/close the matchup ("both"); the middle beats
+    # alternate a/b so the stick figure points at whichever subject is being discussed.
+    count = len(plan.scenes)
+    next_auto = "a"
+    for index, scene in enumerate(plan.scenes):
+        if index == 0 or index == count - 1:
+            scene.focus = "both"
+            continue
+        if scene.focus not in ("a", "b"):
+            scene.focus = next_auto
+        next_auto = "b" if scene.focus == "a" else "a"
+
+
 def ensure_title_names_main_subject(plan: ShortPlan) -> None:
     """Prevent a vague headline when the planner omitted its named main subject."""
     if title_mentions_main_subject(plan):
@@ -1888,7 +1931,12 @@ def normalize_scene_count(plan: ShortPlan, target_count: int) -> None:
         scene.duration = first_duration
         plan.scenes.insert(
             index + 1,
-            Scene(duration=second_duration, visual_prompt=scene.visual_prompt, search_query=scene.search_query),
+            Scene(
+                duration=second_duration,
+                visual_prompt=scene.visual_prompt,
+                search_query=scene.search_query,
+                focus=scene.focus,
+            ),
         )
     while len(plan.scenes) > target_count:
         extra = plan.scenes.pop()
@@ -2603,72 +2651,19 @@ def mux_video_audio_with_captions(
         else settings.overlay_logo_short_top_margin
     )
 
+    # Every video type now carries only the brand logo overlay — the corner overlay
+    # video was removed from Shorts (comparison layout) and long-form alike.
+    video_filter = (
+        f"[0:v]{ass_video_filter(captions)}[base];"
+        f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
+        f"[base][logo]overlay=x=W-w-{logo_margin}:y={logo_top_margin}:format=auto,format=yuv420p[v];"
+        f"[1:a]apad=pad_dur={target_duration}[a]"
+    )
     command = [
         "ffmpeg", "-y",
         "-i", str(visuals),
         "-i", str(narration),
         "-loop", "1", "-i", str(logo),
-    ]
-
-    if long_form:
-        # Long-form videos carry only the brand logo overlay — no corner overlay video.
-        video_filter = (
-            f"[0:v]{ass_video_filter(captions)}[base];"
-            f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
-            f"[base][logo]overlay=x=W-w-{logo_margin}:y={logo_top_margin}:format=auto,format=yuv420p[v];"
-            f"[1:a]apad=pad_dur={target_duration}[a]"
-        )
-    else:
-        corner_video = settings.overlay_video
-        if not corner_video.is_file():
-            raise BotError(f"Không tìm thấy video overlay: {corner_video}")
-        corner_video_width = settings.overlay_video_short_width
-        corner_video_right_margin = settings.overlay_video_right_margin
-        corner_video_bottom_margin = settings.overlay_video_bottom_margin
-        corner_video_radius = min(settings.overlay_video_corner_radius, corner_video_width // 2)
-        corner_video_duration = media_duration(corner_video)
-        if corner_video_duration <= 0:
-            raise BotError(f"Video overlay không có thời lượng hợp lệ: {corner_video}")
-        should_loop_corner_video = (
-            target_duration - corner_video_duration > settings.overlay_video_loop_gap_seconds
-        )
-        corner_video_filter = (
-            f"scale={corner_video_width}:-2:flags=lanczos,setsar=1,format=yuva420p"
-        )
-        if corner_video_radius:
-            corner_video_filter += (
-                ",geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':"
-                "a='if(lte(hypot("
-                f"max(abs(X-W/2)-(W/2-{corner_video_radius}),0),"
-                f"max(abs(Y-H/2)-(H/2-{corner_video_radius}),0)),"
-                f"{corner_video_radius}),255,0)'"
-            )
-        video_filter = (
-            f"[0:v]{ass_video_filter(captions)}[base];"
-            f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
-            f"[base][logo]overlay=x=W-w-{logo_margin}:y={logo_top_margin}:format=auto[branded];"
-            f"[3:v]{corner_video_filter}[corner];"
-            f"[branded][corner]overlay=x=W-w-{corner_video_right_margin}:"
-            f"y=H-h-{corner_video_bottom_margin}:eof_action=repeat:repeatlast=1:"
-            "format=auto,format=yuv420p[v];"
-            f"[1:a]apad=pad_dur={target_duration}[a]"
-        )
-        if should_loop_corner_video:
-            command.extend(["-stream_loop", "-1"])
-            LOG.info(
-                "Looping %.2fs corner overlay video to cover %.2fs output.",
-                corner_video_duration,
-                target_duration,
-            )
-        else:
-            LOG.info(
-                "Using %.2fs corner overlay video once for %.2fs output; the final frame fills any small gap.",
-                corner_video_duration,
-                target_duration,
-            )
-        command.extend(["-i", str(corner_video)])
-
-    command.extend([
         "-filter_complex", video_filter,
         "-map", "[v]",
         "-map", "[a]",
@@ -2679,7 +2674,7 @@ def mux_video_audio_with_captions(
         "-c:a", "aac",
         "-movflags", "+faststart",
         str(output),
-    ])
+    ]
     if timeout_seconds is None:
         run(command)
     else:
@@ -2856,6 +2851,135 @@ def append_web_source_credits(plan: ShortPlan, sources: list[dict[str, str]]) ->
     plan.description = (plan.description + credit)[:5000]
 
 
+# Comparison Short layout constants (vertical 1080x1920).
+COMPARISON_BG = (238, 241, 245)
+COMPARISON_CARD = (255, 255, 255)
+COMPARISON_A_ACCENT = (214, 40, 40)
+COMPARISON_B_ACCENT = (28, 100, 210)
+COMPARISON_INK = (26, 26, 29)
+_COMP_PANEL_W, _COMP_PANEL_H, _COMP_PANEL_TOP = 470, 590, 250
+_COMP_AX, _COMP_BX = 45, 565
+_COMP_FIG_TOP, _COMP_FIG_H = 860, 520
+
+
+def _comparison_font(size: int):
+    from PIL import ImageFont
+
+    for candidate in (DATA_DIR / "fonts" / "DejaVuSans.ttf", ROOT / "fonts" / "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(str(candidate), size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _fit_contain(img, width: int, height: int):
+    """Scale an image to fit fully within width x height (no cropping), keeping aspect.
+
+    Comparison subjects are often wide logos or faces, so showing the whole image on
+    the white card reads better than cropping it to fill.
+    """
+    src = img.convert("RGB")
+    scale = min(width / max(1, src.width), height / max(1, src.height))
+    return src.resize((max(1, int(src.width * scale)), max(1, int(src.height * scale))))
+
+
+def _centered_text(draw, cx: int, y: int, text: str, font, fill) -> None:
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    draw.text((cx - (right - left) / 2, y), text, font=font, fill=fill)
+
+
+def build_comparison_scene_image(
+    subject_a_image: Path,
+    subject_b_image: Path,
+    subject_a_label: str,
+    subject_b_label: str,
+    focus: str,
+    pointer_side: Path,
+    pointer_both: Path,
+    destination: Path,
+    width: int = 1080,
+    height: int = 1920,
+) -> None:
+    """Compose one comparison frame: two subject panels on top, a stick figure below
+    pointing toward the subject in focus. Rendered with Pillow so the layout is exact."""
+    from PIL import Image, ImageDraw
+
+    focus = focus if focus in ("a", "b", "both") else "both"
+    canvas = Image.new("RGBA", (width, height), COMPARISON_BG + (255,))
+    draw = ImageDraw.Draw(canvas)
+    label_font = _comparison_font(58)
+
+    _centered_text(draw, _COMP_AX + _COMP_PANEL_W // 2, 150, subject_a_label.upper()[:16], label_font, COMPARISON_A_ACCENT)
+    _centered_text(draw, _COMP_BX + _COMP_PANEL_W // 2, 150, subject_b_label.upper()[:16], label_font, COMPARISON_B_ACCENT)
+
+    pad = 20
+    inner_w, inner_h = _COMP_PANEL_W - 2 * pad, _COMP_PANEL_H - 2 * pad
+    for x, accent, image_path, side in (
+        (_COMP_AX, COMPARISON_A_ACCENT, subject_a_image, "a"),
+        (_COMP_BX, COMPARISON_B_ACCENT, subject_b_image, "b"),
+    ):
+        active = focus in (side, "both")
+        draw.rounded_rectangle(
+            (x - 8, _COMP_PANEL_TOP - 8, x + _COMP_PANEL_W + 8, _COMP_PANEL_TOP + _COMP_PANEL_H + 8),
+            radius=28, fill=COMPARISON_CARD, outline=accent, width=10 if active else 4,
+        )
+        try:
+            picture = _fit_contain(Image.open(image_path), inner_w, inner_h)
+            offset = (x + pad + (inner_w - picture.width) // 2, _COMP_PANEL_TOP + pad + (inner_h - picture.height) // 2)
+            canvas.paste(picture, offset)
+        except Exception:
+            draw.rectangle((x + pad, _COMP_PANEL_TOP + pad, x + pad + inner_w, _COMP_PANEL_TOP + pad + inner_h), fill=accent)
+        if not active:
+            veil = Image.new("RGBA", (_COMP_PANEL_W, _COMP_PANEL_H), (255, 255, 255, 140))
+            canvas.alpha_composite(veil, (x, _COMP_PANEL_TOP))
+
+    # "VS" badge in the gap between the panels.
+    cx, cy = width // 2, _COMP_PANEL_TOP + _COMP_PANEL_H // 2
+    draw.ellipse((cx - 62, cy - 62, cx + 62, cy + 62), fill=COMPARISON_INK, outline=(255, 255, 255), width=6)
+    _centered_text(draw, cx, cy - 40, "VS", _comparison_font(66), (255, 255, 255))
+
+    # Stick figure pointing toward the active subject.
+    try:
+        if focus == "both":
+            figure = Image.open(pointer_both).convert("RGBA")
+        else:
+            figure = Image.open(pointer_side).convert("RGBA")
+            if focus == "a":
+                figure = figure.transpose(Image.FLIP_LEFT_RIGHT)
+        fig_w = int(figure.width * _COMP_FIG_H / figure.height)
+        figure = figure.resize((fig_w, _COMP_FIG_H))
+        canvas.alpha_composite(figure, ((width - fig_w) // 2, _COMP_FIG_TOP))
+    except Exception as exc:
+        LOG.warning("Could not place the comparison pointer figure (%s); frame keeps the panels only.", exc)
+
+    canvas.convert("RGB").save(destination, quality=90)
+
+
+def prepare_comparison_subject_images(plan: ShortPlan, client: "VisualAssetProvider", output_dir: Path) -> None:
+    """Fetch one recognizable image for each compared subject (real web photo first)."""
+    for name, label, query in (
+        ("subject_a", plan.subject_a, plan.subject_a_image_query or plan.subject_a),
+        ("subject_b", plan.subject_b, plan.subject_b_image_query or plan.subject_b),
+    ):
+        destination = output_dir / f"{name}.jpg"
+        if destination.is_file() and destination.stat().st_size >= 1024:
+            continue
+        if not query:
+            continue
+        try:
+            client.image(
+                search_query=query,
+                generation_prompt=f"a clear, simple, recognizable icon representing {query}, plain flat background, centered, no text",
+                destination=destination,
+                width=1024,
+                height=1024,
+                prefer_web=True,
+            )
+        except (ImageGenerationTransientError, ImageGenerationSafetyError) as exc:
+            LOG.warning("No image for comparison subject %r (%s); a labeled color panel will be used.", label, exc)
+
+
 def render(
     plan: ShortPlan,
     client: VisualAssetProvider,
@@ -2865,15 +2989,29 @@ def render(
     narration_seconds: float,
 ) -> Path:
     require_tools()
-    LOG.info("Rendering %d scenes into %s", len(plan.scenes), output_dir)
+    comparison = is_comparison_plan(plan)
+    LOG.info("Rendering %d %s scenes into %s", len(plan.scenes), "comparison" if comparison else "", output_dir)
+    if comparison:
+        prepare_comparison_subject_images(plan, client, output_dir)
     clips: list[Path] = []
     previous_image: Path | None = None
-    web_indexes = distributed_web_image_indexes(len(plan.scenes), client.s.brave_web_images_per_short)
+    web_indexes = set() if comparison else distributed_web_image_indexes(len(plan.scenes), client.s.brave_web_images_per_short)
     for index, scene in enumerate(plan.scenes, start=1):
         image_file = output_dir / f"scene_{index}.jpg"
         clip = output_dir / f"scene_{index}.mp4"
         if image_file.is_file() and image_file.stat().st_size >= 1024:
             LOG.info("Reusing existing Short image %d; no new image credit spent.", index)
+        elif comparison:
+            build_comparison_scene_image(
+                output_dir / "subject_a.jpg",
+                output_dir / "subject_b.jpg",
+                plan.subject_a,
+                plan.subject_b,
+                scene.focus or "both",
+                client.s.comparison_pointer_side,
+                client.s.comparison_pointer_both,
+                image_file,
+            )
         else:
             try:
                 client.image(
@@ -2911,15 +3049,20 @@ def render(
             continue
 
         frames = int(scene.duration * 30)
-        zoom_filter = (
-            f"scale={SHORT_FORM_INTERMEDIATE_WIDTH}:-1,"
-            f"zoompan=z='min(zoom+0.001,1.5)':d={frames}:"
-            "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
-        )
+        if comparison:
+            # Keep the two panels perfectly still; only the pointer/highlight changes
+            # between scenes, so a slow zoom would just make the layout drift.
+            scene_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30"
+        else:
+            scene_filter = (
+                f"scale={SHORT_FORM_INTERMEDIATE_WIDTH}:-1,"
+                f"zoompan=z='min(zoom+0.001,1.5)':d={frames}:"
+                "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,fps=30"
+            )
         command = [
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
-            "-vf", zoom_filter,
+            "-vf", scene_filter,
             "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p",
             str(clip)
         ]

@@ -176,7 +176,7 @@ class Settings:
     # default; real web photos are fetched only for scenes the planner tags with a
     # search_query (a genuinely famous real place/landmark/artifact).
     brave_web_images_per_long_form: int = 0
-    long_form_openai_images: int = 10
+    long_form_openai_images: int = 15
     language: str = "en"
     duration: int = 20
     long_form_min_duration_seconds: int = 240
@@ -228,6 +228,9 @@ class Settings:
     def from_env(cls, duration_override: int | None = None) -> "Settings":
         openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
         brave_long_form_images = min(10, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "0"))))
+        # Stick-figure long-form: every beat is its own AI illustration, so more
+        # images means a tighter match to the narration. Configurable, default 15.
+        long_form_ai_images = min(30, max(1, int(os.getenv("LONG_FORM_AI_IMAGES", "15"))))
         overlay_logo = Path(os.getenv("OVERLAY_LOGO_FILE", "overlay-logo.png"))
         if not overlay_logo.is_absolute():
             overlay_logo = ROOT / overlay_logo
@@ -276,8 +279,9 @@ class Settings:
             duration=duration,
             long_form_min_duration_seconds=max(60, int(os.getenv("LONG_FORM_MIN_DURATION_SECONDS", "240"))),
             long_form_max_duration_seconds=max(60, int(os.getenv("LONG_FORM_MAX_DURATION_SECONDS", "300"))),
-            long_form_min_scenes=cls.long_form_openai_images + brave_long_form_images,
-            long_form_max_scenes=cls.long_form_openai_images + brave_long_form_images,
+            long_form_openai_images=long_form_ai_images,
+            long_form_min_scenes=long_form_ai_images + brave_long_form_images,
+            long_form_max_scenes=long_form_ai_images + brave_long_form_images,
             long_form_timezone=os.getenv("LONG_FORM_TIMEZONE", "Asia/Bangkok").strip() or "Asia/Bangkok",
             long_form_interval_days=max(1, int(os.getenv("LONG_FORM_INTERVAL_DAYS", "2"))),
             scheduled_daily_limit=max(0, int(os.getenv("SCHEDULED_DAILY_LIMIT", "2"))),
@@ -1428,22 +1432,24 @@ IMAGE_STYLE_SUFFIX = (
 )
 
 LONG_FORM_IMAGE_STYLE_SUFFIX = (
-    "minimalist stick-figure line illustration, simple black stick-figure people with clear expressive poses, "
-    "clean flat vector style, bold outlines, plain solid pastel background, simple recognizable props and scenery, "
-    "friendly educational explainer illustration, horizontal 16:9, no text, no words, no letters"
+    "2D cartoon explainer animation style, cute simple stick-figure characters with round heads and friendly faces, "
+    "hand-drawn cartoon look, bold clean outlines, bright cheerful flat colors, soft cartoon shading, "
+    "simple recognizable cartoon props and scenery, animated explainer video frame, horizontal 16:9, no text, no words, no letters"
 )
 
 LONG_FORM_VISUAL_STYLE_RULES = (
-    "This is a stick-figure EXPLAINER channel. Write each visual_prompt as one concrete, self-contained sentence describing a "
-    "MINIMALIST STICK-FIGURE illustration that literally acts out what the narration covers at this exact beat: show the specific "
-    "action, people, animals, objects, and setting as simple black stick figures in clear poses, plus a few simple recognizable "
-    "props and scenery so the idea reads instantly (e.g. 'stick-figure hunters throwing spears at a stick-figure mammoth beside a "
-    "cave', 'a stick figure gathering berries into a woven basket', 'a stick-figure king handing a scroll to a kneeling stick figure'). "
-    "Vary the composition and the number of figures between scenes and keep each image easy to read at a glance. "
+    "This is a CARTOON STICK-FIGURE EXPLAINER channel (animated-cartoon look). Write each visual_prompt as one concrete, self-contained "
+    "sentence describing a friendly CARTOON STICK-FIGURE illustration that literally acts out what the narration covers at this exact beat: "
+    "show the specific action, people, animals, objects, and setting as cute cartoon stick figures in clear poses, plus a few simple "
+    "recognizable cartoon props and scenery so the idea reads instantly (e.g. 'cartoon stick-figure hunters throwing spears at a stick-figure "
+    "mammoth beside a cave', 'a cartoon stick figure gathering berries into a woven basket', 'a cartoon stick-figure king handing a scroll to "
+    "a kneeling stick figure'). Vary the composition and the number of figures between scenes and keep each image easy to read at a glance. "
     "In visual_prompt avoid readable text, logos, and the names of real people; show roles and actions instead (a king, a soldier, an early human, a scientist). "
-    "Give a scene a search_query ONLY when a real photo of a genuinely famous real PLACE, landmark, building, map, or artifact would "
+    "SCENE 1 IS THE THUMBNAIL: make scene 1 a bold, clear cartoon stick-figure illustration of the video's MAIN subject/action, and leave its "
+    "search_query empty so the thumbnail is an on-topic cartoon image, never a photo. "
+    "For the other scenes, give a search_query ONLY when a real photo of a genuinely famous real PLACE, landmark, building, map, or artifact would "
     "help the explanation (e.g. 'Great Pyramid of Giza', 'Western Wall Jerusalem', 'Colosseum Rome'); leave search_query empty for "
-    "ordinary actions, people, animals, and concepts, which must stay stick-figure illustrations. Most beats should be stick-figure illustrations. "
+    "ordinary actions, people, animals, and concepts, which must stay cartoon stick-figure illustrations. Most beats should be cartoon stick-figure illustrations. "
     "Do not mention Vietnam, Vietnamese people, Vietnamese officials, or Vietnam-related locations."
 )
 
@@ -1613,7 +1619,7 @@ LONG_FORM_PLAN_SCHEMA = '''{
   "hook":"first spoken sentence, <=18 words",
   "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=18 words",
-  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 stick-figure illustration prompt that literally acts out this beat (specific stick-figure people, actions, props, and setting)","search_query":"leave empty for stick-figure beats; set to a 2-5 word photo search ONLY for a genuinely famous real place, landmark, building, map, or artifact (e.g. 'Great Pyramid of Giza')"}],
+  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 cartoon stick-figure illustration prompt that literally acts out this beat (specific cartoon stick-figure people, actions, props, and setting); scene 1 must clearly show the video's main subject for the thumbnail","search_query":"leave empty for cartoon stick-figure beats (always empty for scene 1); set to a 2-5 word photo search ONLY for a genuinely famous real place, landmark, building, map, or artifact (e.g. 'Great Pyramid of Giza')"}],
   "fact_note":"what uncertainty was preserved or avoided",
   "source_hints":["credible general-knowledge lead for later verification"]
 }'''
@@ -2582,79 +2588,85 @@ def mux_video_audio_with_captions(
     logo = settings.overlay_logo
     if not logo.is_file():
         raise BotError(f"Không tìm thấy logo overlay: {logo}")
-    corner_video = settings.overlay_video
-    if not corner_video.is_file():
-        raise BotError(f"Không tìm thấy video overlay: {corner_video}")
 
     logo_width = (
         settings.overlay_logo_long_form_width
         if long_form
         else settings.overlay_logo_short_width
     )
-    corner_video_width = (
-        settings.overlay_video_long_form_width
-        if long_form
-        else settings.overlay_video_short_width
-    )
     logo_margin = settings.overlay_logo_margin
-    corner_video_right_margin = settings.overlay_video_right_margin
-    corner_video_bottom_margin = settings.overlay_video_bottom_margin
-    corner_video_radius = min(settings.overlay_video_corner_radius, corner_video_width // 2)
     logo_top_margin = (
         settings.overlay_logo_long_form_top_margin
         if long_form
         else settings.overlay_logo_short_top_margin
     )
-    corner_video_duration = media_duration(corner_video)
-    if corner_video_duration <= 0:
-        raise BotError(f"Video overlay không có thời lượng hợp lệ: {corner_video}")
-    should_loop_corner_video = (
-        target_duration - corner_video_duration > settings.overlay_video_loop_gap_seconds
-    )
 
-    corner_video_filter = (
-        f"scale={corner_video_width}:-2:flags=lanczos,setsar=1,format=yuva420p"
-    )
-    if corner_video_radius:
-        corner_video_filter += (
-            ",geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':"
-            "a='if(lte(hypot("
-            f"max(abs(X-W/2)-(W/2-{corner_video_radius}),0),"
-            f"max(abs(Y-H/2)-(H/2-{corner_video_radius}),0)),"
-            f"{corner_video_radius}),255,0)'"
-        )
-
-    video_filter = (
-        f"[0:v]{ass_video_filter(captions)}[base];"
-        f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
-        f"[base][logo]overlay=x=W-w-{logo_margin}:y={logo_top_margin}:format=auto[branded];"
-        f"[3:v]{corner_video_filter}[corner];"
-        f"[branded][corner]overlay=x=W-w-{corner_video_right_margin}:"
-        f"y=H-h-{corner_video_bottom_margin}:eof_action=repeat:repeatlast=1:"
-        "format=auto,format=yuv420p[v];"
-        f"[1:a]apad=pad_dur={target_duration}[a]"
-    )
     command = [
         "ffmpeg", "-y",
         "-i", str(visuals),
         "-i", str(narration),
         "-loop", "1", "-i", str(logo),
     ]
-    if should_loop_corner_video:
-        command.extend(["-stream_loop", "-1"])
-        LOG.info(
-            "Looping %.2fs corner overlay video to cover %.2fs output.",
-            corner_video_duration,
-            target_duration,
+
+    if long_form:
+        # Long-form videos carry only the brand logo overlay — no corner overlay video.
+        video_filter = (
+            f"[0:v]{ass_video_filter(captions)}[base];"
+            f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
+            f"[base][logo]overlay=x=W-w-{logo_margin}:y={logo_top_margin}:format=auto,format=yuv420p[v];"
+            f"[1:a]apad=pad_dur={target_duration}[a]"
         )
     else:
-        LOG.info(
-            "Using %.2fs corner overlay video once for %.2fs output; the final frame fills any small gap.",
-            corner_video_duration,
-            target_duration,
+        corner_video = settings.overlay_video
+        if not corner_video.is_file():
+            raise BotError(f"Không tìm thấy video overlay: {corner_video}")
+        corner_video_width = settings.overlay_video_short_width
+        corner_video_right_margin = settings.overlay_video_right_margin
+        corner_video_bottom_margin = settings.overlay_video_bottom_margin
+        corner_video_radius = min(settings.overlay_video_corner_radius, corner_video_width // 2)
+        corner_video_duration = media_duration(corner_video)
+        if corner_video_duration <= 0:
+            raise BotError(f"Video overlay không có thời lượng hợp lệ: {corner_video}")
+        should_loop_corner_video = (
+            target_duration - corner_video_duration > settings.overlay_video_loop_gap_seconds
         )
+        corner_video_filter = (
+            f"scale={corner_video_width}:-2:flags=lanczos,setsar=1,format=yuva420p"
+        )
+        if corner_video_radius:
+            corner_video_filter += (
+                ",geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':"
+                "a='if(lte(hypot("
+                f"max(abs(X-W/2)-(W/2-{corner_video_radius}),0),"
+                f"max(abs(Y-H/2)-(H/2-{corner_video_radius}),0)),"
+                f"{corner_video_radius}),255,0)'"
+            )
+        video_filter = (
+            f"[0:v]{ass_video_filter(captions)}[base];"
+            f"[2:v]scale={logo_width}:-1:flags=lanczos,format=rgba[logo];"
+            f"[base][logo]overlay=x=W-w-{logo_margin}:y={logo_top_margin}:format=auto[branded];"
+            f"[3:v]{corner_video_filter}[corner];"
+            f"[branded][corner]overlay=x=W-w-{corner_video_right_margin}:"
+            f"y=H-h-{corner_video_bottom_margin}:eof_action=repeat:repeatlast=1:"
+            "format=auto,format=yuv420p[v];"
+            f"[1:a]apad=pad_dur={target_duration}[a]"
+        )
+        if should_loop_corner_video:
+            command.extend(["-stream_loop", "-1"])
+            LOG.info(
+                "Looping %.2fs corner overlay video to cover %.2fs output.",
+                corner_video_duration,
+                target_duration,
+            )
+        else:
+            LOG.info(
+                "Using %.2fs corner overlay video once for %.2fs output; the final frame fills any small gap.",
+                corner_video_duration,
+                target_duration,
+            )
+        command.extend(["-i", str(corner_video)])
+
     command.extend([
-        "-i", str(corner_video),
         "-filter_complex", video_filter,
         "-map", "[v]",
         "-map", "[a]",

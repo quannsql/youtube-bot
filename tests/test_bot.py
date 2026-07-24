@@ -515,13 +515,28 @@ def test_settings_accepts_48_second_duration(monkeypatch):
     settings = bot.Settings.from_env()
 
     assert settings.duration == 48
-    assert settings.long_form_min_scenes == 15
-    assert settings.long_form_max_scenes == 15
-    assert settings.long_form_openai_images == 10
+    # Stick-figure long-form defaults to 15 AI images; an explicit Brave override adds web slots.
+    assert settings.long_form_min_scenes == 20
+    assert settings.long_form_max_scenes == 20
+    assert settings.long_form_openai_images == 15
     assert settings.brave_web_images_per_long_form == 5
     assert settings.text_model == "gpt-5.4-mini"
     assert settings.text_reasoning_effort == "low"
     assert settings.text_long_form_reasoning_effort == "medium"
+
+
+def test_settings_reads_long_form_ai_image_count(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.delenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", raising=False)
+    monkeypatch.setenv("LONG_FORM_AI_IMAGES", "18")
+
+    settings = bot.Settings.from_env()
+
+    # No forced Brave slots by default, so every scene is an AI cartoon stick-figure image.
+    assert settings.long_form_openai_images == 18
+    assert settings.brave_web_images_per_long_form == 0
+    assert settings.long_form_min_scenes == 18
+    assert settings.long_form_max_scenes == 18
 
 
 def test_settings_reads_corner_overlay_video_options(monkeypatch):
@@ -774,7 +789,6 @@ def test_publish_long_form_uploads_the_prepared_custom_thumbnail(tmp_path, monke
     ("long_form", "target_duration", "logo_width", "logo_top_margin", "corner_width", "expect_loop"),
     [
         (False, 60, 220, 72, 180, False),
-        (True, 300, 220, 36, 160, True),
     ],
 )
 def test_mux_adds_logo_and_muted_corner_video(
@@ -865,6 +879,42 @@ def test_mux_requires_corner_overlay_video(tmp_path, monkeypatch):
             60,
             settings,
         )
+
+
+def test_mux_long_form_uses_logo_without_corner_video(tmp_path, monkeypatch):
+    logo = tmp_path / "overlay-logo.png"
+    logo.write_bytes(b"png")
+    captured = {}
+    monkeypatch.setattr(bot, "run", lambda command: captured.setdefault("command", command))
+    # A missing overlay video must NOT matter for long-form: it no longer uses one.
+    settings = bot.Settings(
+        openai_api_key="openai",
+        overlay_logo=logo,
+        overlay_video=tmp_path / "missing.mp4",
+    )
+
+    bot.mux_video_audio_with_captions(
+        tmp_path / "visuals.mp4",
+        tmp_path / "narration.mp3",
+        tmp_path / "captions.ass",
+        tmp_path / "output.mp4",
+        300,
+        settings,
+        long_form=True,
+    )
+
+    command = captured["command"]
+    filter_complex = command[command.index("-filter_complex") + 1]
+    logo_input = command.index(str(logo))
+    assert command[logo_input - 3:logo_input + 1] == ["-loop", "1", "-i", str(logo)]
+    assert "format=rgba[logo]" in filter_complex
+    assert "scale=220:-1" in filter_complex
+    assert "overlay=x=W-w-36:y=36" in filter_complex
+    # The corner overlay video is gone entirely.
+    assert str(settings.overlay_video) not in command
+    assert "-stream_loop" not in command
+    assert "[3:v]" not in filter_complex
+    assert "eof_action=repeat" not in filter_complex
 
 
 def test_openai_image_retries_transient_failure(tmp_path, monkeypatch):
@@ -1446,7 +1496,7 @@ def test_long_form_uses_five_brave_slots_and_only_ten_openai_slots(tmp_path):
     })
 
     class FakeImages:
-        s = bot.Settings(brave_web_images_per_long_form=5)
+        s = bot.Settings(brave_web_images_per_long_form=5, long_form_openai_images=10)
 
         def __init__(self):
             self.openai_calls = 0

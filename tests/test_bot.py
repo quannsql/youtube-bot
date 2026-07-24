@@ -1882,6 +1882,7 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
 
     monkeypatch.setenv("BOT_RUN_MODE", "long-form")
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.delenv("LONG_FORM_FORCE_NEW", raising=False)
     monkeypatch.setattr(bot, "materialize_railway_credentials", lambda: None)
     monkeypatch.setattr(bot, "ensure_dejavu_font", lambda: None)
     class FakeArchive:
@@ -1902,6 +1903,36 @@ def test_main_bot_run_mode_env_forces_long_form(monkeypatch):
 
     assert bot.main() == 0
     assert called["publish"] is True
+    assert called["force_new"] is False
+
+
+def test_main_long_form_force_new_env_bypasses_schedule_gate(monkeypatch):
+    called = {}
+
+    monkeypatch.setenv("BOT_RUN_MODE", "long-form")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.setenv("LONG_FORM_FORCE_NEW", "true")
+    monkeypatch.setattr(bot, "materialize_railway_credentials", lambda: None)
+    monkeypatch.setattr(bot, "ensure_dejavu_font", lambda: None)
+
+    class FakeArchive:
+        def get_kv(self, _key):
+            return None
+
+    monkeypatch.setattr(bot, "Archive", lambda: FakeArchive())
+    monkeypatch.setattr(bot, "VisualAssetProvider", lambda settings: object())
+    monkeypatch.setattr(bot, "OpenAITextClient", lambda settings: object())
+    monkeypatch.setattr(bot, "GoogleCloudTTS", lambda settings: object())
+
+    def fake_run_long_form_flow(**kwargs):
+        called.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(bot, "run_long_form_flow", fake_run_long_form_flow)
+    monkeypatch.setattr(sys, "argv", ["youtube_shorts_bot.py", "--publish", "--scheduled"])
+
+    assert bot.main() == 0
+    assert called["force_new"] is True
 
 
 def test_google_tts_language_code_supports_chirp_3_hd_leda():

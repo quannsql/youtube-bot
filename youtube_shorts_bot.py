@@ -4123,7 +4123,9 @@ def main() -> int:
             llm=llm,
             images=images,
             tts=tts,
-            force_new=args.long_form_force_new,
+            # Railway has no CLI flags, so LONG_FORM_FORCE_NEW=true lets you bypass
+            # the schedule gate from the service's environment variables for a test run.
+            force_new=args.long_form_force_new or env_bool("LONG_FORM_FORCE_NEW", False),
         )
     if args.upload_file:
         if not args.publish:

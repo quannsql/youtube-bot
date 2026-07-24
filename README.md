@@ -162,7 +162,7 @@ Cron khuyến nghị cho service Railway riêng:
 0 13 * * *
 ```
 
-Cron gọi service mỗi ngày lúc 20:00 Việt Nam. Bot kiểm tra ngày local trong PostgreSQL và chỉ tạo khi video dài gần nhất đã cách ít nhất `LONG_FORM_INTERVAL_DAYS=2` ngày: ví dụ tạo thứ Hai thì thứ Tư mới tạo tiếp. Dùng `--long-form-force-new` chỉ khi muốn chạy thủ công và bỏ qua chốt này.
+Cron gọi service mỗi ngày lúc 20:00 Việt Nam. Bot kiểm tra ngày local trong PostgreSQL và chỉ tạo khi video dài gần nhất đã cách ít nhất `LONG_FORM_INTERVAL_DAYS=2` ngày: ví dụ tạo thứ Hai thì thứ Tư mới tạo tiếp. Lưu ý: `LONG_FORM_INTERVAL_DAYS` càng lớn thì càng CHỜ LÂU (chặt hơn), và một video đã tạo TRONG CÙNG NGÀY local luôn chặn lượt tiếp theo cho tới hôm sau. Muốn chạy thử ngay mà bỏ qua chốt lịch: chạy CLI với `--long-form-force-new`, hoặc trên Railway (không có cờ CLI) đặt biến `LONG_FORM_FORCE_NEW=true` cho service Long rồi deploy lại — nhớ trả về `false` sau khi test xong để lịch hằng ngày hoạt động lại.
 
 Long-form config:
 
@@ -171,7 +171,10 @@ LONG_FORM_MIN_DURATION_SECONDS=300
 LONG_FORM_MAX_DURATION_SECONDS=420
 LONG_FORM_TIMEZONE=Asia/Bangkok
 LONG_FORM_INTERVAL_DAYS=2
+LONG_FORM_AI_IMAGES=15
 BRAVE_WEB_IMAGES_PER_LONG_FORM=0
+# Testing only: đặt true để bỏ qua chốt lịch và tạo video dài ngay, xong trả về false.
+LONG_FORM_FORCE_NEW=false
 ```
 
 Nội dung video dài là kênh GIẢI THÍCH/giáo dục gần gũi đời sống: bot tự sinh chủ đề (không dùng RSS/lane thời sự) từ 7 nhóm — lịch sử & nền văn minh, người tiền sử, dân tộc & tôn giáo, chiến tranh & bước ngoặt, nhân vật, sự kiện, và nguồn gốc những thứ đời thường (tiền, ẩm thực, thành phố, nghề nghiệp, phát minh quen thuộc) — cả xưa lẫn nay. Chủ đề khoa học/vật lý/thiên văn/vũ trụ bị loại vì ra quá trừu tượng và dài dòng. Mỗi lượt chọn ngẫu nhiên một nhóm (tránh lặp trong cùng lần thử) và kiểm tra trùng chủ thể với archive; nếu trùng thì đổi nhóm và thử lại. Kịch bản giải thích rõ MỘT chủ thể theo trình tự dễ hiểu, dựa trên kiến thức phổ thông đã được xác lập (không bịa số liệu/ngày tháng/trích dẫn), đối xử tôn trọng và trung lập với dân tộc/tôn giáo, và tiếp tục loại nội dung liên quan Việt Nam. Mặc định 15 ảnh AI hoạt hình người que có chi phí đầu ra khoảng `$0.075/video dài` (chỉnh qua `LONG_FORM_AI_IMAGES`); nếu một scene được gắn `search_query` địa danh/công trình nổi tiếng thì lấy ảnh thật từ Brave trước. PostgreSQL lưu lịch và archive, còn toàn bộ media được tạo và hoàn tất trong cùng một lượt chạy.

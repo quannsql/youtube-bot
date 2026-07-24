@@ -296,19 +296,19 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "low-stakes" in prompts[0]
     assert "Concrete/retellability test" in prompts[0]
     assert "classroom theory" in prompts[0]
-    assert "Historical-scale gate" in prompts[0]
-    assert "subject_stature_score" in prompts[0]
+    assert "Fame & clarity gate" in prompts[0]
+    assert "subject_fame_score" in prompts[0]
     assert "quirky local incident" in prompts[0]
     assert "viewer_question, stakes, and thumbnail_hint" in prompts[1]
     assert "viewer_payoff" in prompts[1]
-    assert "SIGNIFICANCE REQUIREMENT" in prompts[1]
+    assert "FAME & CLARITY REQUIREMENT" in prompts[1]
     assert "TITLE REQUIREMENT" in prompts[1]
     assert "thumbnail_text" in prompts[1]
     assert "worth remembering or sharing" in prompts[1]
     assert "photorealistic" in prompts[1]
     assert "Preserve this visual direction" in prompts[2]
     assert "dry topics that lack a strong concrete story" in prompts[2]
-    assert "minor local incidents" in prompts[2]
+    assert "obscure local incidents" in prompts[2]
     assert "concreteness_score" in prompts[2]
 
 
@@ -382,10 +382,10 @@ def test_short_editorial_filter_rejects_minor_local_disaster_story():
         "closing_line": "The underbuilt tank changed local rules.",
         "fact_note": "Note", "source_hints": ["Source"],
         "scenes": [{"duration": 10, "visual_prompt": "Concrete scene"}],
-        "subject_stature_score": 5,
-        "historical_significance_score": 4,
-        "broad_learning_value_score": 5,
-        "significance_reason": "A notable local industrial accident.",
+        "subject_fame_score": 5,
+        "fascination_score": 4,
+        "clarity_score": 5,
+        "appeal_reason": "A notable local industrial accident.",
     })
 
     reason = bot.short_editorial_rejection_reason(plan)
@@ -394,39 +394,55 @@ def test_short_editorial_filter_rejects_minor_local_disaster_story():
     assert "minor or local incident" in reason
 
 
-def test_short_editorial_filter_rejects_low_significance_scores():
+def test_short_editorial_filter_rejects_obscure_subject_by_fame_score():
     plan = bot.ShortPlan.from_dict({
-        "topic": "Obscure local event", "angle": "A surprising anecdote", "title": "A Local Mystery",
+        "topic": "A little-known regional event", "angle": "A surprising anecdote", "title": "A Quiet Mystery",
         "description": "Description #A #B", "tags": ["A", "B"],
-        "hook": "A local mystery began here.", "narration": "A local mystery began here.",
-        "closing_line": "It remained a local story.", "fact_note": "Note", "source_hints": ["Source"],
+        "hook": "A quiet mystery began here.", "narration": "A quiet mystery began here.",
+        "closing_line": "Few people ever heard of it.", "fact_note": "Note", "source_hints": ["Source"],
         "scenes": [{"duration": 10, "visual_prompt": "Concrete scene"}],
-        "subject_stature_score": 6,
-        "historical_significance_score": 5,
-        "broad_learning_value_score": 6,
+        "subject_fame_score": 4,
+        "fascination_score": 7,
+        "clarity_score": 8,
     })
 
-    assert "insufficient documentary significance" in bot.short_editorial_rejection_reason(plan)
+    assert "insufficient fame or clarity" in bot.short_editorial_rejection_reason(plan)
 
 
-def test_short_categories_stay_documentary_not_consumer_tips():
+def test_short_editorial_filter_accepts_famous_present_day_subject():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "A globally famous tech founder", "angle": "The decision that almost sank the company",
+        "title": "The Bet That Nearly Ended a Famous Company",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "One decision nearly ended a company everyone now knows.",
+        "narration": "One decision nearly ended a company everyone now knows. It became a global giant instead.",
+        "closing_line": "It became a global giant instead.", "fact_note": "Note", "source_hints": ["Source"],
+        "scenes": [{"duration": 10, "visual_prompt": "Concrete scene"}],
+        "subject_fame_score": 9,
+        "fascination_score": 8,
+        "clarity_score": 9,
+    })
+
+    assert bot.short_editorial_rejection_reason(plan) is None
+
+
+def test_short_categories_mix_famous_past_and_present():
     categories = " ".join(bot.CURIOSITY_TOPIC_CATEGORIES).lower()
 
+    # Famous subjects from the PAST are still covered.
     assert "historical figures" in categories
     assert "major historical events" in categories
-    assert "world wonders and architecture" in categories
     assert "natural wonders" in categories
+    # ...and famous subjects from the PRESENT are now covered too.
+    assert "today" in categories
+    assert "companies" in categories
+    assert "record-breaking" in categories
+    # Still excludes low-value consumer-tip and clickbait drift.
     assert "money and consumer surprises" not in categories
     assert "shopping" not in categories
     assert "scams" not in categories
-    assert "great inventions and engineering achievements" not in categories
-    assert "animals and remarkable nature" not in categories
-    assert "archaeology" not in categories
-    assert "scientific discoveries" not in categories
-    assert "space exploration" not in categories
+    assert "consumer tips" not in categories
     assert "astronomy" not in categories
-    assert "isolated local accidents" in categories
-    assert "small incidents remembered mainly as trivia" in categories
 
 
 def test_choose_novel_plan_retries_abstract_candidate(tmp_path, monkeypatch):

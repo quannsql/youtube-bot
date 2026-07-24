@@ -344,10 +344,14 @@ class ShortPlan:
     fact_note: str
     source_hints: list[str]
     thumbnail_text: str = ""
-    subject_stature_score: int = 0
-    historical_significance_score: int = 0
-    broad_learning_value_score: int = 0
-    significance_reason: str = ""
+    # How famous/recognizable the subject is (past OR present), how surprising the
+    # payoff is, and how easy the story is to follow. These replace the old
+    # "documentary significance" scores that pushed content toward dry, history-only
+    # topics and blocked famous present-day subjects from trending.
+    subject_fame_score: int = 0
+    fascination_score: int = 0
+    clarity_score: int = 0
+    appeal_reason: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ShortPlan":
@@ -383,10 +387,10 @@ class ShortPlan:
             closing_line=str(value.get("closing_line") or sentences[-1]), scenes=scenes,
             fact_note=str(value["fact_note"]), source_hints=[str(x) for x in value["source_hints"]][:4],
             thumbnail_text=str(value.get("thumbnail_text") or "")[:48],
-            subject_stature_score=max(0, min(10, int(value.get("subject_stature_score") or 0))),
-            historical_significance_score=max(0, min(10, int(value.get("historical_significance_score") or 0))),
-            broad_learning_value_score=max(0, min(10, int(value.get("broad_learning_value_score") or 0))),
-            significance_reason=str(value.get("significance_reason") or "")[:500],
+            subject_fame_score=max(0, min(10, int(value.get("subject_fame_score") or 0))),
+            fascination_score=max(0, min(10, int(value.get("fascination_score") or 0))),
+            clarity_score=max(0, min(10, int(value.get("clarity_score") or 0))),
+            appeal_reason=str(value.get("appeal_reason") or "")[:500],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1593,14 +1597,15 @@ def fresh_news_context_for_lane(
 
 
 CURIOSITY_TOPIC_CATEGORIES = [
-    "World-historical figures outside Vietnam with durable international recognition: reveal one documented decision, failure, rivalry, reform, campaign, or contradiction that helps explain the person's larger historical impact. The specific detail must unlock the major figure's significance, not function as celebrity trivia.",
-    "Major historical events outside Vietnam that changed a nation, region, empire, or international order: tell one decisive moment, overlooked mistake, unlikely turning point, deception, survival decision, or consequence that changed the recognizable outcome.",
-    "World wonders and architecture, including iconic major engineering works, ancient or modern: explain how a named landmark or megaproject was built, its hardest structural problem, symbolism, human cost, or a decisive episode in its history. Choose globally or nationally significant works, not an ordinary building or small local structure.",
-    "World-renowned natural wonders and extreme geography: focus on a named, widely recognized place, how its defining feature formed, what makes it globally exceptional, a record it holds, or how it shaped exploration, settlement, borders, or civilization.",
-    "Major civilizations, empires, lost cities, and consequential historical mysteries: center the story on a widely significant civilization, ruler, capital, monument, conflict, collapse, or surviving historical record and clearly separate evidence from legend.",
-    "Major wars, battles, imperial struggles, revolutions, and political turning points outside Vietnam: focus on one concrete tactic, decision, route, betrayal, logistical failure, or unexpected event that helps explain a large historical outcome rather than a minor skirmish or local dispute.",
-    "Historically transformative disasters or collapses only: choose events whose consequences changed national or international law, industry, public policy, warfare, urban planning, or public memory for generations. Reject isolated local accidents, one-building failures, sensational death toll stories, and small incidents remembered mainly as trivia.",
-    "Globally recognized monuments, cultural heritage, and symbols: explain a documented creation, transformation, controversy, or historical turning point that shaped identity across a nation, civilization, or multiple countries. Reject food-origin trivia, small customs, and novelty-first anecdotes.",
+    "World-famous historical figures outside Vietnam (rulers, generals, scientists, artists, explorers, founders): reveal one documented decision, rivalry, secret, failure, or turning point that most people never learned. Pick a name a global audience already recognizes, then surprise them with a true detail inside that fame.",
+    "Globally famous people of today outside Vietnam (heads of state, tech founders, athletes, musicians, actors, billionaires, cultural icons): tell one true, surprising, easy-to-follow fact, decision, rise, or turning point that reveals how they got so big or what few people realize about them. Use only well-established facts, never rumors, private gossip, or unverified claims.",
+    "Major historical events, wars, empires, and revolutions outside Vietnam that changed a nation, region, or the world: tell one decisive moment, overlooked mistake, unlikely twist, betrayal, or consequence that changed the recognizable outcome.",
+    "Major recent and current world events outside Vietnam with huge public attention (large-scale conflicts, elections, disasters, breakthroughs, cultural moments everyone is talking about): explain the one clear, surprising angle a general viewer would want to understand and share. Stay with widely reported, well-established facts and never invent numbers, quotes, or dates.",
+    "Iconic companies, brands, products, and technologies that shaped the modern world (past or present): tell the origin, the make-or-break decision, the rise, the comeback, or the collapse behind a name almost everyone knows.",
+    "World wonders, iconic architecture, landmarks, and megaprojects, ancient or modern: explain how a named landmark or megaproject was built, its hardest problem, its symbolism, human cost, or a decisive episode in its story. Choose globally recognizable works, not an ordinary local building.",
+    "World-renowned natural wonders and extreme geography: focus on a named, widely recognized place, how its defining feature formed, what makes it exceptional, or a record it holds.",
+    "Famous civilizations, empires, lost cities, and legendary mysteries: center on a widely known civilization, ruler, capital, monument, conflict, collapse, or surviving record, and clearly separate solid evidence from legend.",
+    "Record-breaking feats, superlatives, and staggering scales (biggest, oldest, fastest, deadliest, richest, most expensive) tied to a famous named subject: build the story around the one jaw-dropping number or comparison and what it really means.",
 ]
 
 ABSTRACT_SHORT_TOPIC_TERMS = (
@@ -1684,9 +1689,9 @@ def get_random_topic_rule() -> str:
         f"TITLE STYLE to aim for: **{title_style}**. "
         "Only about one in three videos should use a question title; prefer confident declarative or teaser titles otherwise, "
         "and never begin the title with 'Why' unless the narrative format is genuinely MYSTERY. "
-        "Choose a major, widely significant subject first, then find a concrete surprising detail inside it. Historical stature and learning value come before shock, oddity, or viral trivia. "
-        "Reject local accidents, one-building or one-company incidents, obscure anecdotes, and novelty-first stories unless they clearly changed a nation, civilization, major industry, or international history for generations. "
-        "Reject academic theories, unnamed hypothetical systems or planets, and metaphorical thesis-style angles. "
+        "Choose a FAMOUS, instantly recognizable subject first — a person, place, event, company, brand, or landmark that a global audience already knows — from EITHER the past OR the present, then find one true, surprising detail inside it. A famous name people already care about beats an obscure but 'important' one. "
+        "Reject obscure local accidents, one-building or one-company mishaps, no-name anecdotes, and trivia about subjects nobody recognizes. Also reject academic theories, unnamed hypothetical systems or planets, and metaphorical thesis-style angles — every video must be about a concrete, nameable, well-known subject. "
+        "The surprising detail must be true and easy to explain in plain words; never trade clarity for cleverness. "
         "Do not hardcode the exact examples, but generate similarly captivating concepts."
     )
 
@@ -1714,8 +1719,8 @@ PLAN_SCHEMA = '''{
   "closing_line":"last spoken sentence, <=14 words",
   "scenes":[{"duration":5.5,"visual_prompt":"English photorealistic documentary image prompt: one concrete subject + setting, describe only what IS in frame; vary the shot type between scenes"}],
   "fact_note":"what uncertainty was avoided", "source_hints":["institution or primary-source lead"],
-  "subject_stature_score":9, "historical_significance_score":9, "broad_learning_value_score":9,
-  "significance_reason":"one sentence explaining the subject's durable national, civilizational, or global importance"
+  "subject_fame_score":9, "fascination_score":9, "clarity_score":9,
+  "appeal_reason":"one sentence on why this famous subject plus surprising angle will hook a general viewer"
 }'''
 
 LONG_FORM_PLAN_SCHEMA = '''{
@@ -1743,8 +1748,8 @@ RESEARCH_SCHEMA = '''{
   "surprise_payoff":"the specific reveal that makes the hook worth watching",
   "central_claim":"one defensible claim", "evidence_points":["fact 1","fact 2","fact 3"],
   "uncertainty":"what must be qualified or omitted", "fresh_angle":"a non-repetitive narrative angle",
-  "subject_stature_score":9, "historical_significance_score":9, "broad_learning_value_score":9,
-  "significance_reason":"durable national, civilizational, or global importance beyond the surprising detail",
+  "subject_fame_score":9, "fascination_score":9, "clarity_score":9,
+  "appeal_reason":"why this famous subject and its surprising angle will make a general viewer click and share",
   "source_leads":["credible primary institution, archive, museum, or research body"],
   "avoid":["specific overclaim or cliché to avoid"]
 }'''
@@ -1870,11 +1875,11 @@ Theme: {theme}
 Use your reasoning internally before responding. Return only JSON using this schema:
 {RESEARCH_SCHEMA}
 Topic strategy: {topic_rule}
-Rules: Choose one specific, evidence-based topic with a named person, place, object, event, rule, mistake, price, or visible feature. It must deliver a concrete surprise or useful real-world understanding that an ordinary viewer can grasp immediately. Do not invent sources, data, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it.
-Historical-scale gate: the central SUBJECT itself must be important enough for a serious world-history documentary before considering its surprising angle. Require all three honest scores — subject_stature_score, historical_significance_score, and broad_learning_value_score — to be at least 8/10. A famous-sounding headline is not evidence of significance. Do not inflate scores to save a weak candidate.
-Reject a candidate if it is mainly a quirky local incident, isolated industrial accident, one-building failure, municipal episode, obscure personal anecdote, food-origin fact, or shocking number with little durable consequence. An event centered on one city or company qualifies only when it clearly changed national or international law, institutions, industry, borders, warfare, culture, or public life for generations.
-Prefer a specific revealing detail INSIDE a major subject: a consequential decision by a world-historical person, a turning point in a major event or war, a structural challenge in an iconic work, or a defining feature of a renowned place. The detail is the storytelling lens; it must not be the entire reason the subject seems interesting.
-Concrete/retellability test: silently reject the candidate unless it passes at least THREE of these tests: (1) centers a named person, event, place, structure, civilization, object, species, invention, mission, or discovery; (2) contains one documented decision, construction detail, obstacle, mistake, turning point, hidden feature, record, or discovery; (3) delivers a surprising answer that can be retold to a friend in one sentence; (4) has a vivid scene or object that can be shown clearly; (5) explains why the subject mattered in history or what changed because of it.
+Rules: Choose one specific, evidence-based topic built on a FAMOUS, instantly recognizable subject — a named person, place, event, company, brand, landmark, or work a general global audience already knows — from EITHER the past OR the present. It must deliver a concrete surprise an ordinary viewer can grasp in seconds. Do not invent sources, data, dates, quotations, or expert opinions. A source_lead is only a lead for later verification, never a claim that you accessed it.
+Fame & clarity gate: the central SUBJECT must be genuinely famous or widely recognized (subject_fame_score at least 6), the surprising angle must be share-worthy (fascination_score at least 6), and the whole story must be easy for a general viewer to follow in one pass (clarity_score at least 7). Score honestly and never inflate to rescue a weak candidate. An obscure subject dressed up in dramatic wording fails this gate even if it feels "important".
+Reject a candidate if its central subject is obscure or unrecognizable to a broad audience — a quirky local incident, isolated industrial accident, one-building failure, municipal episode, or a shocking number attached to a subject nobody knows. Famous present-day people, events, companies, and places are welcome; use only well-established public facts, never private gossip, rumor, or anything unverified.
+Prefer one specific revealing detail INSIDE a famous subject: a decision or turning point in a well-known person's life (past or present), a twist in a major event or war, the make-or-break moment of an iconic company or product, a structural challenge in a landmark, or a defining feature of a renowned place. The detail is the storytelling lens; the subject's fame is what makes viewers click.
+Concrete/retellability test: silently reject the candidate unless it passes at least THREE of these tests: (1) centers a named, recognizable person, event, place, structure, company, product, or work; (2) contains one documented decision, moment, obstacle, mistake, turning point, hidden feature, or record; (3) delivers a surprising answer that can be retold to a friend in one plain sentence; (4) has a vivid scene or object that can be shown clearly; (5) makes a general viewer think "I did not know that" about a name they already recognize.
 Clickability filter: before selecting the topic, silently reject candidates that sound like a procedural report, a routine measurement update, a narrow technical footnote, a low-stakes institutional detail, a classroom theory, a speculative planetary scenario, or an academic concept with no concrete story. Never frame a person as a metaphorical "processing engine" and never build the story around carrying capacity, systems theory, a conceptual framework, or an unnamed planet. The final viewer_question should feel like a specific, surprising documentary story someone would click, save, or share without already knowing the subject.
 Novelty rule: The topic and fresh_angle must be materially different from every item in the existing archive and rejected candidates below. Do not choose the same object, event, artifact, site, person, mechanism, or central claim. If a broad theme keeps pointing to the same subject, switch domains within the theme.
 Existing archive: {json.dumps(past, ensure_ascii=False)}
@@ -1905,21 +1910,21 @@ def plan_short(
     minimum_words, maximum_words = narration_word_bounds(duration)
     prompt = f'''Act as a senior viral documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan from the editorial brief below.
 Theme: {theme}
-Audience: curious general English-speaking viewers, not academics or specialists. Keep the channel centered on world-historical figures, major events, civilizations, wars, empires, renowned natural wonders, iconic architecture, major landmarks, monuments, and transformative cultural history.
+Audience: curious general English-speaking viewers, not academics or specialists. Keep the channel centered on FAMOUS, instantly recognizable subjects from the past OR the present: legendary and current world figures, major events old and new, iconic companies, brands and products, renowned natural wonders, iconic architecture, major landmarks and monuments, and record-breaking feats.
 Topic strategy: {topic_rule}
 {opener_rule}
 Use the editorial brief's viewer_question, stakes, and thumbnail_hint to make the Short feel specific, surprising, and worth remembering or sharing in the assigned narrative format — not a neutral encyclopedia entry, classroom lesson, consumer tip, or abstract theory.
-SIGNIFICANCE REQUIREMENT: Preserve honest subject_stature_score, historical_significance_score, and broad_learning_value_score values of at least 8/10. The narration must teach why the larger subject mattered, not merely recount the surprising detail. Reject local incidents and trivia dressed up with dramatic language.
+FAME & CLARITY REQUIREMENT: Keep honest subject_fame_score and fascination_score of at least 6/10 and clarity_score of at least 7/10. The subject must be a name a broad audience already recognizes, and the story must be effortless to follow on the first watch. Reject obscure subjects and trivia dressed up with dramatic language; do not sacrifice clarity for cleverness.
 The topic, angle, title, and hook must name or clearly point to the brief's concrete_anchor. Fully deliver the viewer_payoff, share_trigger, and surprise_payoff. A viewer should be able to retell the core story in one plain sentence.
 TITLE REQUIREMENT: The title must explicitly name the concrete_anchor — the actual person, landmark, place, structure, event, civilization, object, or discovery — rather than hiding it behind "this", "that", "the secret", or a generic mystery phrase. Make the named subject appear early in the title whenever natural. For example, write "The Three Gorges Dam's Hidden Problem", not "The Dam Nobody Saw Coming". Set thumbnail_text to 2-5 bold words that name the same subject; it is not a vague slogan.
 Use a sharp curiosity hook in the first 1.5 seconds, a clear escalation or reversal in the middle, and a concise closing line that makes the viewer think. The narration must start verbatim with hook and end verbatim with closing_line.
 CRITICAL NARRATIVE RULE: The story must strictly follow a 3-part structure:
 1. BEGINNING (Context): Immediately establish the facts: Who? Where? When? What happened? Never jump straight into a mystery without setting the scene.
 2. MIDDLE (Story and reveal): Show the decision, construction challenge, obstacle, mistake, discovery, conflict, hidden feature, cause, or turning point using concrete details and simple cause-and-effect.
-3. ENDING (Meaning): Deliver the promised answer and finish with the historical significance, lasting consequence, striking comparison, or memorable fact worth retelling.
+3. ENDING (Meaning): Deliver the promised answer and finish with why it matters, the lasting consequence, a striking comparison, or a memorable fact worth retelling.
 Ensure the narration flows logically and is highly accessible to a general audience.
 Use plain spoken language, define any necessary technical term immediately, keep one main idea per sentence, and replace abstract filler with concrete cause-and-effect or scale comparisons. Fully pay off the opening hook before the closing line.
-Do not use thesis-like angles such as "X as a human engine," "a planet locking itself into a climate trap," "hacking Earth's carrying capacity," or similar metaphorical academic framing. Do not select standalone topics about inventions, engineering achievements, scientific discoveries, animals, archaeology, astronomy, or space exploration. Construction details are allowed only when they directly explain a named landmark, monument, building, bridge, dam, palace, temple, or other architectural work.
+Do not use thesis-like angles such as "X as a human engine," "a planet locking itself into a climate trap," "hacking Earth's carrying capacity," or similar metaphorical academic framing. Every Short must center on a concrete, nameable, well-known subject; avoid abstract theory, obscure scientific studies, unnamed animals, and dry academic discoveries with no famous subject attached. Famous inventions, products, companies, and technologies are welcome when they are household names told as a human story. Construction details are allowed only when they directly explain a named landmark, monument, building, bridge, dam, palace, temple, or other architectural work.
 Facts: only use the supplied evidence points. Preserve the uncertainty exactly when relevant. Never turn a source lead into a citation or claim it was consulted.
 Visuals: {VISUAL_STYLE_RULES}
 Storyboard rhythm: make each scene visually distinct, such as hook image, map/diagram, evidence close-up, mechanism/process reveal, and closing visual metaphor. Intentional slight movement discontinuity is acceptable; vertical 9:16.
@@ -1934,8 +1939,8 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.65)))
     review_prompt = f'''Act as the final fact, documentary-story, and retention editor. Think deeply but return only JSON.
 Improve the draft below into a stronger {duration}-second English YouTube Short. Return exactly:
-{{"quality_check":{{"hook_score":1,"clarity_score":1,"concreteness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"subject_stature_score":1,"historical_significance_score":1,"broad_learning_value_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
-The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, consumer-tip drift, academic framing, speculative planetary scenarios, minor local incidents, novelty-first trivia, and dry topics that lack a strong concrete story. Score historical stature honestly: a candidate below 8/10 on subject stature, historical significance, or broad learning value must be rejected rather than rescued with dramatic wording. Rewrite any abstract angle into a named person/place/object/event/structure/discovery story; if that is impossible, replace it with a better candidate from the assigned documentary category. Make the hook immediately intriguing, the middle concrete, and the closing line memorable enough to retell or share. Use plain spoken English and ensure the narration clearly pays off the hook while explaining the larger subject's lasting importance. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. The title must explicitly name the concrete_anchor, never a pronoun-only or generic subject; thumbnail_text must be 2-5 words naming that same main subject. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
+{{"quality_check":{{"hook_score":1,"clarity_score":1,"concreteness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"subject_fame_score":1,"fascination_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
+The plan must retain only claims supported by the editorial brief. Reject hype, vague filler, fake certainty, generic endings, repetition, consumer-tip drift, academic framing, speculative planetary scenarios, obscure local incidents, no-name trivia, and dry topics that lack a strong concrete story. Score honestly: a candidate below 6/10 on subject fame or fascination, or below 7/10 on clarity, must be rejected or rewritten rather than rescued with dramatic wording. The subject must be a famous, recognizable name (past or present); rewrite any abstract or no-name angle into a story about a well-known person/place/event/company/structure, and if that is impossible, replace it with a better candidate from the assigned category. Make the hook immediately intriguing, the middle concrete, and the closing line memorable enough to retell or share. Use plain, simple spoken English and ensure the narration clearly pays off the hook so an ordinary viewer follows it effortlessly on the first watch. Keep the title in the assigned style: it may be a bold declarative statement, a curiosity-gap teaser, a superlative, a number hook, or a question — but do NOT reflexively rewrite it into a "Why..." question, and only keep a question title if the story is genuinely a mystery. The title must explicitly name the concrete_anchor, never a pronoun-only or generic subject; thumbnail_text must be 2-5 words naming that same main subject. {opener_rule}The narration must begin with hook and end with closing_line. Keep exactly 6 scenes with durations totaling exactly {duration}. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
@@ -1944,12 +1949,12 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
         raise BotError("OpenAI quality pass thiếu trường plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
     review_quality = reviewed.get("quality_check", {})
-    if not plan.subject_stature_score:
-        plan.subject_stature_score = int(review_quality.get("subject_stature_score") or 0)
-    if not plan.historical_significance_score:
-        plan.historical_significance_score = int(review_quality.get("historical_significance_score") or 0)
-    if not plan.broad_learning_value_score:
-        plan.broad_learning_value_score = int(review_quality.get("broad_learning_value_score") or 0)
+    if not plan.subject_fame_score:
+        plan.subject_fame_score = int(review_quality.get("subject_fame_score") or 0)
+    if not plan.fascination_score:
+        plan.fascination_score = int(review_quality.get("fascination_score") or 0)
+    if not plan.clarity_score:
+        plan.clarity_score = int(review_quality.get("clarity_score") or 0)
     ensure_title_names_main_subject(plan)
     normalize_scene_count(plan, 6)
     quality = reviewed.get("quality_check", {})
@@ -2176,6 +2181,8 @@ Hard rules:
 - TITLE REQUIREMENT: The title must explicitly name the central person, country, place, route, company, conflict, policy, event, or sports team — not only its consequence. Put that concrete subject early when possible. Set thumbnail_text to 2-5 bold words that name the same central subject; never use a vague slogan.
 - Use a save/share test: the viewer should finish with at least one clear consequence, comparison, warning sign, or next development they can explain to someone else.
 - FORMAT: a {duration // 60}-minute NEWS DIGEST, not a deep-dive documentary. Structure: immediate headline payoff, what just happened, essential background in one short chapter, who is affected, one or two brief analysis beats, what to watch next, quick close. Keep analysis light and concrete; skip extended history lessons, competing-interpretation essays, and theory.
+- HOOK: the first spoken sentence must be a specific, scroll-stopping statement that names the concrete subject and the stakes. No vague throat-clearing like "The world is changing" — front-load the single most surprising or consequential fact so a viewer knows in five seconds exactly who and what this is about.
+- CLARITY: write plain, vivid spoken English for a general viewer with no background. One clear idea per sentence, define any name or term the moment it first appears, and use concrete cause-and-effect and everyday comparisons instead of jargon or abstract analysis. A distracted viewer must be able to follow it on the first listen.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
 - WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words and treat {target_max_words} as a hard ceiling — the timeline follows the narration audio, so every extra 100 words adds about 40 seconds to the video. Never pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
@@ -2206,7 +2213,8 @@ Rules:
 - Reject science, climate research, space, medicine, health studies, archaeology, and academic discoveries. Keep only politics, military affairs, economics, business, technology industry, sports, or consequential world news.
 - Keep only claims supportable by the supplied RSS context or clearly phrased as general background.
 - Reject routine announcements or abstract theory unless the script can name the concrete change, affected people, real-world consequence, and what happens next.
-- Keep a strong first 20 seconds, then clear chapters with escalation, practical explanation, a surprising but supported payoff, and a reason viewers would save or share the video. The title must explicitly name the central person/place/event/company/route, and thumbnail_text must be 2-5 words that name that same subject rather than a vague teaser.
+- The hook (first spoken sentence) must be a specific, scroll-stopping statement that names the concrete subject and the stakes, not vague throat-clearing; rewrite any weak or generic opening. Then keep clear chapters with escalation, practical explanation, a surprising but supported payoff, and a reason viewers would save or share the video. The title must explicitly name the central person/place/event/company/route, and thumbnail_text must be 2-5 words that name that same subject rather than a vague teaser.
+- Rewrite any sentence a general viewer could not follow on first listen: prefer plain spoken English, one idea per sentence, defined terms, and concrete comparisons over jargon or abstract analysis.
 - The narration must begin with hook and end with closing_line.
 - The scenes must total exactly {duration} seconds and be horizontal 16:9 visual prompts.
 - Keep the news-digest format: light, concrete analysis only — no extended history or theory chapters.
@@ -2496,7 +2504,7 @@ def rejection_context(plan: ShortPlan, duplicate: sqlite3.Row) -> dict[str, str]
 
 
 def short_editorial_rejection_reason(plan: ShortPlan) -> str | None:
-    """Reject abstract or low-significance Shorts before image credits are spent."""
+    """Reject abstract, obscure, or hard-to-follow Shorts before image credits are spent."""
     text = " ".join((plan.topic, plan.angle, plan.title, plan.hook, plan.narration)).lower()
     normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     matched = [term for term in ABSTRACT_SHORT_TOPIC_TERMS if term in normalized]
@@ -2505,16 +2513,20 @@ def short_editorial_rejection_reason(plan: ShortPlan) -> str | None:
     minor_matches = [term for term in MINOR_SHORT_STORY_TERMS if term in normalized]
     if minor_matches:
         return f"minor or local incident framing ({', '.join(minor_matches[:3])})"
-    significance_scores = {
-        "subject stature": plan.subject_stature_score,
-        "historical significance": plan.historical_significance_score,
-        "broad learning value": plan.broad_learning_value_score,
+    # Famous (past OR present) + surprising + clear. Fame replaces the old
+    # "documentary significance" bar, so obscure trivia is still filtered while
+    # famous present-day subjects are allowed to trend. Clarity has the highest
+    # floor because unclear storytelling is the biggest retention killer.
+    quality_gates = {
+        "subject fame": (plan.subject_fame_score, 6),
+        "fascination": (plan.fascination_score, 6),
+        "clarity": (plan.clarity_score, 7),
     }
-    supplied_scores = [score for score in significance_scores.values() if score > 0]
+    supplied_scores = [score for score, _ in quality_gates.values() if score > 0]
     if supplied_scores:
-        weak = [name for name, score in significance_scores.items() if score < 8]
+        weak = [name for name, (score, floor) in quality_gates.items() if 0 < score < floor]
         if weak:
-            return f"insufficient documentary significance ({', '.join(weak)})"
+            return f"insufficient fame or clarity ({', '.join(weak)})"
     return None
 
 
@@ -2538,7 +2550,7 @@ def choose_novel_plan(
             })
             print(
                 f"Short idea rejected by editorial gate ({plan.title!r}: {editorial_reason}); "
-                "requesting a larger, more consequential historical subject..."
+                "requesting a more famous subject and a clearer, more surprising story..."
             )
             continue
         duplicate = archive.duplicate_of(plan)
@@ -4243,7 +4255,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--theme",
-        default="world-historical figures, major historical events, civilizations, wars, empires, renowned natural wonders, iconic world architecture, major landmarks, monuments, and transformative cultural history with surprising concrete details",
+        default="world-famous people and moments — legendary figures and the biggest names of today, major events past and present, iconic companies, brands and products, renowned natural wonders, iconic world architecture, famous landmarks and monuments, and record-breaking feats — each told through one surprising, easy-to-follow story",
     )
     parser.add_argument(
         "--duration",

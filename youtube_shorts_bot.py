@@ -1458,24 +1458,24 @@ VIETNAM_BLOCKLIST = (
     "da nang", "nguyen", "pham", "tran ", "vo ", "to lam",
 )
 
+# Human, everyday-life-centered explainer topics. Deliberately excludes hard
+# science, space, and cosmology — those came out too abstract and long-winded.
 LONG_FORM_EXPLAINER_CATEGORIES = (
     "Human history and civilizations, ancient to modern: how a people, empire, kingdom, dynasty, or era lived, rose, or fell.",
     "Prehistory and early humans: how prehistoric people and early humans survived — hunting, gathering, fire, tools, shelter, clothing, and migration.",
-    "Peoples, cultures, and religions: the origin, journey, beliefs, and defining moments of a people or faith, explained factually and respectfully.",
-    "Earth, nature, and science explainers: how the Earth, its oceans, continents, climate, or life formed and how a major natural force works.",
-    "The universe and space: how the cosmos, stars, planets, or the solar system came to be and how they work.",
+    "Peoples, cultures, and religions: the origin, journey, beliefs, traditions, and defining moments of a people or faith, explained factually and respectfully.",
     "Wars, battles, revolutions, and turning points, past or present: what happened, why it happened, and what changed.",
     "Notable figures, past or present: who they were, what they did, and why they still matter.",
-    "Major events and phenomena, past or present: a clear explanation of what happened and why it mattered.",
-    "Origins and how things came to be: how world-shaping things and ideas — writing, money, cities, farming, trade, great inventions, institutions — actually began and spread.",
+    "Major events, past or present: a clear explanation of what happened and why it mattered.",
+    "Origins of the everyday world: how familiar things — money, food, cities, farming, trade, writing, holidays, everyday customs, jobs, and famous inventions — actually began and became part of daily life.",
 )
 
 # Long-form is an educational explainer channel with stick-figure visuals, so it
 # gets its own default theme unless the user overrides --theme.
 LONG_FORM_DEFAULT_THEME = (
-    "an educational explainer channel that clearly explains events, subjects, and how things came to be — "
-    "across human history and civilizations, prehistory and early humans, peoples and cultures, the Earth and "
-    "nature, space, wars and turning points, and notable figures and events, past and present"
+    "a relatable, everyday educational explainer channel that clearly explains events, people, and how the everyday "
+    "things around us came to be — across human history and civilizations, prehistory and early humans, peoples "
+    "and cultures, wars and turning points, notable figures, and the origins of everyday life, past and present"
 )
 
 
@@ -2001,7 +2001,8 @@ Recently covered subjects (temporary cooldown list): {json.dumps(covered_subject
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
 
 Hard rules:
-- Pick ONE clear, specific, fascinating subject inside the assigned topic area — for example how prehistoric humans survived, the story and journey of the Jewish people, how the Earth formed, a famous war or its turning point, or how a world-changing thing came to be. Subjects may be historical OR present-day.
+- Pick ONE clear, specific, fascinating subject inside the assigned topic area — for example how prehistoric humans survived, the story and journey of the Jewish people, a famous war or its turning point, a well-known historical figure, or how an everyday thing like money, coffee, or cities came to be. Subjects may be historical OR present-day.
+- STAY CLOSE TO EVERYDAY HUMAN LIFE. This channel is NOT about hard science, physics, chemistry, astronomy, space, the cosmos, or how natural forces work — that content is too abstract and long-winded. Keep the story about people, places, cultures, events, and familiar everyday things a general viewer already relates to.
 - Do NOT center the video on Vietnam or any Vietnam-related person, place, or event.
 - COOLDOWN RULE: Do not choose a subject that overlaps the recently covered subjects, the existing archive, or the rejected candidates above, even with a new angle. Pick a genuinely different subject each time.
 - This is EXPLAINER content, not a news bulletin. Actually teach the viewer: what it is, who/where/when, how it happened or works step by step, and why it matters.
@@ -2045,6 +2046,7 @@ Rules:
 - The narration must begin with hook and end with closing_line.
 - The scenes must total exactly {duration} seconds and be stick-figure explainer visual prompts (with a real-photo search_query only for genuinely famous real places, landmarks, or artifacts).
 - Keep it a clear explainer that teaches the subject; do not turn it into a dry list or an abstract essay.
+- Reject or rewrite any drift into hard science, physics, chemistry, astronomy, space, or cosmology; keep the video about people, cultures, events, and everyday things a general viewer relates to.
 - Aim for roughly {target_min_words}-{target_max_words} words. If the draft narration exceeds {target_max_words} words, cut secondary detail until it fits; the final video length follows the narration audio directly. Never pad with filler.
 
 Existing archive: {json.dumps(past, ensure_ascii=False)}

@@ -213,6 +213,11 @@ def test_long_form_explainer_category_avoids_repeats_within_run():
     # If all are excluded it still returns a valid category rather than crashing.
     assert bot.choose_long_form_explainer_category(set(bot.LONG_FORM_EXPLAINER_CATEGORIES)) in bot.LONG_FORM_EXPLAINER_CATEGORIES
 
+    # Hard science, space, and cosmology were removed for being too abstract/long-winded.
+    categories = " ".join(bot.LONG_FORM_EXPLAINER_CATEGORIES).lower()
+    for banned in ("space", "cosmos", "universe", "astronomy", "planet", "science explainer"):
+        assert banned not in categories
+
 
 def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     archived = bot.ShortPlan.from_dict({
@@ -1277,22 +1282,22 @@ def test_plan_long_form_builds_educational_explainer(tmp_path):
 
 def test_plan_long_form_explainer_meets_word_budget(tmp_path):
     plan = {
-        "topic": "How the Earth formed",
-        "angle": "From a spinning dust cloud to a living planet",
-        "title": "How the Earth Formed From a Cloud of Dust",
-        "description": "An educational explainer. AI-assisted production. #Earth #Science",
-        "tags": ["Earth", "Science"],
-        "hook": "The ground under your feet began as a spinning cloud of dust.",
-        "narration": "The ground under your feet began as a spinning cloud of dust. " + "Gravity slowly pulled dust and rock together until a young planet took shape. " * 60 + "Over billions of years that hot ball of rock became the living world we know.",
-        "closing_line": "Over billions of years that hot ball of rock became the living world we know.",
+        "topic": "How money was invented",
+        "angle": "From trading goods directly to coins and paper money",
+        "title": "How Money Was Invented",
+        "description": "An educational explainer. AI-assisted production. #History #Money",
+        "tags": ["History", "Money"],
+        "hook": "For most of history, people lived with no money at all.",
+        "narration": "For most of history, people lived with no money at all. " + "People traded goods directly, then slowly agreed to use coins so everyone could buy and sell more easily. " * 60 + "That simple agreement became the money we all use today.",
+        "closing_line": "That simple agreement became the money we all use today.",
         "scenes": [
-            {"duration": 75, "visual_prompt": "A stick-figure narrator pointing at a swirling cloud of dust and rock in space."},
-            {"duration": 75, "visual_prompt": "Simple rocks clumping together into a small round planet, flat vector style."},
-            {"duration": 75, "visual_prompt": "A glowing molten planet slowly cooling into solid ground."},
-            {"duration": 75, "visual_prompt": "A stick figure standing on green grass under a blue sky."},
+            {"duration": 75, "visual_prompt": "Two cartoon stick figures trading a chicken for a basket of grain at a market."},
+            {"duration": 75, "visual_prompt": "A cartoon stick figure handing over round coins for a loaf of bread."},
+            {"duration": 75, "visual_prompt": "A cartoon stick figure holding a piece of paper money and smiling."},
+            {"duration": 75, "visual_prompt": "Cartoon stick figures buying and selling at a busy little town market."},
         ],
-        "fact_note": "Stays qualitative; avoids invented precise ages.",
-        "source_hints": ["General earth-science knowledge"],
+        "fact_note": "Stays qualitative; avoids invented dates or numbers.",
+        "source_hints": ["General history knowledge"],
     }
 
     class FakeClient:
@@ -1312,7 +1317,7 @@ def test_plan_long_form_explainer_meets_word_budget(tmp_path):
         300,
         4,
         4,
-        bot.LONG_FORM_EXPLAINER_CATEGORIES[3],
+        bot.LONG_FORM_EXPLAINER_CATEGORIES[6],  # Origins of the everyday world
     )
 
     assert bot.spoken_word_count(result.narration) >= bot.long_form_word_bounds(300)[0]

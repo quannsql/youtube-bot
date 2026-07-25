@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+from io import BytesIO
 import json
 import logging
 import os
@@ -165,6 +166,7 @@ class Settings:
     text_attempts: int = 3
     text_retry_backoff_seconds: int = 5
     brave_image_search_endpoint: str = "https://api.search.brave.com/res/v1/images/search"
+    wikimedia_commons_api_endpoint: str = "https://commons.wikimedia.org/w/api.php"
     brave_search_attempts: int = 3
     brave_search_min_interval_seconds: float = 2.0
     image_connect_timeout: int = 30
@@ -1195,7 +1197,7 @@ class BraveImageSearch:
                     timeout=(self.s.image_connect_timeout, 30),
                 )
             except requests.RequestException as exc:
-                LOG.warning("Brave image search failed; falling back to OpenAI: %s", exc)
+                LOG.warning("Brave image search failed; trying the next image provider: %s", exc)
                 return None
 
             status_code = getattr(response, "status_code", 200)
@@ -1206,7 +1208,7 @@ class BraveImageSearch:
                 except requests.RequestException as exc:
                     if status_code in {401, 403}:
                         self._disabled_for_run = True
-                    LOG.warning("Brave image search failed; falling back to OpenAI: %s", exc)
+                    LOG.warning("Brave image search failed; trying the next image provider: %s", exc)
                     return None
                 return response
             if attempt < self.s.brave_search_attempts:
@@ -1220,7 +1222,7 @@ class BraveImageSearch:
         self._disabled_for_run = True
         LOG.warning(
             "Brave image search remained rate-limited after %d attempts; disabling Brave for the rest "
-            "of this run and falling back to OpenAI.",
+            "of this run and trying the next image provider.",
             self.s.brave_search_attempts,
         )
         return None
@@ -1239,6 +1241,13 @@ class BraveImageSearch:
         result_height = properties.get("height")
         if not isinstance(result_width, (int, float)) or not isinstance(result_height, (int, float)):
             return True
+        # Comparison cards request a square source and use a contain fit, so both
+        # portrait headshots and landscape product/logo photos are suitable. The
+        # former implementation treated a square target as landscape and silently
+        # rejected the portrait photos commonly returned for public figures.
+        target_ratio = width / max(1, height)
+        if 0.8 <= target_ratio <= 1.25:
+            return True
         return (result_height > result_width) == (height > width)
 
     def image(self, query: str, destination: Path, width: int, height: int) -> bool:
@@ -1250,7 +1259,7 @@ class BraveImageSearch:
                 return False
             results = response_json(response).get("results", [])
         except Exception as exc:
-            LOG.warning("Brave image search failed; falling back to OpenAI: %s", exc)
+            LOG.warning("Brave image search failed; trying the next image provider: %s", exc)
             return False
 
         for result in results if isinstance(results, list) else []:
@@ -1288,7 +1297,148 @@ class BraveImageSearch:
             })
             LOG.info("Downloaded trusted-source web image for %s via Brave Search.", destination.name)
             return True
-        LOG.info("No suitable trusted Brave image result for %s; using OpenAI.", destination.name)
+        LOG.info("No suitable trusted Brave image result for %s; trying Wikimedia Commons.", destination.name)
+        return False
+
+
+class WikimediaCommonsImageSearch:
+    """Fetch freely licensed real-subject images directly from Wikimedia Commons."""
+
+    SUPPORTED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+    def __init__(self, settings: Settings) -> None:
+        self.s = settings
+        self.used_source_pages: set[str] = set()
+        self.sources: list[dict[str, str]] = []
+
+    @staticmethod
+    def _safe_https_host(value: str, allowed_host: str) -> bool:
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return False
+        host = (parsed.hostname or "").lower()
+        return parsed.scheme == "https" and (host == allowed_host or host.endswith(f".{allowed_host}"))
+
+    @staticmethod
+    def _save_as_jpeg(image_bytes: bytes, destination: Path) -> bool:
+        """Decode and normalize downloaded bytes so FFmpeg never receives a corrupt file."""
+        if not 10_000 <= len(image_bytes) <= 25_000_000:
+            return False
+        partial = destination.with_name(f"{destination.name}.part")
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(image_bytes)) as image:
+                image.load()
+                if image.width < 160 or image.height < 160:
+                    return False
+                if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
+                    rgba = image.convert("RGBA")
+                    normalized = Image.new("RGB", rgba.size, "white")
+                    normalized.paste(rgba, mask=rgba.getchannel("A"))
+                else:
+                    normalized = image.convert("RGB")
+                normalized.save(partial, format="JPEG", quality=92, optimize=True)
+            partial.replace(destination)
+            return destination.stat().st_size >= 1024
+        except Exception as exc:
+            LOG.debug("Downloaded Wikimedia image could not be decoded: %s", exc)
+            return False
+        finally:
+            if partial.exists():
+                partial.unlink()
+
+    def image(self, query: str, destination: Path, width: int, height: int) -> bool:
+        if not query.strip():
+            return False
+        try:
+            response = requests.get(
+                self.s.wikimedia_commons_api_endpoint,
+                headers={"User-Agent": "youtube-documentary-bot/1.0 (Wikimedia Commons image fallback)"},
+                params={
+                    "action": "query",
+                    "generator": "search",
+                    "gsrsearch": query[:200],
+                    "gsrnamespace": 6,
+                    "gsrlimit": 12,
+                    "prop": "info|imageinfo",
+                    "inprop": "url",
+                    "iiprop": "url|mime|size|thumbmime",
+                    "iiurlwidth": 1200,
+                    "format": "json",
+                    "formatversion": 2,
+                },
+                timeout=(self.s.image_connect_timeout, 30),
+            )
+            response.raise_for_status()
+            pages = response_json(response).get("query", {}).get("pages", [])
+        except Exception as exc:
+            LOG.warning("Wikimedia Commons image search failed: %s", exc)
+            return False
+
+        ordered_pages = sorted(
+            (page for page in pages if isinstance(page, dict)),
+            key=lambda page: page.get("index") if isinstance(page.get("index"), int) else 1_000_000,
+        ) if isinstance(pages, list) else []
+        for page in ordered_pages:
+            if not isinstance(page, dict):
+                continue
+            source_page = str(page.get("canonicalurl") or "")
+            image_infos = page.get("imageinfo")
+            info = image_infos[0] if isinstance(image_infos, list) and image_infos else {}
+            if not isinstance(info, dict):
+                continue
+            thumb_url = str(info.get("thumburl") or "")
+            original_url = str(info.get("url") or "")
+            thumb_mime = str(info.get("thumbmime") or "").lower()
+            original_mime = str(info.get("mime") or "").lower()
+            if thumb_url and (not thumb_mime or thumb_mime in self.SUPPORTED_MIME_TYPES):
+                image_url = thumb_url
+                mime = thumb_mime
+                candidate_width = info.get("thumbwidth")
+                candidate_height = info.get("thumbheight")
+            else:
+                image_url = original_url
+                mime = original_mime
+                candidate_width = info.get("width")
+                candidate_height = info.get("height")
+            if mime and mime not in self.SUPPORTED_MIME_TYPES:
+                continue
+            if source_page in self.used_source_pages:
+                continue
+            if not self._safe_https_host(source_page, "commons.wikimedia.org"):
+                continue
+            if not self._safe_https_host(image_url, "wikimedia.org"):
+                continue
+            if not BraveImageSearch._matches_orientation(
+                {"width": candidate_width, "height": candidate_height}, width, height
+            ):
+                continue
+            try:
+                image_response = requests.get(
+                    image_url,
+                    headers={"User-Agent": "youtube-documentary-bot/1.0 (Wikimedia Commons image fallback)"},
+                    timeout=(self.s.image_connect_timeout, 45),
+                )
+                image_response.raise_for_status()
+                content_type = image_response.headers.get("Content-Type", "").lower().split(";", 1)[0]
+                if content_type and content_type not in self.SUPPORTED_MIME_TYPES:
+                    continue
+                if not self._save_as_jpeg(image_response.content, destination):
+                    continue
+            except Exception as exc:
+                LOG.debug("Could not download Wikimedia Commons result %s: %s", image_url, exc)
+                continue
+            self.used_source_pages.add(source_page)
+            self.sources.append({
+                "title": str(page.get("title") or "Wikimedia Commons image")[:200],
+                "source_page": source_page,
+                "image_url": image_url,
+            })
+            LOG.info("Downloaded Wikimedia Commons image for %s.", destination.name)
+            return True
+        LOG.info("No suitable Wikimedia Commons image result for %s.", destination.name)
         return False
 
 
@@ -1297,10 +1447,17 @@ class VisualAssetProvider:
         self.s = settings
         self.openai = OpenAIImageClient(settings)
         self.brave = BraveImageSearch(settings)
+        self.wikimedia = WikimediaCommonsImageSearch(settings)
 
     @property
     def web_sources(self) -> list[dict[str, str]]:
-        return self.brave.sources
+        return [*self.brave.sources, *self.wikimedia.sources]
+
+    def web_image(self, query: str, destination: Path, width: int, height: int) -> bool:
+        return (
+            self.brave.image(query, destination, width, height)
+            or self.wikimedia.image(query, destination, width, height)
+        )
 
     def image(
         self,
@@ -1312,7 +1469,7 @@ class VisualAssetProvider:
         prefer_web: bool,
         web_only: bool = False,
     ) -> str:
-        if prefer_web and self.brave.image(search_query, destination, width, height):
+        if prefer_web and self.web_image(search_query, destination, width, height):
             return "web"
         if prefer_web and web_only:
             return "missing"
@@ -2847,7 +3004,7 @@ def append_web_source_credits(plan: ShortPlan, sources: list[dict[str, str]]) ->
             source_pages.append(page)
     if not source_pages:
         return
-    credit = "\n\nVisual sources discovered via Brave Search:\n" + "\n".join(f"- {url}" for url in source_pages)
+    credit = "\n\nLicensed visual source pages:\n" + "\n".join(f"- {url}" for url in source_pages)
     plan.description = (plan.description + credit)[:5000]
 
 
@@ -2925,11 +3082,16 @@ def build_comparison_scene_image(
             radius=28, fill=COMPARISON_CARD, outline=accent, width=10 if active else 4,
         )
         try:
-            picture = _fit_contain(Image.open(image_path), inner_w, inner_h)
+            with Image.open(image_path) as source_picture:
+                source_picture.load()
+                picture = _fit_contain(source_picture, inner_w, inner_h)
             offset = (x + pad + (inner_w - picture.width) // 2, _COMP_PANEL_TOP + pad + (inner_h - picture.height) // 2)
             canvas.paste(picture, offset)
-        except Exception:
-            draw.rectangle((x + pad, _COMP_PANEL_TOP + pad, x + pad + inner_w, _COMP_PANEL_TOP + pad + inner_h), fill=accent)
+        except Exception as exc:
+            raise BotError(
+                f"Comparison subject image is missing or invalid: {image_path}. "
+                "Refusing to render a blank/color panel."
+            ) from exc
         if not active:
             veil = Image.new("RGBA", (_COMP_PANEL_W, _COMP_PANEL_H), (255, 255, 255, 140))
             canvas.alpha_composite(veil, (x, _COMP_PANEL_TOP))
@@ -2956,28 +3118,61 @@ def build_comparison_scene_image(
     canvas.convert("RGB").save(destination, quality=90)
 
 
+def comparison_subject_image_ready(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size < 1024:
+        return False
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+            return image.width >= 160 and image.height >= 160
+    except Exception:
+        return False
+
+
 def prepare_comparison_subject_images(plan: ShortPlan, client: "VisualAssetProvider", output_dir: Path) -> None:
-    """Fetch one recognizable image for each compared subject (real web photo first)."""
+    """Fetch both real subject images, or stop before a broken video can be published."""
+    missing_subjects: list[str] = []
     for name, label, query in (
         ("subject_a", plan.subject_a, plan.subject_a_image_query or plan.subject_a),
         ("subject_b", plan.subject_b, plan.subject_b_image_query or plan.subject_b),
     ):
         destination = output_dir / f"{name}.jpg"
-        if destination.is_file() and destination.stat().st_size >= 1024:
+        if comparison_subject_image_ready(destination):
             continue
+        if destination.exists():
+            destination.unlink()
         if not query:
+            missing_subjects.append(label or name)
             continue
-        try:
-            client.image(
-                search_query=query,
-                generation_prompt=f"a clear, simple, recognizable icon representing {query}, plain flat background, centered, no text",
+        search_queries = [query]
+        if label and label.casefold() != query.casefold():
+            search_queries.append(label)
+        source = "missing"
+        for search_query in search_queries:
+            source = client.image(
+                search_query=search_query,
+                generation_prompt="",
                 destination=destination,
                 width=1024,
                 height=1024,
                 prefer_web=True,
+                web_only=True,
             )
-        except (ImageGenerationTransientError, ImageGenerationSafetyError) as exc:
-            LOG.warning("No image for comparison subject %r (%s); a labeled color panel will be used.", label, exc)
+            if source == "web" and comparison_subject_image_ready(destination):
+                break
+            if destination.exists():
+                destination.unlink()
+            source = "missing"
+        if source != "web":
+            missing_subjects.append(label or name)
+    if missing_subjects:
+        names = ", ".join(repr(subject) for subject in missing_subjects)
+        raise BotError(
+            f"Missing required real image for comparison subject(s): {names}. "
+            "Rendering and publishing were stopped to prevent a blank/color subject panel."
+        )
 
 
 def render(

@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import base64
+from io import BytesIO
 import re
 import sys
 from pathlib import Path
@@ -1155,6 +1156,135 @@ def test_brave_image_search_stops_after_repeated_429(tmp_path, monkeypatch):
     assert client._disabled_for_run
 
 
+def test_square_subject_search_accepts_portrait_images():
+    assert bot.BraveImageSearch._matches_orientation(
+        {"width": 800, "height": 1200}, width=1024, height=1024
+    )
+    assert not bot.BraveImageSearch._matches_orientation(
+        {"width": 1200, "height": 800}, width=1080, height=1920
+    )
+
+
+def test_wikimedia_commons_downloads_public_figure_portrait(tmp_path, monkeypatch):
+    from PIL import Image
+
+    encoded = BytesIO()
+    Image.new("RGB", (800, 1200), (60, 90, 140)).save(encoded, format="JPEG", quality=90)
+    image_bytes = encoded.getvalue()
+
+    class SearchResponse:
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "query": {
+                    "pages": [{
+                        "title": "File:Lionel Messi portrait.jpg",
+                        "canonicalurl": "https://commons.wikimedia.org/wiki/File:Lionel_Messi_portrait.jpg",
+                        "imageinfo": [{
+                            "thumburl": "https://upload.wikimedia.org/messi-portrait.jpg",
+                            "thumbmime": "image/jpeg",
+                            "thumbwidth": 800,
+                            "thumbheight": 1200,
+                            "url": "https://upload.wikimedia.org/messi-original.jpg",
+                            "mime": "image/jpeg",
+                            "width": 1600,
+                            "height": 2400,
+                        }],
+                    }]
+                }
+            }
+
+    class ImageResponse:
+        headers = {"Content-Type": "image/jpeg"}
+        content = image_bytes
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, **_kwargs):
+        return SearchResponse() if "w/api.php" in url else ImageResponse()
+
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+    client = bot.WikimediaCommonsImageSearch(bot.Settings())
+    destination = tmp_path / "subject_a.jpg"
+
+    assert client.image("Lionel Messi portrait", destination, width=1024, height=1024)
+    assert bot.comparison_subject_image_ready(destination)
+    assert client.sources == [{
+        "title": "File:Lionel Messi portrait.jpg",
+        "source_page": "https://commons.wikimedia.org/wiki/File:Lionel_Messi_portrait.jpg",
+        "image_url": "https://upload.wikimedia.org/messi-portrait.jpg",
+    }]
+
+
+def test_visual_provider_uses_wikimedia_before_openai(tmp_path):
+    destination = tmp_path / "subject.jpg"
+    calls = []
+    provider = bot.VisualAssetProvider(bot.Settings())
+
+    class MissingBrave:
+        sources = []
+
+        def image(self, *_args):
+            calls.append("brave")
+            return False
+
+    class FoundWikimedia:
+        sources = [{"source_page": "https://commons.wikimedia.org/wiki/File:Subject.jpg"}]
+
+        def image(self, _query, target, _width, _height):
+            calls.append("wikimedia")
+            target.write_bytes(b"w" * 2048)
+            return True
+
+    class ForbiddenOpenAI:
+        def image(self, *_args, **_kwargs):
+            raise AssertionError("OpenAI must not run when Wikimedia found the subject")
+
+    provider.brave = MissingBrave()
+    provider.wikimedia = FoundWikimedia()
+    provider.openai = ForbiddenOpenAI()
+
+    assert provider.image("Lionel Messi", "", destination, 1024, 1024, prefer_web=True) == "web"
+    assert calls == ["brave", "wikimedia"]
+    assert provider.web_sources == FoundWikimedia.sources
+
+
+def test_missing_comparison_subject_stops_render_instead_of_using_color_panel(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Messi vs Ronaldo", "angle": "Differences", "title": "Messi vs Ronaldo",
+        "subject_a": "Lionel Messi", "subject_b": "Cristiano Ronaldo",
+        "subject_a_image_query": "Lionel Messi portrait",
+        "subject_b_image_query": "Cristiano Ronaldo portrait",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Two legends.", "narration": "Two legends. Close.", "closing_line": "Close.",
+        "scenes": [{"duration": 5, "focus": "both", "visual_prompt": "matchup"}],
+        "fact_note": "Note", "source_hints": ["Source"],
+    })
+
+    class MissingImages:
+        s = bot.Settings()
+
+        def __init__(self):
+            self.calls = []
+
+        def image(self, search_query, generation_prompt, destination, width, height, prefer_web, web_only=False):
+            self.calls.append((search_query, generation_prompt, prefer_web, web_only))
+            return "missing"
+
+    client = MissingImages()
+    with pytest.raises(bot.BotError, match="Rendering and publishing were stopped"):
+        bot.prepare_comparison_subject_images(plan, client, tmp_path)
+
+    assert all(generation_prompt == "" and prefer_web and web_only for _, generation_prompt, prefer_web, web_only in client.calls)
+    assert not (tmp_path / "subject_a.jpg").exists()
+    assert not (tmp_path / "subject_b.jpg").exists()
+
+
 def test_distributed_web_images_stay_within_six_visual_budget():
     assert bot.distributed_web_image_indexes(6, 2) == {2, 5}
     assert bot.distributed_web_image_indexes(6, 10) == {1, 2, 3, 4, 5, 6}
@@ -1463,15 +1593,15 @@ def test_build_comparison_scene_image_writes_valid_frames(tmp_path):
         assert out.is_file() and out.stat().st_size >= 1024
         assert Image.open(out).size == (1080, 1920)
 
-    # A missing subject image must not crash — it becomes a solid color panel.
+    # A missing subject must fail closed so a blank/color panel cannot be published.
     out = tmp_path / "scene_fallback.jpg"
-    bot.build_comparison_scene_image(
-        tmp_path / "missing.jpg", subject_b, "Nike", "Adidas", "a",
-        bot.ROOT / "assets" / "pointer_side.png",
-        bot.ROOT / "assets" / "pointer_both.png",
-        out,
-    )
-    assert out.is_file() and out.stat().st_size >= 1024
+    with pytest.raises(bot.BotError, match="Refusing to render"):
+        bot.build_comparison_scene_image(
+            tmp_path / "missing.jpg", subject_b, "Nike", "Adidas", "a",
+            bot.ROOT / "assets" / "pointer_side.png",
+            bot.ROOT / "assets" / "pointer_both.png",
+            out,
+        )
 
 
 def test_long_form_images_prefer_real_web_photos_for_named_subjects(tmp_path):

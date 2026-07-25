@@ -2480,61 +2480,6 @@ def choose_novel_long_form_plan(
     return None
 
 
-def plan_short_from_idea(llm: OpenAITextClient, duration: int, user_idea: str) -> ShortPlan:
-    """Build a Short plan around a user-supplied idea, bypassing the auto novelty/significance gates."""
-    target_minimum_words, target_maximum_words = target_narration_word_bounds(duration)
-    prompt = f'''Act as a senior viral documentary writer. Create ONE highly watchable {duration}-second English-language YouTube Short plan.
-The user has explicitly requested THIS exact idea. Build the entire Short around it and do NOT substitute a different topic:
-"""{user_idea}"""
-
-Rules:
-- Treat the user's idea as the mandatory subject, angle, and story. Interpret it faithfully even if it is written in another language; the finished narration is in English.
-- Structure the story in 3 parts: BEGINNING (establish who / where / when / what), MIDDLE (the decision, reveal, conflict, mechanism, or turning point with concrete detail), ENDING (the meaning, consequence, or memorable payoff).
-- Open with a sharp curiosity hook in the first 1.5 seconds. The narration must start verbatim with hook and end verbatim with closing_line.
-- Do NOT invent statistics, dates, quotations, casualty numbers, prices, scores, or source names. Build from general knowledge and stay qualitative when a precise figure is unknown; never fabricate precise facts or citations.
-- TITLE: explicitly name the concrete main subject of the idea (the person, place, event, object, or work), not a vague pronoun. Set thumbnail_text to 2-5 bold words naming that same subject.
-- Split the story into exactly 6 scenes whose durations total exactly {duration}. Aim for roughly {target_minimum_words}-{target_maximum_words} spoken English words; never pad with filler.
-- Every string in the returned JSON must be English (topic, title, description, tags, narration, fact_note, source_hints).
-- Visuals: {VISUAL_STYLE_RULES}
-
-Return raw JSON only using exactly this schema:
-{PLAN_SCHEMA}'''
-    LOG.info("Writing manual-idea Short plan from the user's idea...")
-    draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.6)))
-    review_prompt = f'''Act as the final documentary-story and retention editor for a {duration}-second English YouTube Short. Return only JSON.
-Keep the video centered on the user's requested idea and improve hook, clarity, concreteness, pacing, and the closing line. Return exactly:
-{{"plan":{PLAN_SCHEMA}}}
-Rules:
-- The subject MUST stay the user's idea: """{user_idea}""". Do not swap in a different topic.
-- Do NOT invent statistics, dates, quotations, numbers, prices, scores, or source names; keep it qualitative when a precise figure is unknown.
-- Keep exactly 6 scenes; narration must begin with hook and end with closing_line; aim for {target_minimum_words}-{target_maximum_words} spoken English words.
-- Every string must be English. Make the title explicitly name the main subject and thumbnail_text 2-5 words naming it. Preserve this visual direction in every scene: {VISUAL_STYLE_RULES}
-Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
-    LOG.info("Quality pass: refining the manual Short hook, pacing, and ending...")
-    try:
-        reviewed = extract_json(llm.chat(review_prompt, temperature=0.4))
-        plan_dict = reviewed.get("plan") if isinstance(reviewed.get("plan"), dict) else reviewed
-        plan = ShortPlan.from_dict(plan_dict)
-    except Exception as exc:
-        LOG.warning("Manual Short review pass failed (%s); using the draft.", exc)
-        plan = draft
-    ensure_title_names_main_subject(plan)
-    normalize_scene_count(plan, 6)
-    ensure_long_form_hook_and_closing(plan)
-    ensure_comparison_fields(plan)
-    synchronize_comparison_scene_voiceovers(plan)
-    rescale_scene_durations(plan, float(duration), "Manual Short plan")
-    words = spoken_word_count(plan.narration)
-    minimum_words, maximum_words = narration_word_bounds(duration)
-    if not minimum_words <= words <= maximum_words:
-        LOG.warning(
-            "Manual Short narration has %d words (comfortable range %d-%d for %ds); rendering it anyway.",
-            words, minimum_words, maximum_words, duration,
-        )
-    LOG.info("Manual Short plan ready: %r (%d scenes, %d words).", plan.title, len(plan.scenes), words)
-    return plan
-
-
 def plan_long_form_from_idea(
     llm: OpenAITextClient,
     duration: int,
@@ -4511,68 +4456,6 @@ def configure_logging(level: str) -> None:
     )
 
 
-def run_manual_short_flow(
-    idea: str,
-    duration: int,
-    publish: bool,
-    privacy: str,
-    settings: Settings,
-    archive: Archive,
-    llm: OpenAITextClient,
-    images: VisualAssetProvider,
-    tts: GoogleCloudTTS,
-    social_tts: OpenAIShortVietnameseTTS,
-) -> tuple[str | None, str]:
-    """Render one Short from a user idea. No daily-limit, novelty, or resume gate. Returns (youtube_id, title)."""
-    plan = plan_short_from_idea(llm, duration, idea)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    output_dir = DATA_DIR / "generated" / f"manual-{datetime.now():%Y%m%d-%H%M%S}-{slug(plan.topic)}"
-    output_dir.mkdir(parents=True)
-    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-    record_id = archive.reserve(plan, output_dir)
-    youtube_id: str | None = None
-    rendered = False
-    try:
-        narration, narration_seconds = prepare_short_english_narration(plan, tts, output_dir)
-        rescale_scene_durations(plan, narration_seconds, "Manual Short English")
-        (output_dir / "plan.json").write_text(
-            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        video = render(plan, images, output_dir, narration_seconds, narration, narration_seconds)
-        append_web_source_credits(plan, images.web_sources)
-        (output_dir / "plan.json").write_text(
-            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        if images.web_sources:
-            (output_dir / "web_sources.json").write_text(
-                json.dumps(images.web_sources, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        rendered = True
-        archive.mark(record_id, "rendered")
-        print(f"Đã render (manual Short): {video}")
-        if publish:
-            youtube_id = upload_to_youtube(video, plan, settings, privacy)
-            archive.mark(record_id, "published", youtube_id)
-            print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
-            if settings.youtube_token.exists():
-                archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
-            if social_publish_enabled(settings):
-                social_video, social = prepare_social_video(plan, llm, social_tts, output_dir, settings)
-                social_results = publish_social_video(social_video, social, settings)
-                if social_results:
-                    print(f"Đã publish social: {social_results}")
-            if archive.is_postgres:
-                try:
-                    shutil.rmtree(output_dir)
-                    LOG.info("Cleaned up output directory: %s", output_dir)
-                except Exception as exc:
-                    LOG.warning("Could not clean up %s: %s", output_dir, exc)
-    except Exception:
-        archive.mark(record_id, "upload_failed" if rendered else "failed")
-        raise
-    return youtube_id, plan.title
-
-
 def run_manual_long_form_flow(
     idea: str,
     publish: bool,
@@ -4666,28 +4549,26 @@ def run_manual_idea(
         raise BotError("Y tuong rong; khong the tao video.")
     if privacy not in ("private", "unlisted", "public"):
         privacy = settings.youtube_privacy
+    # Manual-idea Shorts were removed; a manually submitted idea now always produces a
+    # long-form video. A short request (stale queue row, or --idea without --long-form)
+    # is redirected to long-form instead of failing.
+    if mode != "long":
+        LOG.info("Manual-idea Shorts are disabled; generating a long-form video from this idea instead.")
+        mode = "long"
     LOG.info("Manual idea (id=%s, mode=%s, publish=%s): %.80s", idea_id, mode, publish, idea_text)
 
     if args.dry_run:
-        if mode == "long":
-            min_scenes = min(settings.long_form_min_scenes, settings.long_form_max_scenes)
-            max_scenes = max(settings.long_form_min_scenes, settings.long_form_max_scenes)
-            preview_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
-            plan = plan_long_form_from_idea(llm, preview_duration, min_scenes, max_scenes, idea_text)
-        else:
-            plan = plan_short_from_idea(llm, duration, idea_text)
+        min_scenes = min(settings.long_form_min_scenes, settings.long_form_max_scenes)
+        max_scenes = max(settings.long_form_min_scenes, settings.long_form_max_scenes)
+        preview_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
+        plan = plan_long_form_from_idea(llm, preview_duration, min_scenes, max_scenes, idea_text)
         print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
         return 0
 
     try:
-        if mode == "long":
-            youtube_id, title = run_manual_long_form_flow(
-                idea_text, publish, privacy, settings, archive, llm, images, tts
-            )
-        else:
-            youtube_id, title = run_manual_short_flow(
-                idea_text, duration, publish, privacy, settings, archive, llm, images, tts, social_tts
-            )
+        youtube_id, title = run_manual_long_form_flow(
+            idea_text, publish, privacy, settings, archive, llm, images, tts
+        )
     except Exception as exc:
         if idea_id is not None:
             archive.update_idea(idea_id, "failed", error=str(exc)[:2000])

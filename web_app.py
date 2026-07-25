@@ -128,14 +128,13 @@ def index():
 @login_required
 def submit():
     idea = (request.form.get("idea") or "").strip()
-    mode = (request.form.get("mode") or "short").strip().lower()
     privacy = (request.form.get("privacy") or DEFAULT_PRIVACY).strip().lower()
     publish = request.form.get("publish", "on") in ("on", "true", "1")
 
     if not idea:
         return jsonify({"ok": False, "error": "Ý tưởng đang trống."}), 400
-    if mode not in ("short", "long"):
-        mode = "short"
+    # Manual-idea Shorts were removed; every manual idea is generated as a long-form video.
+    mode = "long"
     if privacy not in PRIVACY_CHOICES:
         privacy = DEFAULT_PRIVACY
 
@@ -388,15 +387,12 @@ INDEX_HTML = """<!doctype html><html lang=vi><head><meta charset=utf-8>
 
       <label class="lbl">Loại video</label>
       <div class="seg">
-        <label class="seg-opt is-active" data-mode="short">
-          <input type="radio" name="mode" value="short" checked>
-          <span class="seg-ico">📱</span><span class="seg-tt">Short</span><span class="seg-sb">Dọc · video ngắn</span>
-        </label>
-        <label class="seg-opt" data-mode="long">
-          <input type="radio" name="mode" value="long">
-          <span class="seg-ico">🎬</span><span class="seg-tt">Long-form</span><span class="seg-sb">Ngang · 5–7 phút</span>
+        <label class="seg-opt is-active" data-mode="long">
+          <input type="radio" name="mode" value="long" checked>
+          <span class="seg-ico">🎬</span><span class="seg-tt">Long-form</span><span class="seg-sb">Ngang · 5–7 phút · người que</span>
         </label>
       </div>
+      <p style="margin:6px 2px 0;opacity:.55;font-size:13px">Ý tưởng thủ công chỉ tạo video dài (Short thủ công đã bỏ).</p>
 
       <div class="grid2">
         <div>

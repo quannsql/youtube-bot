@@ -2559,41 +2559,6 @@ def test_idea_queue_recover_stuck_ideas(tmp_path):
     assert archive.claim_next_idea()["id"] == i1  # claimable again
 
 
-def test_plan_short_from_idea_seeds_idea_and_normalizes_scenes():
-    idea = "Câu chuyện xây kênh đào Suez và tác động thương mại toàn cầu"
-    plan_json = {
-        "topic": "Suez Canal construction",
-        "angle": "How a desert shortcut reshaped global trade",
-        "title": "The Suez Canal's Hidden Cost",
-        "thumbnail_text": "Suez Canal",
-        "description": "How the Suez Canal reshaped trade. #history #Shorts",
-        "tags": ["history", "shorts"],
-        "hook": "This ditch rerouted the world.",
-        "narration": "This ditch rerouted the world. Workers cut through desert for a decade. Ships suddenly skipped Africa entirely. Trade routes collapsed and reformed. Empires fought to control it. That shortcut still moves your packages today.",
-        "closing_line": "That shortcut still moves your packages today.",
-        "scenes": [
-            {"duration": 15, "visual_prompt": "Wide desert canal at dawn"},
-            {"duration": 15, "visual_prompt": "Workers digging a channel"},
-            {"duration": 15, "visual_prompt": "A ship gliding through the canal"},
-            {"duration": 15, "visual_prompt": "A map showing rerouted trade"},
-        ],
-        "fact_note": "Kept dates general.",
-        "source_hints": ["History archive"],
-    }
-    prompts = []
-
-    class FakeClient:
-        def chat(self, prompt, **kwargs):
-            prompts.append(prompt)
-            return json.dumps(plan_json)
-
-    plan = bot.plan_short_from_idea(FakeClient(), 60, idea)
-    assert len(plan.scenes) == 6  # normalized up to the Short visual budget
-    assert abs(sum(scene.duration for scene in plan.scenes) - 60) < 0.1
-    assert idea in prompts[0]
-    assert "explicitly requested THIS exact idea" in prompts[0]
-
-
 def test_plan_long_form_from_idea_seeds_idea_and_has_no_vietnam_hard_block(monkeypatch):
     monkeypatch.setattr(bot, "fetch_news_for_idea", lambda *a, **k: [])  # no network in tests
     idea = "Trận Điện Biên Phủ 1954 và ý nghĩa lịch sử"

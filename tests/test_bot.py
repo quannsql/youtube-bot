@@ -99,6 +99,85 @@ def test_prepare_social_video_uses_actual_english_narration_duration(tmp_path, m
     assert captured == [65]
 
 
+def test_vietnamese_comparison_uses_scene_audio_to_retime_pointer_visuals(tmp_path, monkeypatch):
+    english_segments = [
+        "Alpha and Beta begin.",
+        "Alpha point one.",
+        "Beta point two.",
+        "Alpha point three.",
+        "Beta point four.",
+        "Alpha and Beta finish.",
+    ]
+    vietnamese_segments = [
+        "Alpha và Beta bắt đầu.",
+        "Alpha có điểm một.",
+        "Beta có điểm hai.",
+        "Alpha có điểm ba.",
+        "Beta có điểm bốn.",
+        "Alpha và Beta kết thúc.",
+    ]
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Alpha vs Beta", "angle": "Differences", "title": "Alpha vs Beta",
+        "subject_a": "Alpha", "subject_b": "Beta",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": english_segments[0], "narration": " ".join(english_segments),
+        "closing_line": english_segments[-1],
+        "scenes": [
+            {"duration": 5, "focus": focus, "voiceover": text, "visual_prompt": text}
+            for focus, text in zip(["both", "a", "b", "a", "b", "both"], english_segments)
+        ],
+        "fact_note": "Note", "source_hints": ["Source"],
+    })
+    social = bot.SocialPlan(
+        title="Alpha và Beta",
+        description="Mô tả #A #B",
+        tags=["A", "B"],
+        narration=" ".join(vietnamese_segments),
+        scene_voiceovers=vietnamese_segments,
+    )
+    (tmp_path / "visuals.mp4").write_bytes(b"v" * 2048)
+    tts_calls = []
+    captured_durations = []
+    part_seconds = [3.0, 4.0, 2.0, 5.0, 3.0, 2.0]
+
+    class FakeTTS:
+        def speech(self, text, destination):
+            tts_calls.append(text)
+            destination.write_bytes(b"a" * 2048)
+
+    def fake_duration(path, _label):
+        path = Path(path)
+        if path.name == "narration_vi.mp3":
+            return sum(part_seconds)
+        index = int(path.stem.rsplit("_", 1)[1]) - 1
+        return part_seconds[index]
+
+    def fake_run(command, timeout_seconds=None):
+        Path(command[-1]).write_bytes(b"m" * 2048)
+
+    def fake_visuals(_plan, durations, _output_dir, destination):
+        captured_durations.extend(durations)
+        destination.write_bytes(b"v" * 2048)
+        return destination
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "measured_narration_duration", fake_duration)
+    monkeypatch.setattr(bot, "run", fake_run)
+    monkeypatch.setattr(bot, "render_comparison_social_visuals", fake_visuals)
+    monkeypatch.setattr(bot, "write_ass_captions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        bot,
+        "mux_video_audio_with_captions",
+        lambda _visuals, _narration, _captions, output, *_args, **_kwargs: output.write_bytes(b"f" * 2048),
+    )
+
+    result = bot.render_social_video(social, FakeTTS(), tmp_path, bot.Settings(), plan)
+
+    assert result == tmp_path / "short_vi.mp4"
+    assert tts_calls == vietnamese_segments
+    assert captured_durations == part_seconds
+
+
 def test_thumbnail_headline_uses_named_subject_and_wraps_to_two_lines():
     plan = bot.ShortPlan.from_dict({
         "topic": "The Strait of Hormuz", "angle": "Oil risk", "title": "The Trade Crisis",
@@ -1572,6 +1651,88 @@ def test_ensure_comparison_fields_derives_subjects_and_assigns_focus():
     focuses = [s.focus for s in plan.scenes]
     assert focuses[0] == "both" and focuses[-1] == "both"
     assert focuses[1:-1] == ["a", "b", "a", "b"]  # middle beats alternate
+
+
+def test_comparison_voiceovers_override_wrong_pointer_focus_from_spoken_subject():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Messi vs Ronaldo", "angle": "Playing styles", "title": "Messi vs Ronaldo",
+        "subject_a": "Lionel Messi", "subject_b": "Cristiano Ronaldo",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Messi and Ronaldo became football icons.",
+        "narration": (
+            "Messi and Ronaldo became football icons. "
+            "Lionel Messi creates through close control. "
+            "Cristiano Ronaldo attacks space with explosive movement. "
+            "Lionel Messi often drops deeper to build play. "
+            "Cristiano Ronaldo usually threatens closer to goal. "
+            "Messi and Ronaldo reached greatness differently."
+        ),
+        "closing_line": "Messi and Ronaldo reached greatness differently.",
+        "scenes": [
+            {"duration": 5, "focus": "both", "voiceover": "Messi and Ronaldo became football icons.", "visual_prompt": "Hook"},
+            {"duration": 5, "focus": "b", "voiceover": "Lionel Messi creates through close control.", "visual_prompt": "Messi"},
+            {"duration": 5, "focus": "a", "voiceover": "Cristiano Ronaldo attacks space with explosive movement.", "visual_prompt": "Ronaldo"},
+            {"duration": 5, "focus": "b", "voiceover": "Lionel Messi often drops deeper to build play.", "visual_prompt": "Messi"},
+            {"duration": 5, "focus": "a", "voiceover": "Cristiano Ronaldo usually threatens closer to goal.", "visual_prompt": "Ronaldo"},
+            {"duration": 5, "focus": "both", "voiceover": "Messi and Ronaldo reached greatness differently.", "visual_prompt": "Close"},
+        ],
+        "fact_note": "Note", "source_hints": ["Source"],
+    })
+
+    bot.synchronize_comparison_scene_voiceovers(plan)
+
+    assert [scene.focus for scene in plan.scenes] == ["both", "a", "b", "a", "b", "both"]
+    assert plan.narration == " ".join(scene.voiceover for scene in plan.scenes)
+
+
+def test_comparison_narration_measures_each_scene_for_exact_pointer_timing(tmp_path, monkeypatch):
+    voiceovers = [
+        "Alpha and Beta begin.",
+        "Alpha handles point one.",
+        "Beta handles point two.",
+        "Alpha handles point three.",
+        "Beta handles point four.",
+        "Alpha and Beta finish.",
+    ]
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Alpha vs Beta", "angle": "Differences", "title": "Alpha vs Beta",
+        "subject_a": "Alpha", "subject_b": "Beta",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": voiceovers[0], "narration": " ".join(voiceovers), "closing_line": voiceovers[-1],
+        "scenes": [
+            {"duration": 5, "focus": focus, "voiceover": text, "visual_prompt": text}
+            for focus, text in zip(["both", "a", "b", "a", "b", "both"], voiceovers)
+        ],
+        "fact_note": "Note", "source_hints": ["Source"],
+    })
+    calls = []
+    part_seconds = [2.0, 4.0, 3.0, 5.0, 6.0, 2.0]
+
+    class FakeTTS:
+        def speech(self, text, destination):
+            calls.append(text)
+            destination.write_bytes(b"a" * 2048)
+
+    def fake_duration(path, _label):
+        path = Path(path)
+        if path.name == "narration.mp3":
+            return sum(part_seconds)
+        index = int(path.stem.rsplit("_", 1)[1]) - 1
+        return part_seconds[index]
+
+    def fake_run(command, timeout_seconds=None):
+        Path(command[-1]).write_bytes(b"m" * 2048)
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "measured_narration_duration", fake_duration)
+    monkeypatch.setattr(bot, "run", fake_run)
+
+    narration, seconds = bot.prepare_short_english_narration(plan, FakeTTS(), tmp_path)
+
+    assert narration == tmp_path / "narration.mp3"
+    assert seconds == 22.0
+    assert calls == voiceovers
+    assert [scene.duration for scene in plan.scenes] == part_seconds
 
 
 def test_build_comparison_scene_image_writes_valid_frames(tmp_path):

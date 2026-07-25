@@ -22,7 +22,7 @@ import sys
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -343,6 +343,10 @@ class Scene:
     # Comparison Short only: which compared subject this beat is about — "a", "b",
     # or "both". Drives which way the stick figure points and which panel is lit.
     focus: str = ""
+    # Exact narration spoken while this scene is on screen. Comparison Shorts use
+    # this to synthesize and measure audio per scene so pointer/highlight timing is
+    # driven by the voice instead of an estimated equal-duration timeline.
+    voiceover: str = ""
 
 
 @dataclass
@@ -400,6 +404,7 @@ class ShortPlan:
                 visual_prompt=str(visual_prompt or ""),
                 search_query=str(raw_scene.get("search_query") or "").strip(),
                 focus=focus,
+                voiceover=str(raw_scene.get("voiceover") or raw_scene.get("narration") or "").strip(),
             ))
         # A scene is valid if it can be rendered: either a normal visual_prompt, or a
         # comparison focus ("a"/"b"/"both") that drives the compared-subjects layout.
@@ -434,6 +439,7 @@ class SocialPlan:
     description: str
     tags: list[str]
     narration: str
+    scene_voiceovers: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "SocialPlan":
@@ -441,11 +447,19 @@ class SocialPlan:
         missing = required - value.keys()
         if missing:
             raise BotError(f"Grok trả kế hoạch social thiếu trường: {', '.join(sorted(missing))}")
+        raw_scene_voiceovers = value.get("scene_voiceovers", [])
+        if not isinstance(raw_scene_voiceovers, list):
+            raw_scene_voiceovers = []
         return cls(
             title=str(value["title"])[:100],
             description=str(value["description"])[:2200],
             tags=[str(tag).lstrip("#") for tag in value["tags"]][:2],
             narration=str(value["narration"]),
+            scene_voiceovers=[
+                str(segment).strip()
+                for segment in raw_scene_voiceovers
+                if str(segment).strip()
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1760,7 +1774,7 @@ PLAN_SCHEMA = '''{
   "hook":"first spoken sentence, <=12 words, that sets up the A-vs-B matchup",
   "narration":"English narration that begins with hook and ends with closing_line, comparing the two subjects point by point",
   "closing_line":"last spoken sentence, <=14 words, a neutral wrap-up that does NOT declare a winner",
-  "scenes":[{"duration":5.5,"focus":"a","visual_prompt":"the one key comparison point being made about the focused subject in this beat"}],
+  "scenes":[{"duration":5.5,"focus":"a","voiceover":"the exact consecutive narration sentences spoken only during this scene","visual_prompt":"the one key comparison point being made about the focused subject in this beat"}],
   "fact_note":"what uncertainty was avoided", "source_hints":["credible lead"],
   "subject_fame_score":9, "fascination_score":9, "clarity_score":9,
   "appeal_reason":"one sentence on why this matchup will hook a general viewer"
@@ -1915,6 +1929,7 @@ STRUCTURE — exactly 6 scenes whose durations total exactly {duration}:
 - Scenes 2-5 (focus alternates "a" and "b"): each delivers ONE key contrast and clearly talks about the subject in focus, so the narration on "a" beats is about subject A and on "b" beats is about subject B.
 - Scene 6 (focus "both"): the closing_line — a neutral wrap-up.
 Set every scene's "focus" to "a", "b", or "both" to match which subject that beat is about, and put the one key point of that beat in visual_prompt.
+Give every scene a non-empty "voiceover" containing the exact consecutive narration sentences spoken while that scene is visible. Concatenating all 6 voiceovers with spaces MUST equal narration exactly, with no omitted, repeated, reordered, or paraphrased words. Each middle voiceover must explicitly name its focused subject at least once; do not rely only on pronouns. If a voiceover discusses both subjects, set focus to "both".
 The narration must start verbatim with hook and end verbatim with closing_line, in plain spoken English, one clear idea per sentence, only the most important and prominent points.
 Facts: use only well-established public facts and the brief's key_contrasts; never invent numbers, dates, quotes, or sources.
 For a {duration}-second Short, aim for roughly {target_minimum_words}-{target_maximum_words} spoken English words. This is a pace, not a reason to pad.
@@ -1930,7 +1945,7 @@ Improve the draft below into a stronger {duration}-second English COMPARISON You
 {{"quality_check":{{"hook_score":1,"clarity_score":1,"fairness_score":1,"retellability_score":1,"shareability_score":1,"surprise_score":1,"subject_fame_score":1,"fascination_score":1,"factual_risk":"short note","changes":["short note"]}},"plan":{PLAN_SCHEMA}}}
 Keep only well-established facts about each subject; cut invented numbers, dates, quotes, or sources. Both subjects must be famous and instantly recognizable (subject_fame_score at least 6); the matchup share-worthy (fascination_score at least 6); every point effortless to follow (clarity_score at least 7). Reject a matchup below these bars rather than rescue it with hype.
 NEUTRALITY: the script must not declare a winner, push an opinion, or take a political side; make each side's points even and factual, and keep the closing_line neutral.
-The title must name BOTH subjects; thumbnail_text 2-5 words naming the matchup. subject_a, subject_b, subject_a_image_query, and subject_b_image_query must be set with recognizable image searches. Keep exactly 6 scenes totaling {duration}, each with a "focus" of "a"/"b"/"both" matching which subject the narration covers in that beat (scene 1 and the last scene are "both", middle scenes alternate "a" and "b"). {opener_rule}The narration must begin with hook and end with closing_line, use plain spoken English, and cover only the main, prominent contrasts.
+The title must name BOTH subjects; thumbnail_text 2-5 words naming the matchup. subject_a, subject_b, subject_a_image_query, and subject_b_image_query must be set with recognizable image searches. Keep exactly 6 scenes totaling {duration}, each with a "focus" of "a"/"b"/"both" matching which subject the narration covers in that beat (scene 1 and the last scene are "both"). Every scene must contain a non-empty voiceover; joining those 6 voiceovers with spaces must reproduce narration verbatim. Each middle voiceover explicitly names the focused subject, and any voiceover discussing both subjects uses focus "both". {opener_rule}The narration must begin with hook and end with closing_line, use plain spoken English, and cover only the main, prominent contrasts.
 Editorial brief: {json.dumps(brief, ensure_ascii=False)}
 Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     LOG.info("Quality pass: checking factual precision, hook, pacing, and ending…")
@@ -1977,6 +1992,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
             if not re.sub(r"[\W_]+", "", plan.narration).lower().endswith(clean_closing):
                 plan.narration = plan.narration + " " + plan.closing_line
 
+    synchronize_comparison_scene_voiceovers(plan)
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if not minimum_words <= words <= maximum_words:
         raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
@@ -2065,6 +2081,146 @@ def ensure_comparison_fields(plan: ShortPlan) -> None:
         next_auto = "b" if scene.focus == "a" else "a"
 
 
+def _normalized_voiceover(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip())
+
+
+def partition_narration_for_scenes(
+    narration: str,
+    scene_count: int,
+    weights: list[float] | None = None,
+) -> list[str]:
+    """Split narration sequentially at natural boundaries, weighted by scene length."""
+    text = _normalized_voiceover(narration)
+    if scene_count <= 0:
+        return []
+    if scene_count == 1:
+        return [text]
+    units = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?;:])\s+|(?<=,)\s+", text)
+        if part.strip()
+    ]
+    if len(units) < scene_count:
+        units = text.split()
+    if not units:
+        return [""] * scene_count
+
+    safe_weights = weights if weights and len(weights) == scene_count else [1.0] * scene_count
+    safe_weights = [max(0.001, float(weight)) for weight in safe_weights]
+    unit_words = [max(1, spoken_word_count(unit)) for unit in units]
+    total_words = sum(unit_words)
+    total_weight = sum(safe_weights)
+    segments: list[str] = []
+    start = 0
+    cumulative_words = 0
+    cumulative_weight = 0.0
+    for index in range(scene_count):
+        scenes_left = scene_count - index
+        units_left = len(units) - start
+        cumulative_weight += safe_weights[index]
+        if index == scene_count - 1:
+            end = len(units)
+        elif units_left <= scenes_left:
+            end = start + 1
+        else:
+            target_words = total_words * cumulative_weight / total_weight
+            max_end = len(units) - (scenes_left - 1)
+            candidates = range(start + 1, max_end + 1)
+            running = cumulative_words
+            scored: list[tuple[float, int, int]] = []
+            for candidate_end in candidates:
+                running += unit_words[candidate_end - 1]
+                scored.append((abs(running - target_words), candidate_end, running))
+            _, end, _ = min(scored)
+        segment_units = units[start:end]
+        segments.append(" ".join(segment_units))
+        cumulative_words += sum(unit_words[start:end])
+        start = end
+    return segments
+
+
+def _subject_mentioned(text: str, subject: str) -> bool:
+    normalized_text = " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
+    normalized_subject = " ".join(re.findall(r"[a-z0-9]+", subject.casefold()))
+    if not normalized_text or not normalized_subject:
+        return False
+    if re.search(rf"\b{re.escape(normalized_subject)}\b", normalized_text):
+        return True
+    generic = {"the", "and", "club", "company", "team", "party", "brand", "football", "fc"}
+    distinctive = [
+        token for token in normalized_subject.split()
+        if len(token) >= 4 and token not in generic
+    ]
+    return any(re.search(rf"\b{re.escape(token)}\b", normalized_text) for token in distinctive)
+
+
+def synchronize_comparison_scene_voiceovers(plan: ShortPlan) -> None:
+    """Make narration segments and visual focus deterministic for comparison Shorts."""
+    if not is_comparison_plan(plan) or not plan.scenes:
+        return
+    narration = _normalized_voiceover(plan.narration)
+    supplied = [_normalized_voiceover(scene.voiceover) for scene in plan.scenes]
+    supplied_joined = _normalized_voiceover(" ".join(supplied))
+    if all(supplied) and supplied_joined == narration:
+        segments = supplied
+    else:
+        if any(supplied):
+            LOG.warning(
+                "Comparison scene voiceovers did not reproduce narration exactly; "
+                "repartitioning narration deterministically."
+            )
+        segments = partition_narration_for_scenes(
+            narration,
+            len(plan.scenes),
+            [scene.duration for scene in plan.scenes],
+        )
+
+    next_fallback = "a"
+    last_index = len(plan.scenes) - 1
+    for index, (scene, segment) in enumerate(zip(plan.scenes, segments)):
+        scene.voiceover = segment
+        mentions_a = _subject_mentioned(segment, plan.subject_a)
+        mentions_b = _subject_mentioned(segment, plan.subject_b)
+        if mentions_a and mentions_b:
+            scene.focus = "both"
+        elif mentions_a:
+            scene.focus = "a"
+        elif mentions_b:
+            scene.focus = "b"
+        elif index == 0 or index == last_index:
+            scene.focus = "both"
+        elif scene.focus not in ("a", "b", "both"):
+            scene.focus = next_fallback
+        if scene.focus in ("a", "b"):
+            next_fallback = "b" if scene.focus == "a" else "a"
+    plan.narration = _normalized_voiceover(" ".join(scene.voiceover for scene in plan.scenes))
+
+
+def synchronize_social_scene_voiceovers(social: SocialPlan, plan: ShortPlan) -> None:
+    """Keep translated narration in the same scene order as the comparison visuals."""
+    if not is_comparison_plan(plan) or not plan.scenes:
+        return
+    narration = _normalized_voiceover(social.narration)
+    supplied = [_normalized_voiceover(segment) for segment in social.scene_voiceovers]
+    supplied_joined = _normalized_voiceover(" ".join(supplied))
+    if len(supplied) == len(plan.scenes) and all(supplied) and supplied_joined == narration:
+        segments = supplied
+    else:
+        if supplied:
+            LOG.warning(
+                "Vietnamese scene voiceovers did not reproduce narration exactly; "
+                "repartitioning them in the original visual order."
+            )
+        segments = partition_narration_for_scenes(
+            narration,
+            len(plan.scenes),
+            [scene.duration for scene in plan.scenes],
+        )
+    social.scene_voiceovers = segments
+    social.narration = _normalized_voiceover(" ".join(segments))
+
+
 def ensure_title_names_main_subject(plan: ShortPlan) -> None:
     """Prevent a vague headline when the planner omitted its named main subject."""
     if title_mentions_main_subject(plan):
@@ -2093,6 +2249,7 @@ def normalize_scene_count(plan: ShortPlan, target_count: int) -> None:
                 visual_prompt=scene.visual_prompt,
                 search_query=scene.search_query,
                 focus=scene.focus,
+                voiceover=scene.voiceover,
             ),
         )
     while len(plan.scenes) > target_count:
@@ -2364,6 +2521,8 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     ensure_title_names_main_subject(plan)
     normalize_scene_count(plan, 6)
     ensure_long_form_hook_and_closing(plan)
+    ensure_comparison_fields(plan)
+    synchronize_comparison_scene_voiceovers(plan)
     rescale_scene_durations(plan, float(duration), "Manual Short plan")
     words = spoken_word_count(plan.narration)
     minimum_words, maximum_words = narration_word_bounds(duration)
@@ -2464,7 +2623,8 @@ def plan_social_vietnamese(llm: OpenAITextClient, plan: ShortPlan, duration: int
     minimum_words, maximum_words = narration_word_bounds(duration)
     schema = (
         '{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with exactly 2 relevant hashtags",'
-        '"tags":["exactly 2 short hashtags"],"narration":"Vietnamese voice-over"}'
+        '"tags":["exactly 2 short hashtags"],"narration":"Vietnamese voice-over",'
+        '"scene_voiceovers":["one exact consecutive Vietnamese narration segment per English scene"]}'
     )
     prompt = f'''Translate and adapt this English YouTube Short plan into Vietnamese for Facebook and TikTok.
     Return raw JSON only with this schema:
@@ -2472,11 +2632,13 @@ def plan_social_vietnamese(llm: OpenAITextClient, plan: ShortPlan, duration: int
 Rules:
 - Keep every factual claim equivalent to the English plan; do not add dates, names, statistics, sources, or certainty.
 - Make the Vietnamese narration natural, concise, and suitable for a {duration}-second short video.
+- Return exactly {len(plan.scenes)} scene_voiceovers in the same order as the English scenes. Joining them with spaces MUST reproduce narration verbatim. Each segment translates only its matching English scene voiceover, so the highlighted comparison subject stays synchronized.
 - Aim for roughly {target_minimum_words}-{target_maximum_words} Vietnamese words, but prioritize natural Vietnamese over padding.
 - The caption should disclose that the video is AI-assisted when appropriate.
 English plan: {json.dumps(plan.to_dict(), ensure_ascii=False)}'''
     LOG.info("Creating Vietnamese social caption and narration…")
     social = SocialPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.35)))
+    synchronize_social_scene_voiceovers(social, plan)
     words = len(re.findall(r"\b\w+\b", social.narration, flags=re.UNICODE))
     if words > target_maximum_words or not minimum_words <= words <= maximum_words:
         LOG.info(
@@ -2492,9 +2654,11 @@ Rules:
 - Preserve every factual claim, named subject, and the original meaning. Do not add facts, dates, numbers, sources, or certainty.
 - Keep the title and caption natural Vietnamese; the caption must have exactly 2 relevant hashtags.
 - The narration must contain {minimum_words}-{target_maximum_words} Vietnamese words. Remove repetition and filler first; keep the hook, core explanation, and ending.
+- Keep exactly {len(plan.scenes)} scene_voiceovers in the original scene order. Joining them with spaces must reproduce narration verbatim; never move a fact about subject A into a subject-B scene or vice versa.
 
 Plan to rewrite: {json.dumps(social.to_dict(), ensure_ascii=False)}'''
         social = SocialPlan.from_dict(extract_json(llm.chat(repair_prompt, temperature=0.2)))
+        synchronize_social_scene_voiceovers(social, plan)
         words = len(re.findall(r"\b\w+\b", social.narration, flags=re.UNICODE))
     if not minimum_words <= words <= maximum_words or words > target_maximum_words:
         raise BotError(f"Kịch bản tiếng Việt có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
@@ -2968,8 +3132,47 @@ def prepare_short_english_narration(
 ) -> tuple[Path, float]:
     narration = output_dir / "narration.mp3"
     LOG.info("Preflighting English narration before generating any Short images…")
-    tts.speech(plan.narration, narration)
-    return narration, measured_narration_duration(narration, "Short English")
+    if not is_comparison_plan(plan):
+        tts.speech(plan.narration, narration)
+        return narration, measured_narration_duration(narration, "Short English")
+
+    synchronize_comparison_scene_voiceovers(plan)
+    require_tools()
+    parts: list[Path] = []
+    part_durations: list[float] = []
+    for index, scene in enumerate(plan.scenes, start=1):
+        if not scene.voiceover:
+            raise BotError(f"Comparison scene {index} has no voiceover to synchronize.")
+        part = output_dir / f"narration_scene_{index:02d}.mp3"
+        LOG.info(
+            "Generating comparison narration scene %d/%d (focus=%s)...",
+            index,
+            len(plan.scenes),
+            scene.focus,
+        )
+        tts.speech(scene.voiceover, part)
+        parts.append(part)
+        part_durations.append(measured_narration_duration(part, f"Short English scene {index}"))
+
+    concat = output_dir / "narration_scenes.txt"
+    concat.write_text(
+        "".join(f"file '{part.resolve().as_posix()}'\n" for part in parts),
+        encoding="utf-8",
+    )
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(narration)])
+    narration_seconds = measured_narration_duration(narration, "Short English")
+    measured_total = sum(part_durations)
+    scale = narration_seconds / measured_total if measured_total > 0 else 1.0
+    for scene, part_duration in zip(plan.scenes, part_durations):
+        scene.duration = round(part_duration * scale, 3)
+    drift = narration_seconds - sum(scene.duration for scene in plan.scenes)
+    plan.scenes[-1].duration = round(plan.scenes[-1].duration + drift, 3)
+    LOG.info(
+        "Comparison pointer timeline locked to %d measured narration scene(s), %.3fs total.",
+        len(parts),
+        narration_seconds,
+    )
+    return narration, narration_seconds
 
 
 def prepare_long_form_narration(
@@ -3570,19 +3773,112 @@ def retime_vertical_visuals(visuals: Path, destination: Path, target_duration: f
     return destination
 
 
-def render_social_video(social: SocialPlan, tts: OpenAIShortVietnameseTTS, output_dir: Path, settings: Settings) -> Path:
+def render_comparison_social_visuals(
+    plan: ShortPlan,
+    scene_durations: list[float],
+    output_dir: Path,
+    destination: Path,
+) -> Path:
+    """Rebuild comparison visuals so Vietnamese scene changes follow Vietnamese audio."""
+    require_tools()
+    if len(scene_durations) != len(plan.scenes):
+        raise BotError("Vietnamese comparison audio does not match the visual scene count.")
+    clips: list[Path] = []
+    for index, duration in enumerate(scene_durations, start=1):
+        image_file = output_dir / f"scene_{index}.jpg"
+        if not image_file.is_file() or image_file.stat().st_size < 1024:
+            raise BotError(f"Missing comparison scene image for Vietnamese timeline: {image_file}")
+        clip = output_dir / f"scene_vi_{index}.mp4"
+        run(
+            [
+                "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
+                "-t", str(duration),
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30",
+                "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                str(clip),
+            ],
+            timeout_seconds=SHORT_FORM_SCENE_RENDER_TIMEOUT_SECONDS,
+        )
+        clips.append(clip)
+    concat = output_dir / "clips_vi.txt"
+    concat.write_text(
+        "".join(f"file '{clip.resolve().as_posix()}'\n" for clip in clips),
+        encoding="utf-8",
+    )
+    target_duration = sum(scene_durations)
+    run(
+        [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an",
+            "-vf",
+            (
+                "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,"
+                f"tpad=stop_mode=clone:stop_duration={target_duration},"
+                f"trim=duration={target_duration},setpts=PTS-STARTPTS,format=yuv420p"
+            ),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(destination),
+        ],
+        timeout_seconds=SHORT_FORM_FINAL_RENDER_TIMEOUT_SECONDS,
+    )
+    return destination
+
+
+def render_social_video(
+    social: SocialPlan,
+    tts: OpenAIShortVietnameseTTS,
+    output_dir: Path,
+    settings: Settings,
+    plan: ShortPlan | None = None,
+) -> Path:
     visuals = output_dir / "visuals.mp4"
     if not visuals.is_file():
         raise BotError(f"Không tìm thấy visuals.mp4 để tạo bản social: {visuals}")
     narration = output_dir / "narration_vi.mp3"
     LOG.info("Generating Vietnamese narration for Facebook/TikTok with OpenAI gpt-4o-mini-tts…")
-    tts.speech(social.narration, narration)
-    narration_seconds = measured_narration_duration(narration, "Short Vietnamese")
-    social_visuals = retime_vertical_visuals(
-        visuals,
-        output_dir / "visuals_vi.mp4",
-        narration_seconds,
-    )
+    comparison = plan is not None and is_comparison_plan(plan)
+    if comparison:
+        synchronize_social_scene_voiceovers(social, plan)
+        require_tools()
+        parts: list[Path] = []
+        part_durations: list[float] = []
+        for index, segment in enumerate(social.scene_voiceovers, start=1):
+            part = output_dir / f"narration_vi_scene_{index:02d}.mp3"
+            LOG.info(
+                "Generating Vietnamese comparison narration scene %d/%d (focus=%s)...",
+                index,
+                len(social.scene_voiceovers),
+                plan.scenes[index - 1].focus,
+            )
+            tts.speech(segment, part)
+            parts.append(part)
+            part_durations.append(measured_narration_duration(part, f"Short Vietnamese scene {index}"))
+        concat = output_dir / "narration_vi_scenes.txt"
+        concat.write_text(
+            "".join(f"file '{part.resolve().as_posix()}'\n" for part in parts),
+            encoding="utf-8",
+        )
+        run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(narration)])
+        narration_seconds = measured_narration_duration(narration, "Short Vietnamese")
+        measured_total = sum(part_durations)
+        scale = narration_seconds / measured_total if measured_total > 0 else 1.0
+        scene_durations = [round(duration * scale, 3) for duration in part_durations]
+        scene_durations[-1] = round(
+            scene_durations[-1] + narration_seconds - sum(scene_durations),
+            3,
+        )
+        social_visuals = render_comparison_social_visuals(
+            plan,
+            scene_durations,
+            output_dir,
+            output_dir / "visuals_vi.mp4",
+        )
+    else:
+        tts.speech(social.narration, narration)
+        narration_seconds = measured_narration_duration(narration, "Short Vietnamese")
+        social_visuals = retime_vertical_visuals(
+            visuals,
+            output_dir / "visuals_vi.mp4",
+            narration_seconds,
+        )
     captions = output_dir / "captions_vi.ass"
     caption_seconds = narration_seconds
     cues = caption_cues_from_text(social.narration, caption_seconds)
@@ -3973,10 +4269,11 @@ def prepare_social_video(plan: ShortPlan, llm: OpenAITextClient, tts: OpenAIShor
             plan,
             social_planning_duration(output_dir, settings.duration),
         )
-        social_file.write_text(json.dumps(social.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    synchronize_social_scene_voiceovers(social, plan)
+    social_file.write_text(json.dumps(social.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     social_video = output_dir / "short_vi.mp4"
     if not social_video.is_file():
-        social_video = render_social_video(social, tts, output_dir, settings)
+        social_video = render_social_video(social, tts, output_dir, settings, plan)
     return social_video, social
 
 

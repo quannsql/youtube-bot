@@ -2559,6 +2559,67 @@ def test_idea_queue_recover_stuck_ideas(tmp_path):
     assert archive.claim_next_idea()["id"] == i1  # claimable again
 
 
+def test_subject_detection_handles_word_forms_without_false_positives():
+    # Narration rarely repeats the subject label verbatim.
+    assert bot._subject_mentioned("Democrats favor broader federal programs.", "Democratic Party")
+    assert bot._subject_mentioned("Republicans push for lower taxes.", "Republican Party")
+    assert bot._subject_mentioned("The Olympic games rotate every four years.", "Olympics")
+    assert bot._subject_mentioned("Android phones ship from dozens of makers.", "Android")
+    # A shared category word must NOT count as naming one side.
+    assert not bot._subject_mentioned("Two colas, one endless rivalry.", "Coca-Cola")
+    assert not bot._subject_mentioned("Two colas, one endless rivalry.", "Pepsi")
+    assert not bot._subject_mentioned("Both still split blind taste tests.", "Coca-Cola")
+
+
+def test_scene_focus_is_corrected_from_the_named_subject():
+    """The pointer must follow who the voiceover names, not the model's guess."""
+    segments = [
+        "Two parties, one divided nation.",
+        "Republicans push for lower taxes and less regulation.",
+        "Democrats favor broader federal programs.",
+        "Republicans lean on rural turnout.",
+        "Democrats dominate dense urban centers.",
+        "Both claim the same middle ground.",
+    ]
+    plan = bot.ShortPlan.from_dict({
+        "topic": "t", "subject_a": "Republican Party", "subject_b": "Democratic Party",
+        "subject_a_image_query": "q", "subject_b_image_query": "q", "angle": "x",
+        "title": "Republican Party vs Democratic Party", "thumbnail_text": "GOP vs Dems",
+        "description": "d #A #B", "tags": ["A", "B"],
+        "hook": segments[0], "narration": " ".join(segments), "closing_line": segments[-1],
+        "fact_note": "n", "source_hints": ["s"],
+        # The writer handed back a reversed focus track; sync must repair it.
+        "scenes": [
+            {"duration": 5, "focus": f, "visual_prompt": "v", "voiceover": s}
+            for f, s in zip(["both", "b", "a", "b", "a", "both"], segments)
+        ],
+    })
+
+    bot.synchronize_comparison_scene_voiceovers(plan)
+
+    assert [s.focus for s in plan.scenes] == ["both", "a", "b", "a", "b", "both"]
+
+
+def test_scene_focus_holds_the_subject_through_a_pronoun_beat():
+    segments = ["Intro line.", "Coca-Cola leans on heritage.", "It never changed that formula.", "Closing line."]
+    plan = bot.ShortPlan.from_dict({
+        "topic": "t", "subject_a": "Coca-Cola", "subject_b": "Pepsi",
+        "subject_a_image_query": "q", "subject_b_image_query": "q", "angle": "x",
+        "title": "Coca-Cola vs Pepsi", "thumbnail_text": "t", "description": "d #A #B", "tags": ["A", "B"],
+        "hook": segments[0], "narration": " ".join(segments), "closing_line": segments[-1],
+        "fact_note": "n", "source_hints": ["s"],
+        # No usable focus on the pronoun beat -> it must hold "a", not flip to "b".
+        "scenes": [
+            {"duration": 5, "focus": f, "visual_prompt": "v", "voiceover": s}
+            for f, s in zip(["both", "a", "", "both"], segments)
+        ],
+    })
+
+    bot.synchronize_comparison_scene_voiceovers(plan)
+
+    assert [s.focus for s in plan.scenes] == ["both", "a", "a", "both"]
+
+
 def test_comparison_idea_round_trips_and_ignores_plain_text():
     encoded = bot.encode_comparison_idea("Coca-Cola", "Pepsi", "hương vị")
 

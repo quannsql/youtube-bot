@@ -2188,6 +2188,32 @@ def partition_narration_for_scenes(
     return segments
 
 
+_SUBJECT_GENERIC_TOKENS = {
+    "the", "and", "club", "company", "team", "party", "brand", "football", "fc",
+    "inc", "corp", "group", "co", "of",
+}
+
+
+def _subject_stem(token: str) -> str:
+    """Crude stem so 'democratic'/'democrats' and 'olympics'/'olympic' match.
+
+    Narration constantly uses a different word form than the subject label
+    ("Democratic Party" -> "Democrats"), and an exact-word test misses those.
+    Stripping repeats until stable so different inflections of the same word
+    converge on one stem regardless of which suffix they carry.
+    """
+    suffixes = ("ations", "ation", "ings", "ing", "ers", "er", "ies", "ic", "s")
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if token.endswith(suffix) and len(token) - len(suffix) >= 4:
+                token = token[: -len(suffix)]
+                changed = True
+                break
+    return token
+
+
 def _subject_mentioned(text: str, subject: str) -> bool:
     normalized_text = " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
     normalized_subject = " ".join(re.findall(r"[a-z0-9]+", subject.casefold()))
@@ -2195,12 +2221,22 @@ def _subject_mentioned(text: str, subject: str) -> bool:
         return False
     if re.search(rf"\b{re.escape(normalized_subject)}\b", normalized_text):
         return True
-    generic = {"the", "and", "club", "company", "team", "party", "brand", "football", "fc"}
     distinctive = [
         token for token in normalized_subject.split()
-        if len(token) >= 4 and token not in generic
+        if len(token) >= 4 and token not in _SUBJECT_GENERIC_TOKENS
     ]
-    return any(re.search(rf"\b{re.escape(token)}\b", normalized_text) for token in distinctive)
+    if not distinctive:
+        return False
+    text_stems = {_subject_stem(word) for word in normalized_text.split()}
+    for token in distinctive:
+        if re.search(rf"\b{re.escape(token)}\b", normalized_text):
+            return True
+        stem = _subject_stem(token)
+        # Short stems are category words, not names: "cola" from "Coca-Cola" would
+        # match the generic "two colas" that introduces BOTH subjects.
+        if len(stem) >= 5 and stem in text_stems:
+            return True
+    return False
 
 
 def synchronize_comparison_scene_voiceovers(plan: ShortPlan) -> None:
@@ -2225,6 +2261,7 @@ def synchronize_comparison_scene_voiceovers(plan: ShortPlan) -> None:
         )
 
     next_fallback = "a"
+    previous_focus = ""
     last_index = len(plan.scenes) - 1
     for index, (scene, segment) in enumerate(zip(plan.scenes, segments)):
         scene.voiceover = segment
@@ -2238,10 +2275,20 @@ def synchronize_comparison_scene_voiceovers(plan: ShortPlan) -> None:
             scene.focus = "b"
         elif index == 0 or index == last_index:
             scene.focus = "both"
-        elif scene.focus not in ("a", "b", "both"):
+        elif scene.focus in ("a", "b", "both"):
+            # Names neither subject (nickname or pronoun): keep what the writer
+            # declared for this beat rather than second-guessing it.
+            pass
+        elif previous_focus in ("a", "b"):
+            # No usable signal at all — a pronoun beat almost always continues the
+            # previous subject, so hold the pointer instead of alternating away
+            # to the subject that is NOT being discussed.
+            scene.focus = previous_focus
+        else:
             scene.focus = next_fallback
         if scene.focus in ("a", "b"):
             next_fallback = "b" if scene.focus == "a" else "a"
+            previous_focus = scene.focus
     plan.narration = _normalized_voiceover(" ".join(scene.voiceover for scene in plan.scenes))
 
 

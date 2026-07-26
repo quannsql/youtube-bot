@@ -181,7 +181,12 @@ Nội dung video dài là kênh GIẢI THÍCH/giáo dục gần gũi đời số
 
 ## Nhập ý tưởng thủ công (frontend web)
 
-Ngoài 2 luồng **auto** (Short Cron + Long Cron chạy như trên, không đổi), bot có thêm **luồng thủ công**: một trang web để bạn tự nhập ý tưởng, sau đó bot viết kịch bản, tạo ảnh người-que, lồng tiếng, render và đăng YouTube. **Ý tưởng thủ công chỉ tạo VIDEO DÀI** (tính năng Short thủ công đã bỏ) — mọi ý tưởng đều ra video giải thích người-que. Ý tưởng thủ công **tự do hoàn toàn** — bỏ qua chống-trùng, ràng buộc chủ đề và **cả bộ chặn Việt Nam**; chỉ giữ quy tắc không bịa số liệu/nguồn. Gõ ý tưởng bằng tiếng Việt hay tiếng Anh đều được, video xuất ra tiếng Anh.
+Ngoài 2 luồng **auto** (Short Cron + Long Cron chạy như trên, không đổi), bot có thêm **luồng thủ công**: một trang web (giao diện đen, full chiều ngang) với **2 khu riêng biệt — Short bên trái, Long-form bên phải**:
+
+- **Short (so sánh):** nhập **2 ô riêng — đối tượng A và đối tượng B** (kèm ô "góc so sánh" tuỳ chọn). Hai ô riêng là cách rõ ràng nhất cho bot: A luôn là panel trái, B luôn là panel phải, không phải đoán/tách chuỗi. Tên bạn nhập được **giữ nguyên tuyệt đối** — nếu model tự đổi tên hoặc tìm ảnh sai đối tượng, bot ghi đè lại theo đúng tên bạn nhập.
+- **Long-form (giải thích):** nhập một ý tưởng tự do như trước, ra video người-que 5–7 phút.
+
+Ý tưởng thủ công **tự do hoàn toàn** — bỏ qua chống-trùng, ràng buộc chủ đề và **cả bộ chặn Việt Nam**; chỉ giữ quy tắc không bịa số liệu/nguồn. Gõ tiếng Việt hay tiếng Anh đều được, video xuất ra tiếng Anh (Short còn tự tạo bản tiếng Việt cho Facebook/TikTok nếu đã bật).
 
 Cách hoạt động: trang web ghi ý tưởng vào bảng `idea_queue` trong cùng PostgreSQL. Một worker chạy nền lần lượt nhặt từng ý tưởng và gọi `python youtube_shorts_bot.py --idea-id <id>` (render tuần tự 1 video một lúc để không quá tải). Trang có bảng theo dõi trạng thái (Chờ → Đang tạo → Xong/Lỗi) kèm link YouTube, tự làm mới mỗi 5 giây.
 
@@ -196,8 +201,10 @@ python web_app.py
 Không đặt `WEB_ACCESS_TOKEN` thì trang mở tự do — chỉ nên vậy khi chạy local. Có thể chạy thử kế hoạch mà không tốn ảnh/voice/upload bằng:
 
 ```powershell
-# Ý tưởng thủ công luôn tạo video dài; --long-form là tùy chọn (mặc định đã là long).
-python youtube_shorts_bot.py --idea "Trận Điện Biên Phủ 1954" --dry-run
+# Long-form từ ý tưởng tự do
+python youtube_shorts_bot.py --idea "Trận Điện Biên Phủ 1954" --long-form --dry-run
+# Short so sánh: ghim thẳng 2 đối tượng (--idea khi đó là "góc so sánh", tuỳ chọn)
+python youtube_shorts_bot.py --subject-a "Coca-Cola" --subject-b "Pepsi" --idea "hương vị và marketing" --dry-run
 ```
 
 ### Triển khai Railway (service Web thứ 3)

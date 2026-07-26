@@ -2055,6 +2055,54 @@ def _split_versus(text: str) -> tuple[str, str] | None:
     return None
 
 
+def encode_comparison_idea(subject_a: str, subject_b: str, angle: str = "") -> str:
+    """Serialize a manually entered A-vs-B matchup for the idea_queue.idea column.
+
+    Structured JSON keeps the two subjects unambiguous end to end (no "vs" parsing),
+    and plain-text ideas still work because the decoder returns None for them.
+    """
+    return json.dumps(
+        {
+            "kind": "comparison",
+            "subject_a": subject_a.strip()[:60],
+            "subject_b": subject_b.strip()[:60],
+            "angle": (angle or "").strip()[:300],
+        },
+        ensure_ascii=False,
+    )
+
+
+def decode_comparison_idea(idea_text: str) -> dict[str, str] | None:
+    """Return {'subject_a','subject_b','angle'} for a structured idea, else None."""
+    text = (idea_text or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    subject_a = str(payload.get("subject_a") or "").strip()
+    subject_b = str(payload.get("subject_b") or "").strip()
+    if not subject_a or not subject_b:
+        return None
+    return {
+        "subject_a": subject_a[:60],
+        "subject_b": subject_b[:60],
+        "angle": str(payload.get("angle") or "").strip()[:300],
+    }
+
+
+def describe_manual_idea(idea_text: str) -> str:
+    """Human-readable one-liner for logs and the web queue list."""
+    structured = decode_comparison_idea(idea_text)
+    if not structured:
+        return (idea_text or "").strip()
+    label = f"{structured['subject_a']} vs {structured['subject_b']}"
+    return f"{label} — {structured['angle']}" if structured["angle"] else label
+
+
 def ensure_comparison_fields(plan: ShortPlan) -> None:
     """Fill in the two subjects and per-scene focus for a comparison Short."""
     if not (plan.subject_a and plan.subject_b):
@@ -2478,6 +2526,117 @@ def choose_novel_long_form_plan(
             "requesting a different explainer topic..."
         )
     return None
+
+
+def plan_short_from_idea(llm: OpenAITextClient, duration: int, user_idea: str) -> ShortPlan:
+    """Build a comparison Short from a manual idea, bypassing the auto novelty gates.
+
+    The idea may be structured (two pinned subjects from the web form), a plain
+    "A vs B" line, or a loose idea the model turns into a matchup itself.
+    """
+    structured = decode_comparison_idea(user_idea)
+    angle = ""
+    if structured:
+        subject_a, subject_b = structured["subject_a"], structured["subject_b"]
+        angle = structured["angle"]
+    else:
+        pair = _split_versus(user_idea)
+        subject_a, subject_b = pair if pair else ("", "")
+
+    if subject_a and subject_b:
+        matchup_rule = (
+            f'The user pinned BOTH subjects. subject_a MUST be exactly "{subject_a}" and subject_b MUST be exactly "{subject_b}". '
+            "Do not swap, rename, translate, or replace them, and do not invent a different matchup. "
+            "Write subject_a_image_query and subject_b_image_query as 2-5 word web image searches that find a clear, "
+            "recognizable photo or logo of each of those exact subjects."
+        )
+        if angle:
+            matchup_rule += f' Focus the comparison on this angle requested by the user: """{angle}""".'
+        subject_label = f"{subject_a} vs {subject_b}"
+    else:
+        matchup_rule = (
+            "Turn the user's idea into a comparison of TWO specific, famous, opposing or rival subjects. "
+            "Pick the two subjects the idea most clearly points to, set subject_a and subject_b to their short display "
+            "names, and give a 2-5 word web image search for a recognizable picture or logo of each."
+        )
+        subject_label = user_idea
+
+    target_minimum_words, target_maximum_words = target_narration_word_bounds(duration)
+    prompt = f'''Act as a senior viral short-video writer. Create ONE highly watchable {duration}-second English-language COMPARISON YouTube Short.
+The user has explicitly requested THIS exact matchup/idea. Build the entire Short around it and do NOT substitute a different topic:
+"""{describe_manual_idea(user_idea)}"""
+
+Rules:
+- {matchup_rule}
+- Interpret the request faithfully even if it is written in another language; the finished narration is in English.
+- Compare ONLY the few most important, most interesting, most-argued-about differences between the two subjects — not an exhaustive checklist.
+- NEUTRALITY: do NOT declare a winner, push an opinion, or take a political side; present each side's key facts evenly. The closing_line must be a neutral wrap-up, not a verdict.
+- Do NOT invent statistics, dates, quotations, prices, scores, or source names. Use well-established public facts and stay qualitative when a precise figure is unknown.
+- TITLE: explicitly name BOTH subjects, e.g. 'Coca-Cola vs Pepsi: The Real Differences'. Set thumbnail_text to 2-5 words naming the matchup.
+- STRUCTURE — exactly 6 scenes whose durations total exactly {duration}:
+  - Scene 1 (focus "both"): the hook — introduce the matchup and why it is interesting.
+  - Scenes 2-5 (focus alternates "a" and "b"): each delivers ONE key contrast about the subject in focus.
+  - Scene 6 (focus "both"): the closing_line — a neutral wrap-up.
+- Set every scene's "focus" to "a", "b", or "both" to match which subject that beat is about, and put the one key point of that beat in visual_prompt.
+- Give every scene a non-empty "voiceover" containing the exact consecutive narration sentences spoken while that scene is visible. Concatenating all 6 voiceovers with spaces MUST equal narration exactly, with no omitted, repeated, reordered, or paraphrased words. Each middle voiceover must explicitly name its focused subject at least once; do not rely only on pronouns. If a voiceover discusses both subjects, set focus to "both".
+- The narration must start verbatim with hook and end verbatim with closing_line, in plain spoken English, one clear idea per sentence.
+- Aim for roughly {target_minimum_words}-{target_maximum_words} spoken English words; never pad with filler.
+- Every string in the returned JSON must be English (topic, title, description, tags, narration, fact_note, source_hints).
+
+Return raw JSON only using exactly this schema:
+{PLAN_SCHEMA}'''
+    LOG.info("Writing manual-idea comparison Short for: %.80s", subject_label)
+    draft = ShortPlan.from_dict(extract_json(llm.chat(prompt, temperature=0.6)))
+    review_prompt = f'''Act as the final fact, comparison, and retention editor for a {duration}-second English COMPARISON YouTube Short. Return only JSON.
+Keep the video centered on the user's requested matchup and improve the hook, clarity, fairness, pacing, and closing line. Return exactly:
+{{"plan":{PLAN_SCHEMA}}}
+Rules:
+- The matchup MUST stay the user's request: """{describe_manual_idea(user_idea)}""". Do not swap in different subjects.
+- {matchup_rule}
+- Keep only well-established facts; cut invented numbers, dates, quotes, or sources.
+- NEUTRALITY: no winner, no opinion, no political side; keep each side's points even and the closing_line neutral.
+- Keep exactly 6 scenes totaling {duration}, each with a "focus" of "a"/"b"/"both" matching which subject the narration covers in that beat (scene 1 and the last scene are "both"). Every scene must contain a non-empty voiceover; joining those 6 voiceovers with spaces must reproduce narration verbatim. Each middle voiceover explicitly names the focused subject.
+- The title must name BOTH subjects; thumbnail_text 2-5 words naming the matchup. The narration must begin with hook and end with closing_line; aim for {target_minimum_words}-{target_maximum_words} spoken English words.
+Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
+    LOG.info("Quality pass: refining the manual comparison Short…")
+    try:
+        reviewed = extract_json(llm.chat(review_prompt, temperature=0.4))
+        plan_dict = reviewed.get("plan") if isinstance(reviewed.get("plan"), dict) else reviewed
+        plan = ShortPlan.from_dict(plan_dict)
+    except Exception as exc:
+        LOG.warning("Manual Short review pass failed (%s); using the draft.", exc)
+        plan = draft
+    # The user's pinned subjects always win over whatever the model returned.
+    if subject_a and subject_b:
+        if plan.subject_a != subject_a or plan.subject_b != subject_b:
+            LOG.info("Restoring the user's pinned subjects: %r vs %r", subject_a, subject_b)
+        plan.subject_a, plan.subject_b = subject_a, subject_b
+        # An image search that drifted to some other subject would fetch the wrong
+        # panel photo, so fall back to searching the pinned name itself.
+        if not _subject_mentioned(plan.subject_a_image_query, subject_a):
+            plan.subject_a_image_query = subject_a
+        if not _subject_mentioned(plan.subject_b_image_query, subject_b):
+            plan.subject_b_image_query = subject_b
+    ensure_title_names_main_subject(plan)
+    normalize_scene_count(plan, 6)
+    ensure_long_form_hook_and_closing(plan)
+    ensure_comparison_fields(plan)
+    synchronize_comparison_scene_voiceovers(plan)
+    rescale_scene_durations(plan, float(duration), "Manual Short plan")
+    if not is_comparison_plan(plan):
+        raise BotError("Manual Short thiếu subject_a/subject_b; không dựng được layout so sánh.")
+    words = spoken_word_count(plan.narration)
+    minimum_words, maximum_words = narration_word_bounds(duration)
+    if not minimum_words <= words <= maximum_words:
+        LOG.warning(
+            "Manual Short narration has %d words (comfortable range %d-%d for %ds); rendering it anyway.",
+            words, minimum_words, maximum_words, duration,
+        )
+    LOG.info(
+        "Manual Short plan ready: %r (%s vs %s, %d scenes, %d words).",
+        plan.title, plan.subject_a, plan.subject_b, len(plan.scenes), words,
+    )
+    return plan
 
 
 def plan_long_form_from_idea(
@@ -4456,6 +4615,68 @@ def configure_logging(level: str) -> None:
     )
 
 
+def run_manual_short_flow(
+    idea: str,
+    duration: int,
+    publish: bool,
+    privacy: str,
+    settings: Settings,
+    archive: Archive,
+    llm: OpenAITextClient,
+    images: VisualAssetProvider,
+    tts: GoogleCloudTTS,
+    social_tts: OpenAIShortVietnameseTTS,
+) -> tuple[str | None, str]:
+    """Render one comparison Short from a manual idea. Returns (youtube_id, title)."""
+    plan = plan_short_from_idea(llm, duration, idea)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = DATA_DIR / "generated" / f"manual-{datetime.now():%Y%m%d-%H%M%S}-{slug(plan.topic)}"
+    output_dir.mkdir(parents=True)
+    (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    record_id = archive.reserve(plan, output_dir)
+    youtube_id: str | None = None
+    rendered = False
+    try:
+        narration, narration_seconds = prepare_short_english_narration(plan, tts, output_dir)
+        rescale_scene_durations(plan, narration_seconds, "Manual Short English")
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        video = render(plan, images, output_dir, narration_seconds, narration, narration_seconds)
+        append_web_source_credits(plan, images.web_sources)
+        (output_dir / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if images.web_sources:
+            (output_dir / "web_sources.json").write_text(
+                json.dumps(images.web_sources, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        rendered = True
+        archive.mark(record_id, "rendered")
+        print(f"Đã render (manual Short): {video}")
+        if publish:
+            youtube_id = upload_to_youtube(video, plan, settings, privacy)
+            archive.mark(record_id, "published", youtube_id)
+            print(f"Đã upload: https://youtube.com/watch?v={youtube_id}")
+            if settings.youtube_token.exists():
+                archive.set_kv("youtube_token", settings.youtube_token.read_text(encoding="utf-8"))
+            if social_publish_enabled(settings):
+                social_video, social = prepare_social_video(plan, llm, social_tts, output_dir, settings)
+                social_results = publish_social_video(social_video, social, settings)
+                if social_results:
+                    print(f"Đã publish social: {social_results}")
+            if archive.is_postgres:
+                try:
+                    shutil.rmtree(output_dir)
+                    LOG.info("Cleaned up output directory: %s", output_dir)
+                except Exception as exc:
+                    LOG.warning("Could not clean up %s: %s", output_dir, exc)
+    except Exception:
+        archive.mark(record_id, "upload_failed" if rendered else "failed")
+        raise
+    return youtube_id, plan.title
+
+
 def run_manual_long_form_flow(
     idea: str,
     publish: bool,
@@ -4540,8 +4761,15 @@ def run_manual_idea(
         publish = bool(row.get("publish"))
         privacy = str(row.get("privacy") or settings.youtube_privacy)
     else:
-        idea_text = str(args.idea or "").strip()
-        mode = "long" if args.long_form else "short"
+        subject_a = str(getattr(args, "subject_a", "") or "").strip()
+        subject_b = str(getattr(args, "subject_b", "") or "").strip()
+        if subject_a and subject_b:
+            # Two pinned subjects always mean a comparison Short, with --idea as the angle.
+            idea_text = encode_comparison_idea(subject_a, subject_b, str(args.idea or ""))
+            mode = "short"
+        else:
+            idea_text = str(args.idea or "").strip()
+            mode = "long" if args.long_form else "short"
         duration = args.duration or settings.duration
         publish = args.publish
         privacy = args.privacy_status or settings.youtube_privacy
@@ -4549,26 +4777,33 @@ def run_manual_idea(
         raise BotError("Y tuong rong; khong the tao video.")
     if privacy not in ("private", "unlisted", "public"):
         privacy = settings.youtube_privacy
-    # Manual-idea Shorts were removed; a manually submitted idea now always produces a
-    # long-form video. A short request (stale queue row, or --idea without --long-form)
-    # is redirected to long-form instead of failing.
-    if mode != "long":
-        LOG.info("Manual-idea Shorts are disabled; generating a long-form video from this idea instead.")
-        mode = "long"
-    LOG.info("Manual idea (id=%s, mode=%s, publish=%s): %.80s", idea_id, mode, publish, idea_text)
+    if mode not in ("short", "long"):
+        mode = "short"
+    LOG.info(
+        "Manual idea (id=%s, mode=%s, publish=%s): %.80s",
+        idea_id, mode, publish, describe_manual_idea(idea_text),
+    )
 
     if args.dry_run:
-        min_scenes = min(settings.long_form_min_scenes, settings.long_form_max_scenes)
-        max_scenes = max(settings.long_form_min_scenes, settings.long_form_max_scenes)
-        preview_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
-        plan = plan_long_form_from_idea(llm, preview_duration, min_scenes, max_scenes, idea_text)
+        if mode == "long":
+            min_scenes = min(settings.long_form_min_scenes, settings.long_form_max_scenes)
+            max_scenes = max(settings.long_form_min_scenes, settings.long_form_max_scenes)
+            preview_duration = min(settings.long_form_min_duration_seconds, settings.long_form_max_duration_seconds)
+            plan = plan_long_form_from_idea(llm, preview_duration, min_scenes, max_scenes, idea_text)
+        else:
+            plan = plan_short_from_idea(llm, duration, idea_text)
         print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
         return 0
 
     try:
-        youtube_id, title = run_manual_long_form_flow(
-            idea_text, publish, privacy, settings, archive, llm, images, tts
-        )
+        if mode == "long":
+            youtube_id, title = run_manual_long_form_flow(
+                idea_text, publish, privacy, settings, archive, llm, images, tts
+            )
+        else:
+            youtube_id, title = run_manual_short_flow(
+                idea_text, duration, publish, privacy, settings, archive, llm, images, tts, social_tts
+            )
     except Exception as exc:
         if idea_id is not None:
             archive.update_idea(idea_id, "failed", error=str(exc)[:2000])
@@ -4599,6 +4834,8 @@ def main() -> int:
     parser.add_argument("--long-form", action="store_true", help="Create, render, and optionally publish one horizontal video")
     parser.add_argument("--idea", type=str, help="Tạo video từ một ý tưởng cụ thể (thủ công) thay vì tự sinh ý tưởng")
     parser.add_argument("--idea-id", type=int, help="Đọc ý tưởng thủ công từ hàng idea_queue theo id (dùng bởi web frontend)")
+    parser.add_argument("--subject-a", type=str, help="Short so sánh thủ công: đối tượng bên trái (dùng kèm --subject-b)")
+    parser.add_argument("--subject-b", type=str, help="Short so sánh thủ công: đối tượng bên phải (dùng kèm --subject-a)")
     # Accepted temporarily so existing Railway commands do not fail; the pipeline is now always one-shot.
     parser.add_argument("--long-form-mode", choices=("prepare", "finalize", "auto"), default="auto", help=argparse.SUPPRESS)
     parser.add_argument("--long-form-image-budget", type=int, help=argparse.SUPPRESS)
@@ -4626,7 +4863,7 @@ def main() -> int:
     llm = OpenAITextClient(settings)
     tts = GoogleCloudTTS(settings)
     social_tts = OpenAIShortVietnameseTTS(settings)
-    if args.idea is not None or args.idea_id is not None:
+    if args.idea is not None or args.idea_id is not None or (args.subject_a and args.subject_b):
         return run_manual_idea(args, settings, archive, llm, images, tts, social_tts)
     if args.long_form or env_forces_long_form:
         long_form_theme = args.theme if args.theme != parser.get_default("theme") else LONG_FORM_DEFAULT_THEME

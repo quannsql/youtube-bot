@@ -2559,6 +2559,85 @@ def test_idea_queue_recover_stuck_ideas(tmp_path):
     assert archive.claim_next_idea()["id"] == i1  # claimable again
 
 
+def test_comparison_idea_round_trips_and_ignores_plain_text():
+    encoded = bot.encode_comparison_idea("Coca-Cola", "Pepsi", "hương vị")
+
+    assert bot.decode_comparison_idea(encoded) == {
+        "subject_a": "Coca-Cola", "subject_b": "Pepsi", "angle": "hương vị",
+    }
+    assert bot.describe_manual_idea(encoded) == "Coca-Cola vs Pepsi — hương vị"
+    assert bot.describe_manual_idea(bot.encode_comparison_idea("A", "B")) == "A vs B"
+    # Plain-text ideas (long-form, or the CLI) must pass through untouched.
+    assert bot.decode_comparison_idea("Trận Điện Biên Phủ 1954") is None
+    assert bot.describe_manual_idea("Trận Điện Biên Phủ 1954") == "Trận Điện Biên Phủ 1954"
+    # Malformed / incomplete payloads degrade to plain text rather than raising.
+    assert bot.decode_comparison_idea('{"subject_a": "only one"}') is None
+    assert bot.decode_comparison_idea("{not json") is None
+
+
+def _manual_comparison_plan_json():
+    return {
+        "topic": "Coke vs Pepsi", "subject_a": "Coke", "subject_b": "PEPSI CO",
+        "subject_a_image_query": "unrelated mountain", "subject_b_image_query": "unrelated beach",
+        "angle": "taste and marketing", "title": "Coca-Cola vs Pepsi: Real Differences",
+        "thumbnail_text": "Coca vs Pepsi", "description": "d #A #B", "tags": ["A", "B"],
+        "hook": "Two colas, one endless rivalry.",
+        "narration": (
+            "Two colas, one endless rivalry. Coca-Cola leans on heritage branding. "
+            "Pepsi chased a younger audience. Coca-Cola keeps a smoother vanilla note. "
+            "Pepsi hits sweeter up front. Both still split taste tests worldwide."
+        ),
+        "closing_line": "Both still split taste tests worldwide.",
+        "scenes": [
+            {"duration": 5, "focus": "both", "visual_prompt": "matchup", "voiceover": "Two colas, one endless rivalry."},
+            {"duration": 5, "focus": "a", "visual_prompt": "coke", "voiceover": "Coca-Cola leans on heritage branding."},
+            {"duration": 5, "focus": "b", "visual_prompt": "pepsi", "voiceover": "Pepsi chased a younger audience."},
+            {"duration": 5, "focus": "a", "visual_prompt": "coke2", "voiceover": "Coca-Cola keeps a smoother vanilla note."},
+            {"duration": 5, "focus": "b", "visual_prompt": "pepsi2", "voiceover": "Pepsi hits sweeter up front."},
+            {"duration": 5, "focus": "both", "visual_prompt": "close", "voiceover": "Both still split taste tests worldwide."},
+        ],
+        "fact_note": "n", "source_hints": ["s"],
+    }
+
+
+def test_manual_short_pins_the_users_two_subjects():
+    prompts = []
+
+    class FakeClient:
+        def chat(self, prompt, **kwargs):
+            prompts.append(prompt)
+            return json.dumps(_manual_comparison_plan_json())
+
+    idea = bot.encode_comparison_idea("Coca-Cola", "Pepsi", "hương vị và marketing")
+    plan = bot.plan_short_from_idea(FakeClient(), 30, idea)
+
+    # The model answered "Coke"/"PEPSI CO"; the user's pinned names must win.
+    assert (plan.subject_a, plan.subject_b) == ("Coca-Cola", "Pepsi")
+    assert bot.is_comparison_plan(plan)
+    # Image searches that drifted to another subject are repaired to the pinned name.
+    assert plan.subject_a_image_query == "Coca-Cola"
+    assert plan.subject_b_image_query == "Pepsi"
+    assert [s.focus for s in plan.scenes] == ["both", "a", "b", "a", "b", "both"]
+    assert abs(sum(s.duration for s in plan.scenes) - 30) < 0.1
+    assert 'MUST be exactly "Coca-Cola"' in prompts[0]
+    assert "hương vị và marketing" in prompts[0]
+
+
+def test_manual_short_derives_subjects_from_free_text_versus():
+    class FakeClient:
+        def chat(self, prompt, **kwargs):
+            payload = _manual_comparison_plan_json()
+            payload["subject_a_image_query"] = "Coca-Cola logo can"
+            payload["subject_b_image_query"] = "Pepsi logo can"
+            return json.dumps(payload)
+
+    plan = bot.plan_short_from_idea(FakeClient(), 30, "Coca-Cola vs Pepsi")
+
+    assert (plan.subject_a, plan.subject_b) == ("Coca-Cola", "Pepsi")
+    # On-topic image queries from the model are kept as-is.
+    assert plan.subject_a_image_query == "Coca-Cola logo can"
+
+
 def test_plan_long_form_from_idea_seeds_idea_and_has_no_vietnam_hard_block(monkeypatch):
     monkeypatch.setattr(bot, "fetch_news_for_idea", lambda *a, **k: [])  # no network in tests
     idea = "Trận Điện Biên Phủ 1954 và ý nghĩa lịch sử"

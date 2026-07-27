@@ -284,19 +284,56 @@ def test_archive_blocks_rephrased_long_form_subject(tmp_path):
 
 def test_long_form_explainer_category_avoids_repeats_within_run():
     first = bot.choose_long_form_explainer_category()
-    assert first in bot.LONG_FORM_EXPLAINER_CATEGORIES
+    assert first in bot.LONG_FORM_CATEGORIES
 
-    # When every category but the last is excluded, the helper must pick that last one.
-    excluded = set(bot.LONG_FORM_EXPLAINER_CATEGORIES[:-1])
-    assert bot.choose_long_form_explainer_category(excluded) == bot.LONG_FORM_EXPLAINER_CATEGORIES[-1]
+    # Exclusion works on slugs: with every category but the last ruled out, the
+    # helper must pick that last one.
+    excluded = {category.slug for category in bot.LONG_FORM_CATEGORIES[:-1]}
+    assert bot.choose_long_form_explainer_category(excluded) == bot.LONG_FORM_CATEGORIES[-1]
 
     # If all are excluded it still returns a valid category rather than crashing.
-    assert bot.choose_long_form_explainer_category(set(bot.LONG_FORM_EXPLAINER_CATEGORIES)) in bot.LONG_FORM_EXPLAINER_CATEGORIES
+    all_slugs = {category.slug for category in bot.LONG_FORM_CATEGORIES}
+    assert bot.choose_long_form_explainer_category(all_slugs) in bot.LONG_FORM_CATEGORIES
 
     # Hard science, space, and cosmology were removed for being too abstract/long-winded.
     categories = " ".join(bot.LONG_FORM_EXPLAINER_CATEGORIES).lower()
     for banned in ("space", "cosmos", "universe", "astronomy", "planet", "science explainer"):
         assert banned not in categories
+
+
+def test_every_long_form_category_maps_to_a_distinct_playlist():
+    slugs = [category.slug for category in bot.LONG_FORM_CATEGORIES]
+    titles = [category.playlist_title for category in bot.LONG_FORM_CATEGORIES]
+
+    assert len(set(slugs)) == len(slugs), "slugs key the playlist lookup, so they must be unique"
+    # ensure_playlist matches an existing playlist by exact title, so two topics
+    # sharing a title would silently file into the same playlist.
+    assert len(set(titles)) == len(titles)
+    assert bot.LONG_FORM_CATEGORY_BY_SLUG.keys() == set(slugs)
+
+    for category in bot.LONG_FORM_CATEGORIES:
+        assert category.prompt and category.playlist_description
+        # YouTube truncates longer titles in the sidebar and playlist cards.
+        assert len(category.playlist_title) <= 60
+
+
+def test_long_form_topic_category_survives_the_plan_json_round_trip():
+    # A long-form job is resumable: the plan is written to plan.json and reloaded,
+    # so a slug that does not round-trip would be lost before the upload step.
+    plan = bot.ShortPlan.from_dict({
+        "topic": "How money was invented", "angle": "From barter to coins",
+        "title": "How Money Was Invented", "description": "An explainer.",
+        "tags": ["History"], "narration": "A short script. It ends here.",
+        "fact_note": "Qualitative", "source_hints": ["General history"],
+        "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
+    })
+    assert plan.topic_category == ""  # absent from the model's schema
+
+    plan.topic_category = "origins"
+    reloaded = bot.ShortPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+    assert reloaded.topic_category == "origins"
+    assert bot.LONG_FORM_CATEGORY_BY_SLUG[reloaded.topic_category].playlist_title
 
 
 def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
@@ -1435,11 +1472,14 @@ def test_plan_long_form_builds_educational_explainer(tmp_path):
         300,
         4,
         4,
-        bot.LONG_FORM_EXPLAINER_CATEGORIES[1],
+        bot.LONG_FORM_CATEGORIES[1],
     )
 
     assert result.title == plan["title"]
     assert sum(scene.duration for scene in result.scenes) == 300
+    # The assigned category is stamped on the plan even though the model never
+    # returns it — the review pass only echoes the fields in the schema.
+    assert result.topic_category == bot.LONG_FORM_CATEGORIES[1].slug
 
 
 def test_plan_long_form_explainer_meets_word_budget(tmp_path):
@@ -1479,7 +1519,7 @@ def test_plan_long_form_explainer_meets_word_budget(tmp_path):
         300,
         4,
         4,
-        bot.LONG_FORM_EXPLAINER_CATEGORIES[6],  # Origins of the everyday world
+        bot.LONG_FORM_CATEGORIES[6],  # Origins of the everyday world
     )
 
     assert bot.spoken_word_count(result.narration) >= bot.long_form_word_bounds(300)[0]
@@ -2762,3 +2802,160 @@ def test_fetch_news_for_idea_parses_and_dedups(monkeypatch):
     assert len(items) == 2  # duplicate title collapsed
     assert items[0]["title"].startswith("AI firms")
     assert items[0]["link"] == "http://x/1"
+
+
+class FakePlaylistService:
+    """Minimal stand-in for the YouTube Data API playlist endpoints."""
+
+    def __init__(self, existing=(), pages=None, fail_on=""):
+        self.existing = list(existing)
+        self.pages = pages
+        self.fail_on = fail_on
+        self.created = []
+        self.added = []
+
+    class _Call:
+        def __init__(self, result):
+            self._result = result
+
+        def execute(self):
+            return self._result() if callable(self._result) else self._result
+
+    def _boom(self, name):
+        from googleapiclient.errors import HttpError
+
+        class Resp:
+            status = 403
+            reason = "insufficientPermissions"
+
+        raise HttpError(Resp(), b'{"error": {"message": "no"}}', uri=name)
+
+    def playlists(self):
+        service = self
+
+        class Playlists:
+            def list(self, part, mine, maxResults, pageToken=None):
+                if service.fail_on == "list":
+                    return service._Call(lambda: service._boom("list"))
+                if service.pages is not None:
+                    return service._Call(service.pages[pageToken])
+                return service._Call({"items": [
+                    {"id": pid, "snippet": {"title": title}} for pid, title in service.existing
+                ]})
+
+            def insert(self, part, body):
+                if service.fail_on == "insert":
+                    return service._Call(lambda: service._boom("insert"))
+                service.created.append(body)
+                return service._Call({"id": "PL_new"})
+
+        return Playlists()
+
+    def playlistItems(self):
+        service = self
+
+        class PlaylistItems:
+            def insert(self, part, body):
+                if service.fail_on == "add":
+                    return service._Call(lambda: service._boom("add"))
+                service.added.append(body["snippet"])
+                return service._Call({"id": "PLI_1"})
+
+        return PlaylistItems()
+
+
+def _playlist_settings(**overrides):
+    return bot.Settings(
+        youtube_playlist_enabled=True,
+        youtube_playlist_privacy="public",
+        **overrides,
+    )
+
+
+def test_ensure_playlist_reuses_an_existing_playlist_instead_of_creating_a_duplicate():
+    category = bot.LONG_FORM_CATEGORY_BY_SLUG["wars"]
+    service = FakePlaylistService(existing=[("PL_other", "Something else"), ("PL_wars", category.playlist_title)])
+
+    assert bot.ensure_playlist(service, category, _playlist_settings()) == "PL_wars"
+    assert service.created == []
+
+
+def test_ensure_playlist_creates_the_playlist_on_first_use():
+    category = bot.LONG_FORM_CATEGORY_BY_SLUG["origins"]
+    service = FakePlaylistService(existing=[])
+
+    assert bot.ensure_playlist(service, category, _playlist_settings()) == "PL_new"
+    body = service.created[0]
+    assert body["snippet"]["title"] == category.playlist_title
+    assert body["snippet"]["description"] == category.playlist_description
+    assert body["status"]["privacyStatus"] == "public"
+
+
+def test_ensure_playlist_pages_past_the_first_fifty_playlists():
+    category = bot.LONG_FORM_CATEGORY_BY_SLUG["figures"]
+    service = FakePlaylistService(pages={
+        None: {"items": [{"id": "PL_a", "snippet": {"title": "Unrelated"}}], "nextPageToken": "p2"},
+        "p2": {"items": [{"id": "PL_figures", "snippet": {"title": category.playlist_title}}]},
+    })
+
+    assert bot.ensure_playlist(service, category, _playlist_settings()) == "PL_figures"
+    assert service.created == []
+
+
+def test_add_video_to_playlist_files_the_video_under_its_topic():
+    category = bot.LONG_FORM_CATEGORY_BY_SLUG["cultures"]
+    service = FakePlaylistService(existing=[("PL_cultures", category.playlist_title)])
+
+    bot.add_video_to_playlist(service, "vid123", category, _playlist_settings())
+
+    assert service.added == [{
+        "playlistId": "PL_cultures",
+        "resourceId": {"kind": "youtube#video", "videoId": "vid123"},
+    }]
+
+
+@pytest.mark.parametrize("fail_on", ["list", "insert", "add"])
+def test_playlist_failures_never_raise_because_the_video_is_already_live(fail_on):
+    category = bot.LONG_FORM_CATEGORY_BY_SLUG["events"]
+    service = FakePlaylistService(existing=[], fail_on=fail_on)
+
+    # Must not raise: upload_to_youtube calls this after the video is published,
+    # so a playlist error has to stay a logged warning, like a failed thumbnail.
+    bot.add_video_to_playlist(service, "vid123", category, _playlist_settings())
+
+    assert service.added == []
+
+
+def test_shorts_carry_no_topic_category_so_they_never_join_a_playlist():
+    short = bot.ShortPlan.from_dict({
+        "topic": "Coca-Cola vs Pepsi", "angle": "Two rival colas",
+        "title": "Coke vs Pepsi", "description": "#Shorts", "tags": ["shorts"],
+        "narration": "A short script. It ends here.", "fact_note": "Qualitative",
+        "source_hints": ["General knowledge"],
+        "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
+    })
+
+    assert short.topic_category == ""
+    # This lookup is the gate in upload_to_youtube; a Short must never match.
+    assert bot.LONG_FORM_CATEGORY_BY_SLUG.get(short.topic_category) is None
+
+
+def test_saved_token_reports_the_scopes_it_was_actually_granted(tmp_path):
+    # Regression guard. Credentials.from_authorized_user_file echoes back whatever
+    # scope list it is handed, so passing YOUTUBE_SCOPES here would make an
+    # upload-only token look playlist-capable and turn the graceful skip into an
+    # opaque 403 at playlistItems.insert.
+    from google.oauth2.credentials import Credentials
+
+    token = tmp_path / "youtube_token.json"
+    token.write_text(json.dumps({
+        "token": "x", "refresh_token": "y", "client_id": "a", "client_secret": "b",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "scopes": ["https://www.googleapis.com/auth/youtube.upload"],
+    }))
+
+    granted = set(Credentials.from_authorized_user_file(str(token)).scopes or ())
+    assert bot.YOUTUBE_PLAYLIST_SCOPE not in granted
+
+    widened = set(Credentials.from_authorized_user_file(str(token), bot.YOUTUBE_SCOPES).scopes or ())
+    assert bot.YOUTUBE_PLAYLIST_SCOPE in widened, "the trap this test exists to prevent"

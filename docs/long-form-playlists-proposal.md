@@ -1,7 +1,12 @@
-# Đề xuất: Tự động gom video Long-form vào playlist theo chủ đề
+# Tự động gom video Long-form vào playlist theo chủ đề
 
-> Tài liệu thiết kế — **chưa implement**. Toàn bộ code dưới đây là đề xuất để tự thực hiện.
-> Base: commit `e9f875f`.
+> **Đã implement.** Tài liệu này giữ lại phần thiết kế và lý do; xem `docs/youtube-token-setup.md`
+> cho hướng dẫn tạo token và nạp lên Railway.
+>
+> Một điểm đã đổi so với bản thiết kế ban đầu: `Credentials.from_authorized_user_file`
+> được gọi **không kèm danh sách scope**. Truyền scope vào sẽ khiến `credentials.scopes`
+> lặp lại đúng danh sách vừa truyền chứ không phải scope token thật sự mang, làm hỏng
+> phép kiểm tra `playlist_ready`. Xem mục 3.6.
 
 ## Phạm vi
 
@@ -189,17 +194,31 @@ YOUTUBE_SCOPES = [
 
 Thay cả `:4049` lẫn `:4076` bằng `YOUTUBE_SCOPES`.
 
-**Token cũ sẽ không đủ quyền.** `Credentials.from_authorized_user_file()` không kiểm tra scope lúc load — nó chỉ ghi nhận scope *yêu cầu*, còn scope *thực được cấp* nằm trong token. Hậu quả: upload vẫn chạy bình thường, đến `playlists.insert` mới nổ `403 insufficientPermissions`. Chặn trước cho dễ debug — thêm vào `upload_to_youtube` sau khi có `credentials`:
+**Token cũ sẽ không đủ quyền**, và chỗ này có một cái bẫy đã được kiểm chứng bằng thực nghiệm:
 
 ```python
-    playlist_ready = "https://www.googleapis.com/auth/youtube" in set(credentials.scopes or [])
-    if settings.youtube_playlist_enabled and not playlist_ready:
-        LOG.warning(
-            "YouTube token thieu scope 'youtube' -> bo qua buoc playlist. "
-            "Chay lai: python youtube_shorts_bot.py --authorize-youtube "
-            "roi cap nhat YOUTUBE_TOKEN_JSON_B64 tren Railway."
-        )
+# Token trong file chỉ được cấp youtube.upload
+Credentials.from_authorized_user_file(p, YOUTUBE_SCOPES).scopes
+# -> ['...youtube.upload', '...youtube']   ← lặp lại scope VỪA TRUYỀN VÀO
+Credentials.from_authorized_user_file(p).scopes
+# -> ['...youtube.upload']                 ← scope THẬT trong token
 ```
+
+Nghĩa là nếu truyền `YOUTUBE_SCOPES` vào lúc load thì `credentials.scopes` luôn "đủ", phép kiểm tra thành vô dụng, và lỗi sẽ nổ muộn ở `playlists.insert` dưới dạng `403 insufficientPermissions` — đúng cái ta muốn tránh. Vì vậy load **không kèm scope**:
+
+```python
+        credentials = Credentials.from_authorized_user_file(str(settings.youtube_token))
+```
+
+rồi kiểm tra scope thật sau khi có `credentials`:
+
+```python
+    playlist_ready = YOUTUBE_PLAYLIST_SCOPE in set(credentials.scopes or ())
+    if settings.youtube_playlist_enabled and not playlist_ready:
+        LOG.warning(...)   # bỏ qua playlist, video vẫn upload bình thường
+```
+
+Có test `test_saved_token_reports_the_scopes_it_was_actually_granted` khoá lại hành vi này để tránh ai đó vô tình thêm tham số scope trở lại.
 
 ### 3.7 Hai hàm mới
 

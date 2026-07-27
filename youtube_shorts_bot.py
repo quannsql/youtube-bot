@@ -215,6 +215,10 @@ class Settings:
     youtube_client_secrets: Path = DATA_DIR / "client_secrets.json"
     youtube_token: Path = DATA_DIR / "youtube_token.json"
     youtube_privacy: str = "private"
+    # Long-form only: file each upload into the playlist of its explainer topic.
+    # Off by default because it needs a token carrying the wider "youtube" scope.
+    youtube_playlist_enabled: bool = False
+    youtube_playlist_privacy: str = "public"
     social_openai_tts_voice: str = "nova"
     social_openai_tts_speed: float = 1.0
     publish_facebook: bool = False
@@ -317,6 +321,8 @@ class Settings:
             youtube_client_secrets=DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
             youtube_token=DATA_DIR / os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
             youtube_privacy=os.getenv("YOUTUBE_PRIVACY_STATUS", "private"),
+            youtube_playlist_enabled=env_bool("YOUTUBE_PLAYLIST_ENABLED", False),
+            youtube_playlist_privacy=os.getenv("YOUTUBE_PLAYLIST_PRIVACY", "public").strip() or "public",
             social_openai_tts_voice=os.getenv("SOCIAL_OPENAI_TTS_VOICE", "nova").strip() or "nova",
             social_openai_tts_speed=min(4.0, max(0.25, float(os.getenv("SOCIAL_OPENAI_TTS_SPEED", "1.0")))),
             publish_facebook=env_bool("PUBLISH_FACEBOOK", False),
@@ -377,6 +383,10 @@ class ShortPlan:
     subject_b: str = ""
     subject_a_image_query: str = ""
     subject_b_image_query: str = ""
+    # Long-form only: slug of the explainer category assigned before the script was
+    # written, used to file the upload into that topic's playlist. Shorts leave it
+    # empty, which is what keeps them out of playlists.
+    topic_category: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ShortPlan":
@@ -427,6 +437,9 @@ class ShortPlan:
             subject_b=str(value.get("subject_b") or "").strip()[:60],
             subject_a_image_query=str(value.get("subject_a_image_query") or "").strip()[:120],
             subject_b_image_query=str(value.get("subject_b_image_query") or "").strip()[:120],
+            # Read back so the slug survives the plan.json round-trip a resumed
+            # long-form job depends on.
+            topic_category=str(value.get("topic_category") or "").strip()[:40],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1651,17 +1664,72 @@ VIETNAM_BLOCKLIST = (
     "da nang", "nguyen", "pham", "tran ", "vo ", "to lam",
 )
 
+
+@dataclass(frozen=True)
+class LongFormCategory:
+    """An explainer topic area and the YouTube playlist its videos are filed into.
+
+    ``slug`` is the stable key stored on the plan; ``prompt`` is the wording handed
+    to the model. Keeping them separate means the prompt can be reworded without
+    orphaning the videos already filed under that topic.
+    """
+
+    slug: str
+    prompt: str
+    playlist_title: str
+    playlist_description: str
+
+
 # Human, everyday-life-centered explainer topics. Deliberately excludes hard
 # science, space, and cosmology — those came out too abstract and long-winded.
-LONG_FORM_EXPLAINER_CATEGORIES = (
-    "Human history and civilizations, ancient to modern: how a people, empire, kingdom, dynasty, or era lived, rose, or fell.",
-    "Prehistory and early humans: how prehistoric people and early humans survived — hunting, gathering, fire, tools, shelter, clothing, and migration.",
-    "Peoples, cultures, and religions: the origin, journey, beliefs, traditions, and defining moments of a people or faith, explained factually and respectfully.",
-    "Wars, battles, revolutions, and turning points, past or present: what happened, why it happened, and what changed.",
-    "Notable figures, past or present: who they were, what they did, and why they still matter.",
-    "Major events, past or present: a clear explanation of what happened and why it mattered.",
-    "Origins of the everyday world: how familiar things — money, food, cities, farming, trade, writing, holidays, everyday customs, jobs, and famous inventions — actually began and became part of daily life.",
+LONG_FORM_CATEGORIES: tuple[LongFormCategory, ...] = (
+    LongFormCategory(
+        slug="civilizations",
+        prompt="Human history and civilizations, ancient to modern: how a people, empire, kingdom, dynasty, or era lived, rose, or fell.",
+        playlist_title="Civilizations Explained: Empires, Dynasties & Eras",
+        playlist_description="How great civilizations rose, ruled, and fell — empires, dynasties, and the eras that shaped the world we live in.",
+    ),
+    LongFormCategory(
+        slug="prehistory",
+        prompt="Prehistory and early humans: how prehistoric people and early humans survived — hunting, gathering, fire, tools, shelter, clothing, and migration.",
+        playlist_title="Before History: How Early Humans Survived",
+        playlist_description="Life before writing: how prehistoric people found food, made fire and tools, built shelter, and spread across the planet.",
+    ),
+    LongFormCategory(
+        slug="cultures",
+        prompt="Peoples, cultures, and religions: the origin, journey, beliefs, traditions, and defining moments of a people or faith, explained factually and respectfully.",
+        playlist_title="Peoples, Cultures & Religions Explained",
+        playlist_description="The origins, journeys, beliefs, and traditions of the world's peoples and faiths — explained factually and respectfully.",
+    ),
+    LongFormCategory(
+        slug="wars",
+        prompt="Wars, battles, revolutions, and turning points, past or present: what happened, why it happened, and what changed.",
+        playlist_title="Wars & Revolutions: The Turning Points Explained",
+        playlist_description="The battles, revolutions, and turning points that redrew the map — what happened, why it happened, and what changed.",
+    ),
+    LongFormCategory(
+        slug="figures",
+        prompt="Notable figures, past or present: who they were, what they did, and why they still matter.",
+        playlist_title="People Who Shaped the World",
+        playlist_description="Notable figures past and present: who they were, what they actually did, and why they still matter today.",
+    ),
+    LongFormCategory(
+        slug="events",
+        prompt="Major events, past or present: a clear explanation of what happened and why it mattered.",
+        playlist_title="Moments That Changed Everything",
+        playlist_description="Major events, past and present — a clear explanation of what happened and why it mattered.",
+    ),
+    LongFormCategory(
+        slug="origins",
+        prompt="Origins of the everyday world: how familiar things — money, food, cities, farming, trade, writing, holidays, everyday customs, jobs, and famous inventions — actually began and became part of daily life.",
+        playlist_title="Origins: How Everyday Things Began",
+        playlist_description="Where the familiar world came from — money, food, cities, farming, trade, writing, holidays, jobs, and famous inventions.",
+    ),
 )
+
+LONG_FORM_CATEGORY_BY_SLUG = {category.slug: category for category in LONG_FORM_CATEGORIES}
+
+LONG_FORM_EXPLAINER_CATEGORIES = tuple(category.prompt for category in LONG_FORM_CATEGORIES)
 
 # Long-form is an educational explainer channel with stick-figure visuals, so it
 # gets its own default theme unless the user overrides --theme.
@@ -1672,11 +1740,11 @@ LONG_FORM_DEFAULT_THEME = (
 )
 
 
-def choose_long_form_explainer_category(excluded: set[str] | None = None) -> str:
-    """Pick an explainer topic area, avoiding the ones already tried this run."""
+def choose_long_form_explainer_category(excluded: set[str] | None = None) -> LongFormCategory:
+    """Pick an explainer topic area, avoiding the slugs already tried this run."""
     excluded = set(excluded or ())
-    candidates = [category for category in LONG_FORM_EXPLAINER_CATEGORIES if category not in excluded]
-    return random.choice(candidates or list(LONG_FORM_EXPLAINER_CATEGORIES))
+    candidates = [category for category in LONG_FORM_CATEGORIES if category.slug not in excluded]
+    return random.choice(candidates or list(LONG_FORM_CATEGORIES))
 
 
 def recent_long_form_subject_texts(past: list[dict[str, str]], limit: int = 12) -> list[str]:
@@ -2436,14 +2504,14 @@ def plan_long_form(
     duration: int,
     min_scenes: int,
     max_scenes: int,
-    topic_category: str | None = None,
+    topic_category: LongFormCategory | None = None,
     rejected: list[dict[str, str]] | None = None,
     covered_subjects: list[str] | None = None,
 ) -> ShortPlan:
     past = archive.recent_long_form_context()
     rejected = rejected or []
     covered_subjects = covered_subjects if covered_subjects is not None else recent_long_form_subject_texts(past)
-    topic_category = topic_category or random.choice(list(LONG_FORM_EXPLAINER_CATEGORIES))
+    category = topic_category or random.choice(list(LONG_FORM_CATEGORIES))
     target_min_words, target_max_words = target_long_form_word_bounds(duration)
     min_words, max_words = long_form_word_bounds(duration)
     scene_count = random.randint(min_scenes, max_scenes)
@@ -2452,7 +2520,7 @@ def plan_long_form(
 Create ONE English long-form explainer video plan for a horizontal 16:9 video that clearly explains a single subject, event, people, place, or process so a general viewer walks away understanding it.
 Target duration: exactly {duration} seconds, about {duration // 60} to {round(duration / 60, 1)} minutes.
 Theme: {theme}
-Assigned topic area for this run: {topic_category}
+Assigned topic area for this run: {category.prompt}
 Existing archive: {json.dumps(past, ensure_ascii=False)}
 Recently covered subjects (temporary cooldown list): {json.dumps(covered_subjects, ensure_ascii=False)}
 Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}
@@ -2520,6 +2588,10 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     if not isinstance(reviewed.get("plan"), dict):
         raise BotError("OpenAI long-form quality pass thieu truong plan.")
     plan = ShortPlan.from_dict(reviewed["plan"])
+    # Set here rather than asking for it in the schema: the plan makes a round trip
+    # through the review model, which returns only the schema's fields, so anything
+    # carried on the draft would be dropped.
+    plan.topic_category = category.slug
     ensure_title_names_main_subject(plan)
     ensure_long_form_hook_and_closing(plan)
     normalize_scene_count(plan, scene_count)
@@ -2550,7 +2622,7 @@ def choose_novel_long_form_plan(
     attempted_categories: set[str] = set()
     for _attempt in range(1, max_attempts + 1):
         topic_category = choose_long_form_explainer_category(attempted_categories)
-        attempted_categories.add(topic_category)
+        attempted_categories.add(topic_category.slug)
         plan = plan_long_form(
             llm,
             archive,
@@ -4041,16 +4113,26 @@ def render_social_video(
     return social_video
 
 
+# Uploading needs youtube.upload; creating a playlist and adding a video to it
+# needs the wider youtube scope. Kept in one place so the authorization flow and
+# the upload path can never drift apart — a mismatch only surfaces later as an
+# opaque 403 from the playlist calls.
+YOUTUBE_PLAYLIST_SCOPE = "https://www.googleapis.com/auth/youtube"
+YOUTUBE_SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    YOUTUBE_PLAYLIST_SCOPE,
+]
+
+
 def authorize_youtube(settings: Settings) -> None:
     if not settings.youtube_client_secrets.exists():
         raise BotError(f"Thieu OAuth client secrets: {settings.youtube_client_secrets}")
     from google_auth_oauthlib.flow import InstalledAppFlow
 
-    scope = ["https://www.googleapis.com/auth/youtube.upload"]
     LOG.info("Opening the browser for YouTube authorization...")
     credentials = InstalledAppFlow.from_client_secrets_file(
         str(settings.youtube_client_secrets),
-        scope,
+        YOUTUBE_SCOPES,
     ).run_local_server(port=0)
     settings.youtube_token.write_text(credentials.to_json(), encoding="utf-8")
     LOG.info("Saved YouTube authorization token to %s", settings.youtube_token)
@@ -4073,11 +4155,13 @@ def upload_to_youtube(
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
 
-    scope = ["https://www.googleapis.com/auth/youtube.upload"]
     credentials: Credentials | None = None
     if settings.youtube_token.exists():
         LOG.info("Loading the saved YouTube authorization token…")
-        credentials = Credentials.from_authorized_user_file(str(settings.youtube_token), scope)
+        # Deliberately loaded without a scope list: passing one makes .scopes echo
+        # what was asked for rather than what the token actually carries, which
+        # would hide a stale upload-only token until the playlist calls 403.
+        credentials = Credentials.from_authorized_user_file(str(settings.youtube_token))
     if not credentials or not credentials.valid:
         if credentials and credentials.expired and credentials.refresh_token:
             LOG.info("Refreshing the YouTube authorization token…")
@@ -4092,8 +4176,18 @@ def upload_to_youtube(
                 ) from exc
         else:
             LOG.info("Opening the browser for YouTube authorization…")
-            credentials = InstalledAppFlow.from_client_secrets_file(str(settings.youtube_client_secrets), scope).run_local_server(port=0)
+            credentials = InstalledAppFlow.from_client_secrets_file(str(settings.youtube_client_secrets), YOUTUBE_SCOPES).run_local_server(port=0)
         settings.youtube_token.write_text(credentials.to_json(), encoding="utf-8")
+    # A token minted before playlists existed still uploads fine, so degrade to
+    # upload-only instead of failing a video that is otherwise ready to publish.
+    playlist_ready = YOUTUBE_PLAYLIST_SCOPE in set(credentials.scopes or ())
+    if settings.youtube_playlist_enabled and not playlist_ready:
+        LOG.warning(
+            "YouTube token thieu scope '%s' nen bo qua buoc playlist. "
+            "Tao lai token o local bang: python youtube_shorts_bot.py --authorize-youtube "
+            "roi cap nhat YOUTUBE_TOKEN_JSON_B64 tren Railway.",
+            YOUTUBE_PLAYLIST_SCOPE,
+        )
     service = build("youtube", "v3", credentials=credentials)
     body = {"snippet": {"title": plan.title, "description": plan.description, "tags": plan.tags, "categoryId": "27"}, "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False}}
     LOG.info("Uploading %s to YouTube as %s…", video.name, privacy)
@@ -4130,7 +4224,83 @@ def upload_to_youtube(
             # The video is already live at this point. Preserve its published
             # state, but leave an actionable error in Railway's logs.
             LOG.error("Video %s uploaded, but its custom thumbnail could not be set: %s", video_id, exc)
+    # Long-form plans carry the explainer topic they were written for; Shorts leave
+    # it blank, so they never match a category and never join a playlist.
+    category = LONG_FORM_CATEGORY_BY_SLUG.get(plan.topic_category)
+    if settings.youtube_playlist_enabled and playlist_ready and category:
+        add_video_to_playlist(service, video_id, category, settings)
     return video_id
+
+
+def ensure_playlist(service: Any, category: LongFormCategory, settings: Settings) -> str | None:
+    """Return the playlist id for a topic, creating the playlist on first use.
+
+    Returns None when the playlist cannot be resolved, so callers can skip filing
+    the video rather than fail an upload that already succeeded.
+    """
+    from googleapiclient.errors import HttpError
+
+    try:
+        page_token: str | None = None
+        while True:
+            response = service.playlists().list(
+                part="snippet", mine=True, maxResults=50, pageToken=page_token,
+            ).execute()
+            for item in response.get("items", []):
+                if str(item["snippet"]["title"]).strip() == category.playlist_title:
+                    return str(item["id"])
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+        LOG.info("Creating the YouTube playlist %r…", category.playlist_title)
+        created = service.playlists().insert(
+            part="snippet,status",
+            body={
+                "snippet": {
+                    "title": category.playlist_title,
+                    "description": category.playlist_description,
+                    "defaultLanguage": "en",
+                },
+                "status": {"privacyStatus": settings.youtube_playlist_privacy},
+            },
+        ).execute()
+    except HttpError as exc:
+        LOG.error("Could not resolve the YouTube playlist for %s: %s", category.slug, exc)
+        return None
+    playlist_id = str(created["id"])
+    LOG.info("Created YouTube playlist %r (%s).", category.playlist_title, playlist_id)
+    return playlist_id
+
+
+def add_video_to_playlist(
+    service: Any, video_id: str, category: LongFormCategory, settings: Settings
+) -> None:
+    """File an uploaded video into its topic playlist.
+
+    Never raises: the video is already live by this point, so a playlist problem
+    is logged and left for the next run, the same way a failed thumbnail is.
+    """
+    from googleapiclient.errors import HttpError
+
+    playlist_id = ensure_playlist(service, category, settings)
+    if not playlist_id:
+        return
+    try:
+        service.playlistItems().insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "playlistId": playlist_id,
+                    "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                }
+            },
+        ).execute()
+        LOG.info("Added video %s to the playlist %r.", video_id, category.playlist_title)
+    except HttpError as exc:
+        LOG.error(
+            "Video %s uploaded, but it could not be added to the playlist %r: %s",
+            video_id, category.playlist_title, exc,
+        )
 
 
 def response_json(response: requests.Response) -> dict[str, Any]:

@@ -537,7 +537,7 @@ INDEX_HTML = """<!doctype html><html lang=vi><head><meta charset=utf-8>
           </div>
 """ + _PRIVACY_BLOCK.replace("{{id}}", "l") + """
           <button class="cta" id="longBtn" type="submit">Tạo Long-form</button>
-          <p class="hint">Hình hoạt hình người que · cảnh 1 dùng làm thumbnail.</p>
+          <p class="hint">Hình hoạt hình người que · thumbnail dùng ảnh thật của chủ thể.</p>
         </form>
       </div>
     </section>

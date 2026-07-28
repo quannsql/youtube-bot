@@ -845,40 +845,170 @@ def test_ass_filter_path_escapes_windows_drive():
     assert escaped.endswith("/captions_en.ass")
 
 
-def test_create_long_form_thumbnail_reuses_scene_visual_without_openai_image_cost(tmp_path, monkeypatch):
-    scene = bot.long_form_image_path(tmp_path, 1)
-    scene.write_bytes(b"x" * 2048)
-    font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
-    font_file.parent.mkdir()
-    font_file.write_bytes(b"font")
-    logo = tmp_path / "overlay-logo.png"
-    logo.write_bytes(b"png")
-    plan = bot.ShortPlan.from_dict({
+def _thumbnail_plan(thumbnail_text="Strait of Hormuz"):
+    return bot.ShortPlan.from_dict({
         "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
-        "thumbnail_text": "Strait of Hormuz", "description": "#News", "tags": ["News"],
+        "thumbnail_text": thumbnail_text, "description": "#News", "tags": ["News"],
         "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
         "fact_note": "Note", "source_hints": ["News"],
         "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
     })
-    commands = []
+
+
+def _fake_ffmpeg_base(commands):
+    """Stand in for the ffmpeg base pass: hand the renderer a real 1280x720 frame."""
+    from PIL import Image
 
     def fake_run(command):
         commands.append(command)
-        Path(command[-1]).write_bytes(b"j" * 4096)
+        with Image.open(command[command.index("-i") + 1]) as source:
+            source.convert("RGB").resize((1280, 720)).save(command[-1], quality=95)
 
-    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    return fake_run
+
+
+def _dark_plate_rows(image):
+    """Rows in the left half covered by the headline plate, top-most row first."""
+    pixels = image.convert("RGB").load()
+    rows = []
+    for y in range(image.height):
+        dark = sum(1 for x in range(0, image.width // 2, 4) if sum(pixels[x, y]) / 3 < 80)
+        if dark > image.width // 8 // 2:
+            rows.append(y)
+    return rows
+
+
+def test_create_long_form_thumbnail_prefers_the_real_photo_over_the_generated_scene(tmp_path, monkeypatch):
+    from PIL import Image
+
+    photo = bot.thumbnail_photo_path(tmp_path)
+    Image.new("RGB", (1600, 900), (235, 235, 235)).save(photo, quality=92)
+    scene = bot.long_form_image_path(tmp_path, 1)
+    Image.new("RGB", (1600, 900), (10, 180, 10)).save(scene, quality=92)
+    logo = tmp_path / "overlay-logo.png"
+    Image.new("RGBA", (240, 90), (255, 255, 255, 255)).save(logo)
+    commands = []
+
     monkeypatch.setattr(bot, "require_tools", lambda: None)
-    monkeypatch.setattr(bot, "run", fake_run)
+    monkeypatch.setattr(bot, "run", _fake_ffmpeg_base(commands))
 
-    thumbnail = bot.create_long_form_thumbnail(plan, tmp_path / "long.mp4", tmp_path, bot.Settings(overlay_logo=logo))
+    thumbnail = bot.create_long_form_thumbnail(
+        _thumbnail_plan(), tmp_path / "long.mp4", tmp_path, bot.Settings(overlay_logo=logo)
+    )
 
     assert thumbnail == tmp_path / "thumbnail.jpg"
-    assert thumbnail.is_file()
     assert (tmp_path / "thumbnail_headline.txt").read_text(encoding="utf-8") == "STRAIT OF HORMUZ"
     command = commands[0]
-    assert command[command.index("-i") + 1] == str(scene)
-    assert "drawtext=" in command[command.index("-filter_complex") + 1]
-    assert "scale=130:-1" in command[command.index("-filter_complex") + 1]
+    assert command[command.index("-i") + 1] == str(photo)
+    assert command[command.index("-vf") + 1] == bot.THUMBNAIL_BASE_FILTER
+
+    with Image.open(thumbnail) as rendered:
+        assert rendered.size == (1280, 720)
+        pixels = rendered.convert("RGB").load()
+        red = sum(
+            1
+            for y in range(rendered.height)
+            for x in range(rendered.width)
+            if pixels[x, y][0] > 190 and pixels[x, y][1] < 90 and pixels[x, y][2] < 90
+        )
+        plate_rows = _dark_plate_rows(rendered)
+
+    assert red > 3000, "the headline must be rendered in red"
+    # The old layout painted a 330px black bar from y=390 down. The plate now
+    # hugs the copy and stays in the bottom quarter of the frame.
+    assert plate_rows, "the headline needs a plate behind it"
+    assert len(plate_rows) <= 200
+    assert plate_rows[0] > 460
+
+
+def test_create_long_form_thumbnail_falls_back_to_the_scene_without_a_real_photo(tmp_path, monkeypatch):
+    from PIL import Image
+
+    scene = bot.long_form_image_path(tmp_path, 1)
+    Image.new("RGB", (1600, 900), (235, 235, 235)).save(scene, quality=92)
+    commands = []
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "run", _fake_ffmpeg_base(commands))
+
+    thumbnail = bot.create_long_form_thumbnail(
+        _thumbnail_plan(), tmp_path / "long.mp4", tmp_path, bot.Settings(overlay_logo=tmp_path / "missing.png")
+    )
+
+    assert thumbnail.is_file()
+    assert commands[0][commands[0].index("-i") + 1] == str(scene)
+
+
+def test_thumbnail_photo_queries_are_deduplicated_and_subject_first():
+    plan = _thumbnail_plan()
+
+    assert bot.thumbnail_photo_queries(plan) == ["Strait of Hormuz", "Strait of Hormuz Risk"]
+    assert bot.thumbnail_photo_queries(_thumbnail_plan(""))[0] == "Strait of Hormuz"
+
+
+def _write_photo(path, size=(1400, 900)):
+    from PIL import Image
+
+    Image.new("RGB", size, (120, 140, 160)).save(path, quality=90)
+
+
+def test_prepare_thumbnail_photo_downloads_a_real_photo_and_reuses_it(tmp_path):
+    class FakeImages:
+        s = bot.Settings()
+
+        def __init__(self):
+            self.calls = []
+
+        def web_image(self, query, destination, width, height):
+            self.calls.append((query, width, height))
+            # Nothing landscape exists for this subject, so only the second,
+            # orientation-agnostic pass succeeds.
+            if (width, height) == (1200, 1000):
+                _write_photo(destination, (900, 1300))
+                return True
+            return False
+
+    client = FakeImages()
+    photo = bot.prepare_thumbnail_photo(_thumbnail_plan(), client, tmp_path)
+
+    assert photo == bot.thumbnail_photo_path(tmp_path)
+    assert client.calls == [("Strait of Hormuz", 1920, 1080), ("Strait of Hormuz", 1200, 1000)]
+
+    assert bot.prepare_thumbnail_photo(_thumbnail_plan(), client, tmp_path) == photo
+    assert len(client.calls) == 2, "an existing photo must not be downloaded twice"
+
+
+def test_prepare_thumbnail_photo_returns_none_when_no_real_photo_exists(tmp_path):
+    class FakeImages:
+        s = bot.Settings()
+
+        def web_image(self, _query, _destination, _width, _height):
+            return False
+
+    assert bot.prepare_thumbnail_photo(_thumbnail_plan(), FakeImages(), tmp_path) is None
+    assert not bot.thumbnail_photo_path(tmp_path).is_file()
+
+
+def test_prepare_thumbnail_photo_skips_results_too_small_for_a_1280x720_frame(tmp_path):
+    class FakeImages:
+        s = bot.Settings()
+
+        def __init__(self):
+            self.calls = 0
+
+        def web_image(self, _query, destination, _width, _height):
+            self.calls += 1
+            _write_photo(destination, (320, 240) if self.calls == 1 else (1600, 1000))
+            return True
+
+    client = FakeImages()
+    photo = bot.prepare_thumbnail_photo(_thumbnail_plan(), client, tmp_path)
+
+    assert client.calls == 2, "a low-resolution result must not be accepted"
+    from PIL import Image
+
+    with Image.open(photo) as accepted:
+        assert accepted.size == (1600, 1000)
 
 
 def test_publish_long_form_uploads_the_prepared_custom_thumbnail(tmp_path, monkeypatch):
@@ -1582,6 +1712,40 @@ def test_prepare_long_form_images_creates_every_image_in_one_run(tmp_path):
     assert client.calls[0][2:4] == (1920, 1080)
     assert (tmp_path / "long_scene_01.jpg").is_file()
     assert (tmp_path / "long_scene_03.jpg").is_file()
+
+
+def test_prepare_long_form_images_downloads_the_thumbnail_photo_before_the_scenes(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Strait of Hormuz", "angle": "Angle", "title": "Title",
+        "thumbnail_text": "Strait of Hormuz", "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Body. Close.", "closing_line": "Close.",
+        "scenes": [{"duration": 10, "visual_prompt": "Scene one"}],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+
+    class FakeImages:
+        s = bot.Settings(brave_web_images_per_long_form=0)
+
+        def __init__(self):
+            self.order = []
+
+        def web_image(self, query, destination, _width, _height):
+            self.order.append(f"thumbnail:{query}")
+            from PIL import Image
+
+            Image.new("RGB", (1400, 900), (120, 140, 160)).save(destination, quality=90)
+            return True
+
+        def image(self, search_query, generation_prompt, destination, width, height, prefer_web, web_only=False):
+            self.order.append(f"scene:{destination.name}")
+            destination.write_bytes(b"i" * 2048)
+            return "openai"
+
+    client = FakeImages()
+    bot.prepare_long_form_images(plan, client, tmp_path)
+
+    assert client.order == ["thumbnail:Strait of Hormuz", "scene:long_scene_01.jpg"]
+    assert bot.thumbnail_photo_path(tmp_path).is_file()
 
 
 def test_prepare_long_form_images_fails_when_placeholder_fallback_disabled(tmp_path):

@@ -1651,8 +1651,9 @@ LONG_FORM_VISUAL_STYLE_RULES = (
     "mammoth beside a cave', 'a cartoon stick figure gathering berries into a woven basket', 'a cartoon stick-figure king handing a scroll to "
     "a kneeling stick figure'). Vary the composition and the number of figures between scenes and keep each image easy to read at a glance. "
     "In visual_prompt avoid readable text, logos, and the names of real people; show roles and actions instead (a king, a soldier, an early human, a scientist). "
-    "SCENE 1 IS THE THUMBNAIL: make scene 1 a bold, clear cartoon stick-figure illustration of the video's MAIN subject/action, and leave its "
-    "search_query empty so the thumbnail is an on-topic cartoon image, never a photo. "
+    "SCENE 1 IS THE OPENING SHOT: make scene 1 a bold, clear cartoon stick-figure illustration of the video's MAIN subject/action, and leave its "
+    "search_query empty so the video opens on an on-topic cartoon image. The YouTube thumbnail is built separately from a real photo of the "
+    "subject named in thumbnail_text, so keep thumbnail_text a concrete, searchable subject name (a person, place, event, or object), never a vague slogan. "
     "For the other scenes, give a search_query ONLY when a real photo of a genuinely famous real PLACE, landmark, building, map, or artifact would "
     "help the explanation (e.g. 'Great Pyramid of Giza', 'Western Wall Jerusalem', 'Colosseum Rome'); leave search_query empty for "
     "ordinary actions, people, animals, and concepts, which must stay cartoon stick-figure illustrations. Most beats should be cartoon stick-figure illustrations. "
@@ -3080,6 +3081,26 @@ def ffmpeg_filter_path(path: Path) -> str:
 
 
 YOUTUBE_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
+THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT = 1280, 720
+# Headline styling: bright red display copy on a plate that is only as tall as
+# the copy itself, so the photo keeps the frame instead of a wide black bar.
+THUMBNAIL_TEXT_COLOR = (255, 34, 34)
+THUMBNAIL_TEXT_STROKE_COLOR = (255, 255, 255)
+THUMBNAIL_PLATE_COLOR = (9, 9, 12, 214)
+THUMBNAIL_ACCENT_COLOR = (255, 34, 34, 255)
+THUMBNAIL_MARGIN = 52
+THUMBNAIL_PLATE_PAD_X, THUMBNAIL_PLATE_PAD_Y = 28, 14
+THUMBNAIL_PLATE_GAP = 10
+THUMBNAIL_ACCENT_WIDTH = 12
+THUMBNAIL_ACCENT_GAP = 16
+THUMBNAIL_LOGO_WIDTH = 150
+# Scale to fill, then crop slightly above centre: real photos of people and
+# landmarks keep their subject in the upper half of the frame.
+THUMBNAIL_BASE_FILTER = (
+    f"scale={THUMBNAIL_WIDTH}:{THUMBNAIL_HEIGHT}:force_original_aspect_ratio=increase,"
+    f"crop={THUMBNAIL_WIDTH}:{THUMBNAIL_HEIGHT}:(iw-{THUMBNAIL_WIDTH})/2:(ih-{THUMBNAIL_HEIGHT})*0.35,"
+    "eq=contrast=1.10:saturation=1.16:brightness=0.01,unsharp=5:5:0.6"
+)
 
 
 def thumbnail_headline(plan: ShortPlan) -> str:
@@ -3113,50 +3134,236 @@ def thumbnail_headline_lines(text: str, max_line_chars: int = 22) -> str:
     return f"{lines[0]}\n{lines[1]}…"
 
 
+def thumbnail_photo_queries(plan: ShortPlan) -> list[str]:
+    """Return the search phrases for the thumbnail photo, best first."""
+    queries: list[str] = []
+    for candidate in (plan.thumbnail_text, plan.topic, plan.title):
+        clean = re.sub(r"\s+", " ", str(candidate or "")).strip(" .!?:;-")
+        clean = " ".join(clean.split()[:8])
+        if clean and clean.lower() not in {existing.lower() for existing in queries}:
+            queries.append(clean)
+    return queries
+
+
+def thumbnail_photo_path(output_dir: Path) -> Path:
+    return output_dir / "thumbnail_photo.jpg"
+
+
+def thumbnail_photo_is_sharp_enough(path: Path) -> bool:
+    """Reject web images too small to fill 1280x720 without visible upscaling."""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as photo:
+            width, height = photo.size
+    except Exception as exc:
+        LOG.debug("Could not read the downloaded thumbnail photo %s: %s", path.name, exc)
+        return False
+    return width >= 720 and height >= 405
+
+
+def prepare_thumbnail_photo(plan: ShortPlan, client: VisualAssetProvider, output_dir: Path) -> Path | None:
+    """Download a real photo of the subject for the thumbnail (Brave, then Wikimedia).
+
+    Thumbnails sell the click, so they show the real subject rather than one of the
+    generated cartoon scenes. The search runs before the scene images so the photo
+    gets the first, most reliable Brave slot of the run.
+    """
+    destination = thumbnail_photo_path(output_dir)
+    if destination.is_file() and destination.stat().st_size >= 1024:
+        LOG.info("Reusing the real thumbnail photo already downloaded: %s", destination.name)
+        return destination
+
+    queries = thumbnail_photo_queries(plan)
+    for query in queries:
+        # Pass 1 asks for a landscape frame. Pass 2 asks for a near-square one,
+        # which the providers treat as orientation-agnostic, so a portrait photo
+        # of a person still qualifies when nothing landscape exists.
+        for width, height in ((1920, 1080), (1200, 1000)):
+            if not client.web_image(query, destination, width, height):
+                continue
+            if thumbnail_photo_is_sharp_enough(destination):
+                LOG.info("Thumbnail photo: real image downloaded for %r.", query)
+                return destination
+            LOG.info("Thumbnail photo for %r was too small for 1280x720; searching again.", query)
+            destination.unlink(missing_ok=True)
+    LOG.warning(
+        "No real web photo found for the thumbnail (tried: %s); falling back to a rendered scene.",
+        ", ".join(queries) or "no query",
+    )
+    return None
+
+
+def thumbnail_font(size: int):
+    """Load the boldest available display font for thumbnail copy.
+
+    Anton ships with the repo because it is a heavy condensed face that stays
+    readable at phone size; the DejaVu candidates only matter if that file is
+    missing from a deployment.
+    """
+    from PIL import ImageFont
+
+    for candidate in (
+        DATA_DIR / "fonts" / "Anton-Regular.ttf",
+        ROOT / "fonts" / "Anton-Regular.ttf",
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        DATA_DIR / "fonts" / "DejaVuSans.ttf",
+        ROOT / "fonts" / "DejaVuSans.ttf",
+    ):
+        try:
+            return ImageFont.truetype(str(candidate), size)
+        except Exception:
+            continue
+    raise BotError("Không tìm thấy font hợp lệ để tạo thumbnail (thiếu fonts/Anton-Regular.ttf).")
+
+
+def fitted_thumbnail_font(lines: list[str], max_width: float, max_size: int = 104, min_size: int = 46):
+    """Pick the largest font size whose longest line still fits the plate."""
+    from PIL import Image, ImageDraw
+
+    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    for size in range(max_size, min_size - 1, -2):
+        candidate = thumbnail_font(size)
+        if max(measure.textlength(line, font=candidate) for line in lines) <= max_width:
+            return candidate
+    return thumbnail_font(min_size)
+
+
+def render_thumbnail_frame(base: Path, headline: str, destination: Path, logo: Path | None) -> None:
+    """Draw the headline plate (and logo) over the prepared 1280x720 frame."""
+    from PIL import Image, ImageDraw
+
+    lines = [line.strip() for line in headline.splitlines() if line.strip()] or ["DOCUMENTARY"]
+    with Image.open(base) as opened:
+        canvas = opened.convert("RGBA")
+    if canvas.size != (THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT):
+        canvas = canvas.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.LANCZOS)
+
+    # A soft bottom gradient instead of the old flat bar: it keeps the copy
+    # readable over a bright photo without covering half of the frame.
+    scrim = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    scrim_draw = ImageDraw.Draw(scrim)
+    scrim_height = 280
+    for offset in range(scrim_height):
+        alpha = round(126 * (offset / scrim_height) ** 1.8)
+        y = THUMBNAIL_HEIGHT - scrim_height + offset
+        scrim_draw.line([(0, y), (THUMBNAIL_WIDTH, y)], fill=(0, 0, 0, alpha))
+    canvas.alpha_composite(scrim)
+
+    draw = ImageDraw.Draw(canvas)
+    accent_left = THUMBNAIL_MARGIN
+    text_left = accent_left + THUMBNAIL_ACCENT_WIDTH + THUMBNAIL_ACCENT_GAP + THUMBNAIL_PLATE_PAD_X
+    available = THUMBNAIL_WIDTH - THUMBNAIL_MARGIN - THUMBNAIL_PLATE_PAD_X - text_left
+    font = fitted_thumbnail_font(lines, available)
+    stroke = max(3, round(font.size * 0.07))
+    # Measure the inked box (outline included) rather than the font metrics: the
+    # copy is uppercase, so the plate only has to cover cap height, not the
+    # descender space that made the old bar so tall.
+    boxes = [draw.textbbox((0, 0), line, font=font, stroke_width=stroke) for line in lines]
+    line_height = max(box[3] - box[1] for box in boxes)
+    plate_height = line_height + 2 * THUMBNAIL_PLATE_PAD_Y
+    stack_height = len(lines) * plate_height + (len(lines) - 1) * THUMBNAIL_PLATE_GAP
+
+    # Every line gets its own plate, sized to that line, so the dark area hugs
+    # the copy instead of stretching to the width of the longest line.
+    stack_top = THUMBNAIL_HEIGHT - THUMBNAIL_MARGIN - stack_height
+
+    plate = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    plate_draw = ImageDraw.Draw(plate)
+    plate_draw.rounded_rectangle(
+        (
+            accent_left,
+            stack_top,
+            accent_left + THUMBNAIL_ACCENT_WIDTH,
+            THUMBNAIL_HEIGHT - THUMBNAIL_MARGIN,
+        ),
+        radius=THUMBNAIL_ACCENT_WIDTH // 2,
+        fill=THUMBNAIL_ACCENT_COLOR,
+    )
+    for index, box in enumerate(boxes):
+        top = stack_top + index * (plate_height + THUMBNAIL_PLATE_GAP)
+        right = min(
+            THUMBNAIL_WIDTH - THUMBNAIL_MARGIN,
+            text_left + (box[2] - box[0]) + THUMBNAIL_PLATE_PAD_X,
+        )
+        plate_draw.rounded_rectangle(
+            (text_left - THUMBNAIL_PLATE_PAD_X, top, right, top + plate_height),
+            radius=14,
+            fill=THUMBNAIL_PLATE_COLOR,
+        )
+    canvas.alpha_composite(plate)
+
+    for index, (line, box) in enumerate(zip(lines, boxes)):
+        # ``box`` holds the offset of the inked pixels, so subtracting it lands
+        # every line on the same left edge and vertical rhythm.
+        top = stack_top + index * (plate_height + THUMBNAIL_PLATE_GAP) + THUMBNAIL_PLATE_PAD_Y
+        origin = (text_left - box[0], top - box[1])
+        draw.text(
+            (origin[0] + 4, origin[1] + 5), line, font=font, fill=(0, 0, 0), stroke_width=stroke, stroke_fill=(0, 0, 0)
+        )
+        draw.text(
+            origin,
+            line,
+            font=font,
+            fill=THUMBNAIL_TEXT_COLOR,
+            stroke_width=stroke,
+            stroke_fill=THUMBNAIL_TEXT_STROKE_COLOR,
+        )
+
+    if logo and logo.is_file():
+        try:
+            with Image.open(logo) as opened_logo:
+                mark = opened_logo.convert("RGBA")
+            height = max(1, round(mark.height * THUMBNAIL_LOGO_WIDTH / mark.width))
+            mark = mark.resize((THUMBNAIL_LOGO_WIDTH, height), Image.LANCZOS)
+            canvas.alpha_composite(mark, (THUMBNAIL_WIDTH - THUMBNAIL_LOGO_WIDTH - 40, 36))
+        except Exception as exc:
+            LOG.warning("Could not place the logo on the thumbnail (%s); keeping the plain frame.", exc)
+
+    flattened = canvas.convert("RGB")
+    for quality in (92, 86, 78, 68):
+        flattened.save(destination, "JPEG", quality=quality, optimize=True)
+        if destination.stat().st_size <= YOUTUBE_THUMBNAIL_MAX_BYTES:
+            return
+    raise BotError("Thumbnail long-form vượt giới hạn 2 MB của YouTube API.")
+
+
 def create_long_form_thumbnail(plan: ShortPlan, video: Path, output_dir: Path, settings: Settings) -> Path:
-    """Build a 16:9 custom thumbnail from an existing hook visual, without a new image API call."""
+    """Build a 16:9 custom thumbnail from a real photo, without a new image API call.
+
+    The photo comes from ``prepare_thumbnail_photo`` during rendering; a generated
+    scene, then a video frame, only stand in when no real photo could be found.
+    """
     destination = output_dir / "thumbnail.jpg"
     if destination.is_file() and 1024 <= destination.stat().st_size <= YOUTUBE_THUMBNAIL_MAX_BYTES:
         LOG.info("Reusing prepared long-form YouTube thumbnail: %s", destination.name)
         return destination
 
-    source_scene = long_form_image_path(output_dir, 1)
-    source = source_scene if source_scene.is_file() and source_scene.stat().st_size >= 1024 else video
+    source = video
+    for candidate in (thumbnail_photo_path(output_dir), long_form_image_path(output_dir, 1)):
+        if candidate.is_file() and candidate.stat().st_size >= 1024:
+            source = candidate
+            break
     if not source.is_file():
         raise BotError(f"Không tìm thấy visual để tạo thumbnail long-form: {source}")
-    font_file = DATA_DIR / "fonts" / "DejaVuSans.ttf"
-    if not font_file.is_file():
-        raise BotError(f"Không tìm thấy font để tạo thumbnail: {font_file}")
 
-    headline_file = output_dir / "thumbnail_headline.txt"
-    headline_file.write_text(thumbnail_headline_lines(thumbnail_headline(plan)), encoding="utf-8")
-    visual_filter = (
-        "scale=1280:720:force_original_aspect_ratio=increase,"
-        "crop=1280:720,eq=contrast=1.08:saturation=1.12,"
-        "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.14:t=fill,"
-        "drawbox=x=0:y=390:w=iw:h=330:color=black@0.70:t=fill,"
-        f"drawtext=fontfile='{ffmpeg_filter_path(font_file)}':"
-        f"textfile='{ffmpeg_filter_path(headline_file)}':"
-        "fontcolor=white:fontsize=74:line_spacing=12:borderw=5:bordercolor=black@0.9:"
-        "shadowcolor=black@0.9:shadowx=4:shadowy=4:x=64:y=h-text_h-66:fix_bounds=1"
-    )
-    command = ["ffmpeg", "-y", "-i", str(source)]
-    logo = settings.overlay_logo
-    if logo.is_file():
-        command.extend([
-            "-loop", "1", "-i", str(logo),
-            "-filter_complex",
-            f"[0:v]{visual_filter}[base];"
-            "[1:v]scale=130:-1:flags=lanczos,format=rgba[logo];"
-            "[base][logo]overlay=x=W-w-42:y=42:format=auto[v]",
-            "-map", "[v]",
-        ])
-    else:
-        command.extend(["-vf", visual_filter])
-    command.extend(["-frames:v", "1", "-q:v", "4", str(destination)])
+    headline = thumbnail_headline_lines(thumbnail_headline(plan))
+    # Kept next to the thumbnail as the record of the copy that was rendered.
+    (output_dir / "thumbnail_headline.txt").write_text(headline, encoding="utf-8")
+
+    base = output_dir / "thumbnail_base.jpg"
     require_tools()
     LOG.info("Creating 16:9 long-form YouTube thumbnail from %s (no new image credit)…", source.name)
-    run(command)
+    run(["ffmpeg", "-y", "-i", str(source), "-vf", THUMBNAIL_BASE_FILTER, "-frames:v", "1", "-q:v", "2", str(base)])
+    if not base.is_file() or base.stat().st_size < 1024:
+        raise BotError("Thumbnail long-form không tạo được ảnh JPEG hợp lệ.")
+
+    try:
+        render_thumbnail_frame(base, headline, destination, settings.overlay_logo)
+    except Exception as exc:
+        # A thumbnail without the headline still beats failing the upload.
+        LOG.warning("Thumbnail overlay failed (%s); publishing the plain graded frame instead.", exc)
+        shutil.copyfile(base, destination)
     if not destination.is_file() or destination.stat().st_size < 1024:
         raise BotError("Thumbnail long-form không tạo được ảnh JPEG hợp lệ.")
     if destination.stat().st_size > YOUTUBE_THUMBNAIL_MAX_BYTES:
@@ -3795,6 +4002,13 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
     """
     prepared = 0
     web_indexes = distributed_web_image_indexes(len(plan.scenes), client.s.brave_web_images_per_long_form)
+
+    # The thumbnail photo is fetched first so it gets the run's first Brave slot;
+    # the video itself still works if no real photo is available.
+    try:
+        prepare_thumbnail_photo(plan, client, output_dir)
+    except Exception as exc:
+        LOG.warning("Could not prepare the real thumbnail photo (%s); the thumbnail falls back to a scene.", exc)
 
     def image_ready(path: Path) -> bool:
         return path.is_file() and path.stat().st_size >= 1024

@@ -120,20 +120,24 @@ def materialize_railway_credentials() -> None:
 
 def ensure_dejavu_font() -> None:
     font_dir = DATA_DIR / "fonts"
-    font_file = font_dir / "DejaVuSans.ttf"
     config_file = DATA_DIR / "fonts.conf"
-
-    if not font_file.is_file():
-        LOG.info("DejaVuSans.ttf not found in %s. Downloading...", font_dir)
-        font_dir.mkdir(parents=True, exist_ok=True)
-        url = "https://github.com/prawnpdf/prawn/raw/master/data/fonts/DejaVuSans.ttf"
+    font_urls = {
+        "DejaVuSans.ttf": "https://github.com/prawnpdf/prawn/raw/master/data/fonts/DejaVuSans.ttf",
+        "DejaVuSans-Bold.ttf": "https://github.com/prawnpdf/prawn/raw/master/data/fonts/DejaVuSans-Bold.ttf",
+    }
+    font_dir.mkdir(parents=True, exist_ok=True)
+    for filename, url in font_urls.items():
+        font_file = font_dir / filename
+        if font_file.is_file():
+            continue
+        LOG.info("%s not found in %s. Downloading...", filename, font_dir)
         try:
             response = requests.get(url, timeout=60)
             response.raise_for_status()
             font_file.write_bytes(response.content)
-            LOG.info("Successfully downloaded DejaVuSans.ttf.")
+            LOG.info("Successfully downloaded %s.", filename)
         except Exception as exc:
-            raise BotError(f"Could not download DejaVuSans.ttf: {exc}") from exc
+            raise BotError(f"Could not download {filename}: {exc}") from exc
 
     if not config_file.is_file():
         LOG.info("Creating custom fonts.conf in %s...", config_file)
@@ -1172,6 +1176,11 @@ WEB_IMAGE_SOURCE_HOSTS = (
     "gov.uk",
 )
 
+WIKIMEDIA_USER_AGENT = (
+    "youtube-documentary-bot/1.1 "
+    "(https://github.com/quannsql/youtube-bot; contact via GitHub issues) python-requests"
+)
+
 
 class BraveImageSearch:
     """Find optional trusted-source web visuals and retain source pages for attribution."""
@@ -1347,11 +1356,103 @@ class WikimediaCommonsImageSearch:
     """Fetch freely licensed real-subject images directly from Wikimedia Commons."""
 
     SUPPORTED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+    REQUEST_INTERVAL_SECONDS = 0.4
+    MAX_REQUEST_ATTEMPTS = 3
 
     def __init__(self, settings: Settings) -> None:
         self.s = settings
         self.used_source_pages: set[str] = set()
         self.sources: list[dict[str, str]] = []
+        self._next_request_at = 0.0
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response, attempt: int) -> float:
+        headers = getattr(response, "headers", {})
+        raw_value = headers.get("Retry-After", "") if hasattr(headers, "get") else ""
+        try:
+            retry_after = float(str(raw_value).strip())
+        except (TypeError, ValueError):
+            retry_after = float(5 * attempt)
+        return min(30.0, max(1.0, retry_after))
+
+    def _wait_for_request_slot(self) -> None:
+        wait_seconds = self._next_request_at - time.monotonic()
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    @staticmethod
+    def _ordered_pages(pages: Any, query: str) -> list[dict[str, Any]]:
+        if not isinstance(pages, list):
+            return []
+        query_words = normalized_words(query)
+        normalized_query = " ".join(sorted(query_words))
+
+        def sort_key(page: dict[str, Any]) -> tuple[int, int]:
+            title_words = normalized_words(str(page.get("title") or "").removeprefix("File:"))
+            title_text = " ".join(sorted(title_words))
+            overlap = len(query_words & title_words)
+            intent_bonus = sum(
+                5
+                for intent in ("logo", "portrait")
+                if intent in query_words and intent in title_words
+            )
+            exact_bonus = 8 if normalized_query and normalized_query in title_text else 0
+            index = page.get("index") if isinstance(page.get("index"), int) else 1_000_000
+            return (-(overlap + intent_bonus + exact_bonus), index)
+
+        return sorted(
+            (page for page in pages if isinstance(page, dict)),
+            key=sort_key,
+        )
+
+    def _get(self, url: str, *, timeout: tuple[int, int], params: dict[str, Any] | None = None) -> requests.Response | None:
+        """Issue one Wikimedia request politely and recover from transient throttling."""
+        for attempt in range(1, self.MAX_REQUEST_ATTEMPTS + 1):
+            self._wait_for_request_slot()
+            try:
+                response = requests.get(
+                    url,
+                    headers={
+                        "User-Agent": WIKIMEDIA_USER_AGENT,
+                        "Accept-Encoding": "gzip",
+                    },
+                    params=params,
+                    timeout=timeout,
+                )
+            except requests.RequestException as exc:
+                LOG.warning(
+                    "Wikimedia request failed (attempt %d/%d): %s",
+                    attempt,
+                    self.MAX_REQUEST_ATTEMPTS,
+                    exc,
+                )
+                if attempt == self.MAX_REQUEST_ATTEMPTS:
+                    return None
+                time.sleep(float(2 ** (attempt - 1)))
+                continue
+
+            self._next_request_at = time.monotonic() + self.REQUEST_INTERVAL_SECONDS
+            status_code = getattr(response, "status_code", 200)
+            if status_code not in {429, 503}:
+                try:
+                    response.raise_for_status()
+                except requests.RequestException as exc:
+                    LOG.debug("Wikimedia request rejected for %s: %s", url, exc)
+                    return None
+                return response
+
+            retry_after = self._retry_after_seconds(response, attempt)
+            LOG.warning(
+                "Wikimedia rate-limited a request (HTTP %d); retrying in %.1fs "
+                "(attempt %d/%d).",
+                status_code,
+                retry_after,
+                attempt,
+                self.MAX_REQUEST_ATTEMPTS,
+            )
+            if attempt < self.MAX_REQUEST_ATTEMPTS:
+                time.sleep(retry_after)
+        return None
 
     @staticmethod
     def _safe_https_host(value: str, allowed_host: str) -> bool:
@@ -1391,39 +1492,84 @@ class WikimediaCommonsImageSearch:
             if partial.exists():
                 partial.unlink()
 
-    def image(self, query: str, destination: Path, width: int, height: int) -> bool:
-        if not query.strip():
+    def _download_candidate(
+        self,
+        *,
+        page: dict[str, Any],
+        source_page: str,
+        image_url: str,
+        mime: str,
+        candidate_width: Any,
+        candidate_height: Any,
+        destination: Path,
+        width: int,
+        height: int,
+    ) -> bool:
+        if mime and mime not in self.SUPPORTED_MIME_TYPES:
             return False
+        if source_page in self.used_source_pages:
+            return False
+        if not (
+            self._safe_https_host(source_page, "commons.wikimedia.org")
+            or self._safe_https_host(source_page, "wikipedia.org")
+        ):
+            return False
+        if not self._safe_https_host(image_url, "wikimedia.org"):
+            return False
+        if not BraveImageSearch._matches_orientation(
+            {"width": candidate_width, "height": candidate_height},
+            width,
+            height,
+        ):
+            return False
+        image_response = self._get(
+            image_url,
+            timeout=(self.s.image_connect_timeout, 45),
+        )
+        if image_response is None:
+            return False
+        content_type = image_response.headers.get("Content-Type", "").lower().split(";", 1)[0]
+        if content_type and content_type not in self.SUPPORTED_MIME_TYPES:
+            return False
+        if not self._save_as_jpeg(image_response.content, destination):
+            return False
+        self.used_source_pages.add(source_page)
+        self.sources.append({
+            "title": str(page.get("title") or "Wikimedia image")[:200],
+            "source_page": source_page,
+            "image_url": image_url,
+        })
+        LOG.info("Downloaded Wikimedia image for %s.", destination.name)
+        return True
+
+    def _commons_image(self, query: str, destination: Path, width: int, height: int) -> bool:
         try:
-            response = requests.get(
+            response = self._get(
                 self.s.wikimedia_commons_api_endpoint,
-                headers={"User-Agent": "youtube-documentary-bot/1.0 (Wikimedia Commons image fallback)"},
                 params={
                     "action": "query",
                     "generator": "search",
                     "gsrsearch": query[:200],
                     "gsrnamespace": 6,
-                    "gsrlimit": 12,
+                    "gsrlimit": 8,
                     "prop": "info|imageinfo",
                     "inprop": "url",
                     "iiprop": "url|mime|size|thumbmime",
-                    "iiurlwidth": 1200,
+                    "iiurlwidth": 800,
+                    "maxlag": 5,
                     "format": "json",
                     "formatversion": 2,
                 },
                 timeout=(self.s.image_connect_timeout, 30),
             )
-            response.raise_for_status()
+            if response is None:
+                return False
             pages = response_json(response).get("query", {}).get("pages", [])
         except Exception as exc:
             LOG.warning("Wikimedia Commons image search failed: %s", exc)
             return False
 
-        ordered_pages = sorted(
-            (page for page in pages if isinstance(page, dict)),
-            key=lambda page: page.get("index") if isinstance(page.get("index"), int) else 1_000_000,
-        ) if isinstance(pages, list) else []
-        for page in ordered_pages:
+        for page in self._ordered_pages(pages, query):
             if not isinstance(page, dict):
                 continue
             source_page = str(page.get("canonicalurl") or "")
@@ -1435,52 +1581,102 @@ class WikimediaCommonsImageSearch:
             original_url = str(info.get("url") or "")
             thumb_mime = str(info.get("thumbmime") or "").lower()
             original_mime = str(info.get("mime") or "").lower()
-            if thumb_url and (not thumb_mime or thumb_mime in self.SUPPORTED_MIME_TYPES):
-                image_url = thumb_url
-                mime = thumb_mime
-                candidate_width = info.get("thumbwidth")
-                candidate_height = info.get("thumbheight")
-            else:
-                image_url = original_url
-                mime = original_mime
-                candidate_width = info.get("width")
-                candidate_height = info.get("height")
-            if mime and mime not in self.SUPPORTED_MIME_TYPES:
+            download_options = []
+            if thumb_url:
+                download_options.append((
+                    thumb_url,
+                    thumb_mime,
+                    info.get("thumbwidth"),
+                    info.get("thumbheight"),
+                ))
+            if original_url and original_url != thumb_url:
+                download_options.append((
+                    original_url,
+                    original_mime,
+                    info.get("width"),
+                    info.get("height"),
+                ))
+            for image_url, mime, candidate_width, candidate_height in download_options:
+                if self._download_candidate(
+                    page=page,
+                    source_page=source_page,
+                    image_url=image_url,
+                    mime=mime,
+                    candidate_width=candidate_width,
+                    candidate_height=candidate_height,
+                    destination=destination,
+                    width=width,
+                    height=height,
+                ):
+                    return True
+        return False
+
+    def _wikipedia_page_image(self, query: str, destination: Path, width: int, height: int) -> bool:
+        """Use the canonical article image when Commons filename search is noisy."""
+        endpoint = "https://en.wikipedia.org/w/api.php"
+        try:
+            response = self._get(
+                endpoint,
+                params={
+                    "action": "query",
+                    "generator": "search",
+                    "gsrsearch": query[:200],
+                    "gsrnamespace": 0,
+                    "gsrlimit": 5,
+                    "prop": "info|pageimages",
+                    "inprop": "url",
+                    "piprop": "thumbnail|original|name",
+                    "pithumbsize": 800,
+                    "maxlag": 5,
+                    "format": "json",
+                    "formatversion": 2,
+                },
+                timeout=(self.s.image_connect_timeout, 30),
+            )
+            if response is None:
+                return False
+            pages = response_json(response).get("query", {}).get("pages", [])
+        except Exception as exc:
+            LOG.warning("Wikipedia page-image search failed: %s", exc)
+            return False
+
+        for page in self._ordered_pages(pages, query):
+            source_page = str(page.get("canonicalurl") or "")
+            thumbnail = page.get("thumbnail") if isinstance(page.get("thumbnail"), dict) else {}
+            original = page.get("original") if isinstance(page.get("original"), dict) else {}
+            image_url = str(thumbnail.get("source") or original.get("source") or "")
+            if not image_url:
                 continue
-            if source_page in self.used_source_pages:
-                continue
-            if not self._safe_https_host(source_page, "commons.wikimedia.org"):
-                continue
-            if not self._safe_https_host(image_url, "wikimedia.org"):
-                continue
-            if not BraveImageSearch._matches_orientation(
-                {"width": candidate_width, "height": candidate_height}, width, height
+            mime = f"image/{image_url.rsplit('.', 1)[-1].lower()}"
+            if mime == "image/jpg":
+                mime = "image/jpeg"
+            # SVG article images are returned as rasterized thumbnail URLs; infer
+            # PNG from that URL instead of the original filename embedded in it.
+            if image_url.lower().endswith(".png"):
+                mime = "image/png"
+            if self._download_candidate(
+                page=page,
+                source_page=source_page,
+                image_url=image_url,
+                mime=mime if mime in self.SUPPORTED_MIME_TYPES else "",
+                candidate_width=thumbnail.get("width") or original.get("width"),
+                candidate_height=thumbnail.get("height") or original.get("height"),
+                destination=destination,
+                width=width,
+                height=height,
             ):
-                continue
-            try:
-                image_response = requests.get(
-                    image_url,
-                    headers={"User-Agent": "youtube-documentary-bot/1.0 (Wikimedia Commons image fallback)"},
-                    timeout=(self.s.image_connect_timeout, 45),
-                )
-                image_response.raise_for_status()
-                content_type = image_response.headers.get("Content-Type", "").lower().split(";", 1)[0]
-                if content_type and content_type not in self.SUPPORTED_MIME_TYPES:
-                    continue
-                if not self._save_as_jpeg(image_response.content, destination):
-                    continue
-            except Exception as exc:
-                LOG.debug("Could not download Wikimedia Commons result %s: %s", image_url, exc)
-                continue
-            self.used_source_pages.add(source_page)
-            self.sources.append({
-                "title": str(page.get("title") or "Wikimedia Commons image")[:200],
-                "source_page": source_page,
-                "image_url": image_url,
-            })
-            LOG.info("Downloaded Wikimedia Commons image for %s.", destination.name)
+                return True
+        return False
+
+    def image(self, query: str, destination: Path, width: int, height: int) -> bool:
+        query = query.strip()
+        if not query:
+            return False
+        if self._commons_image(query, destination, width, height):
             return True
-        LOG.info("No suitable Wikimedia Commons image result for %s.", destination.name)
+        if self._wikipedia_page_image(query, destination, width, height):
+            return True
+        LOG.info("No suitable Wikimedia image result for %s.", destination.name)
         return False
 
 
@@ -3158,18 +3354,83 @@ def thumbnail_headline_lines(text: str, max_line_chars: int = 22) -> str:
     return f"{lines[0]}\n{lines[1]}…"
 
 
-def create_long_form_thumbnail(plan: ShortPlan, video: Path, output_dir: Path, settings: Settings) -> Path:
-    """Build a 16:9 custom thumbnail from an existing hook visual, without a new image API call."""
+def create_long_form_thumbnail(
+    plan: ShortPlan,
+    video: Path,
+    output_dir: Path,
+    settings: Settings,
+    image_provider: VisualAssetProvider | None = None,
+) -> Path:
+    """Build a Long thumbnail from a random scene, with AI and video-frame fallbacks."""
     destination = output_dir / "thumbnail.jpg"
     if destination.is_file() and 1024 <= destination.stat().st_size <= YOUTUBE_THUMBNAIL_MAX_BYTES:
         LOG.info("Reusing prepared long-form YouTube thumbnail: %s", destination.name)
         return destination
 
-    source_scene = long_form_image_path(output_dir, 1)
-    source = source_scene if source_scene.is_file() and source_scene.stat().st_size >= 1024 else video
-    if not source.is_file():
+    wiki_source = output_dir / "thumbnail_wikimedia_source.jpg"
+    source: Path | None = (
+        wiki_source
+        if wiki_source.is_file() and wiki_source.stat().st_size >= 1024
+        else None
+    )
+    if source is not None:
+        LOG.info("Using preserved Wikimedia image as the long-form thumbnail background.")
+
+    scene_candidates = [
+        long_form_image_path(output_dir, index)
+        for index in range(1, len(plan.scenes) + 1)
+        if (
+            long_form_image_path(output_dir, index).is_file()
+            and long_form_image_path(output_dir, index).stat().st_size >= 1024
+        )
+    ]
+    if source is None and scene_candidates:
+        source = random.choice(scene_candidates)
+        LOG.info(
+            "No Wikimedia thumbnail source was available; selected random long-form scene %s "
+            "as the background (no new image credit).",
+            source.name,
+        )
+
+    if source is None:
+        ai_source = output_dir / "thumbnail_ai_source.jpg"
+        if not ai_source.is_file() or ai_source.stat().st_size < 1024:
+            provider = image_provider or VisualAssetProvider(settings)
+            prompt = (
+                f"A bold, high-contrast horizontal YouTube documentary thumbnail background about "
+                f"{plan.thumbnail_text or plan.topic or plan.title}. "
+                "One immediately recognizable central subject, expressive stick-figure explainer style, "
+                "clean cinematic composition, strong depth and lighting, no words, no letters, no logos, "
+                "no watermark, 16:9."
+            )
+            LOG.warning(
+                "No usable long-form scene image was found; generating one AI thumbnail background."
+            )
+            try:
+                provider.image(
+                    search_query="",
+                    generation_prompt=prompt,
+                    destination=ai_source,
+                    width=1920,
+                    height=1080,
+                    prefer_web=False,
+                )
+            except Exception as exc:
+                LOG.warning("AI thumbnail background generation failed: %s", exc)
+        if ai_source.is_file() and ai_source.stat().st_size >= 1024:
+            source = ai_source
+
+    if source is None and video.is_file():
+        source = video
+        LOG.warning(
+            "AI thumbnail background was unavailable; extracting a frame from %s instead.",
+            video.name,
+        )
+    if source is None or not source.is_file():
         raise BotError(f"Không tìm thấy visual để tạo thumbnail long-form: {source}")
-    font_file = DATA_DIR / "fonts" / "DejaVuSans.ttf"
+    bold_font_file = DATA_DIR / "fonts" / "DejaVuSans-Bold.ttf"
+    regular_font_file = DATA_DIR / "fonts" / "DejaVuSans.ttf"
+    font_file = bold_font_file if bold_font_file.is_file() else regular_font_file
     if not font_file.is_file():
         raise BotError(f"Không tìm thấy font để tạo thumbnail: {font_file}")
 
@@ -3178,12 +3439,12 @@ def create_long_form_thumbnail(plan: ShortPlan, video: Path, output_dir: Path, s
     visual_filter = (
         "scale=1280:720:force_original_aspect_ratio=increase,"
         "crop=1280:720,eq=contrast=1.08:saturation=1.12,"
-        "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.14:t=fill,"
-        "drawbox=x=0:y=390:w=iw:h=330:color=black@0.70:t=fill,"
+        "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.10:t=fill,"
+        "drawbox=x=0:y=480:w=iw:h=240:color=black@0.62:t=fill,"
         f"drawtext=fontfile='{ffmpeg_filter_path(font_file)}':"
         f"textfile='{ffmpeg_filter_path(headline_file)}':"
-        "fontcolor=white:fontsize=74:line_spacing=12:borderw=5:bordercolor=black@0.9:"
-        "shadowcolor=black@0.9:shadowx=4:shadowy=4:x=64:y=h-text_h-66:fix_bounds=1"
+        "fontcolor=0xFF2D2D:fontsize=78:line_spacing=8:borderw=5:bordercolor=white@0.95:"
+        "shadowcolor=black@0.95:shadowx=5:shadowy=5:x=60:y=h-text_h-36:fix_bounds=1"
     )
     command = ["ffmpeg", "-y", "-i", str(source)]
     logo = settings.overlay_logo
@@ -3200,7 +3461,7 @@ def create_long_form_thumbnail(plan: ShortPlan, video: Path, output_dir: Path, s
         command.extend(["-vf", visual_filter])
     command.extend(["-frames:v", "1", "-q:v", "4", str(destination)])
     require_tools()
-    LOG.info("Creating 16:9 long-form YouTube thumbnail from %s (no new image credit)…", source.name)
+    LOG.info("Creating 16:9 long-form YouTube thumbnail from %s…", source.name)
     run(command)
     if not destination.is_file() or destination.stat().st_size < 1024:
         raise BotError("Thumbnail long-form không tạo được ảnh JPEG hợp lệ.")
@@ -3208,6 +3469,31 @@ def create_long_form_thumbnail(plan: ShortPlan, video: Path, output_dir: Path, s
         raise BotError("Thumbnail long-form vượt giới hạn 2 MB của YouTube API.")
     LOG.info("Created long-form YouTube thumbnail: %s (%.1f MB)", destination.name, destination.stat().st_size / (1024 * 1024))
     return destination
+
+
+def prepare_long_form_thumbnail_for_upload(
+    plan: ShortPlan,
+    video: Path,
+    output_dir: Path,
+    settings: Settings,
+    image_provider: VisualAssetProvider | None = None,
+) -> Path | None:
+    """Never block a completed Long upload solely because its thumbnail failed."""
+    try:
+        return create_long_form_thumbnail(
+            plan,
+            video,
+            output_dir,
+            settings,
+            image_provider=image_provider,
+        )
+    except Exception as exc:
+        LOG.error(
+            "Could not prepare a custom long-form thumbnail; uploading the completed video "
+            "without one: %s",
+            exc,
+        )
+        return None
 
 
 def ass_video_filter(captions: Path) -> str:
@@ -3479,6 +3765,23 @@ def append_web_source_credits(plan: ShortPlan, sources: list[dict[str, str]]) ->
     plan.description = (plan.description + credit)[:5000]
 
 
+def web_source_is_wikimedia(source: dict[str, str]) -> bool:
+    """Recognize Wikimedia-hosted images, including results discovered through Brave."""
+    for field in ("source_page", "image_url"):
+        try:
+            host = (urlparse(str(source.get(field) or "")).hostname or "").lower()
+        except ValueError:
+            continue
+        if (
+            host == "wikipedia.org"
+            or host.endswith(".wikipedia.org")
+            or host == "wikimedia.org"
+            or host.endswith(".wikimedia.org")
+        ):
+            return True
+    return False
+
+
 # Comparison Short layout constants (vertical 1080x1920).
 COMPARISON_BG = (238, 241, 245)
 COMPARISON_CARD = (255, 255, 255)
@@ -3617,9 +3920,24 @@ def prepare_comparison_subject_images(plan: ShortPlan, client: "VisualAssetProvi
         if not query:
             missing_subjects.append(label or name)
             continue
-        search_queries = [query]
+        normalized_query = re.sub(r"\s+", " ", query).strip().casefold()
+        search_queries: list[str] = []
+        if label and "logo" in normalized_query:
+            search_queries.append(f"{label} logo")
+        if label and "portrait" in normalized_query:
+            search_queries.append(f"{label} portrait")
+        search_queries.append(query)
         if label and label.casefold() != query.casefold():
             search_queries.append(label)
+        unique_search_queries: list[str] = []
+        seen_search_queries: set[str] = set()
+        for candidate in search_queries:
+            candidate = re.sub(r"\s+", " ", candidate).strip()
+            key = candidate.casefold()
+            if candidate and key not in seen_search_queries:
+                seen_search_queries.add(key)
+                unique_search_queries.append(candidate)
+        search_queries = unique_search_queries
         source = "missing"
         for search_query in search_queries:
             source = client.image(
@@ -3850,6 +4168,11 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
             continue
         if not scene.search_query and index not in web_indexes:
             continue
+        source_pages_before = {
+            str(source.get("source_page") or "")
+            for source in getattr(client, "web_sources", [])
+            if isinstance(source, dict)
+        }
         source = client.image(
             search_query=scene.search_query or scene.visual_prompt,
             generation_prompt=image_scene_prompt_horizontal(scene.visual_prompt),
@@ -3861,6 +4184,24 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
         )
         if source == "web":
             prepared += 1
+            new_sources = [
+                source_record
+                for source_record in getattr(client, "web_sources", [])
+                if (
+                    isinstance(source_record, dict)
+                    and str(source_record.get("source_page") or "") not in source_pages_before
+                )
+            ]
+            wiki_thumbnail_source = output_dir / "thumbnail_wikimedia_source.jpg"
+            if (
+                any(web_source_is_wikimedia(source_record) for source_record in new_sources)
+                and not image_ready(wiki_thumbnail_source)
+            ):
+                shutil.copyfile(image_file, wiki_thumbnail_source)
+                LOG.info(
+                    "Preserved long-form scene %d as the preferred Wikimedia thumbnail source.",
+                    index,
+                )
 
     missing = [
         index for index in range(1, len(plan.scenes) + 1)
@@ -4186,6 +4527,14 @@ def authorize_youtube(settings: Settings) -> None:
     LOG.info("Saved YouTube authorization token to %s", settings.youtube_token)
 
 
+def youtube_thumbnail_for_upload(video: Path, thumbnail: Path | None) -> Path | None:
+    """Custom thumbnails are a Long-only feature; Shorts always use YouTube's frame selection."""
+    if thumbnail is not None and video.name.casefold() != "long.mp4":
+        LOG.info("Ignoring custom thumbnail for Short upload %s.", video.name)
+        return None
+    return thumbnail
+
+
 def upload_to_youtube(
     video: Path,
     plan: ShortPlan,
@@ -4193,6 +4542,7 @@ def upload_to_youtube(
     privacy: str,
     thumbnail: Path | None = None,
 ) -> str:
+    thumbnail = youtube_thumbnail_for_upload(video, thumbnail)
     if not settings.youtube_client_secrets.exists():
         raise BotError(f"Thiếu OAuth client secrets: {settings.youtube_client_secrets}")
     from google.auth.transport.requests import Request
@@ -4779,8 +5129,20 @@ def short_form_video_ready(video: Path, expected_duration: float) -> bool:
         return False
 
 
-def publish_long_form_video(video: Path, plan: ShortPlan, settings: Settings, privacy: str) -> dict[str, str]:
-    thumbnail = create_long_form_thumbnail(plan, video, video.parent, settings)
+def publish_long_form_video(
+    video: Path,
+    plan: ShortPlan,
+    settings: Settings,
+    privacy: str,
+    image_provider: VisualAssetProvider | None = None,
+) -> dict[str, str]:
+    thumbnail = prepare_long_form_thumbnail_for_upload(
+        plan,
+        video,
+        video.parent,
+        settings,
+        image_provider=image_provider,
+    )
     youtube_id = upload_to_youtube(video, plan, settings, privacy, thumbnail=thumbnail)
     # Long-form is YouTube-only. Facebook/TikTok Vietnamese publishing applies
     # to the separate Short workflow only.
@@ -4856,7 +5218,13 @@ def run_long_form_flow(
         archive.mark(record_id, "rendered")
         print(f"Rendered long-form video: {video}")
         if publish:
-            results = publish_long_form_video(video, plan, settings, privacy)
+            results = publish_long_form_video(
+                video,
+                plan,
+                settings,
+                privacy,
+                image_provider=images,
+            )
             archive.mark(record_id, "published", results.get("youtube"))
             print(f"Published long-form video: {results}")
             if settings.youtube_token.exists():
@@ -4986,7 +5354,13 @@ def run_manual_long_form_flow(
         archive.mark(record_id, "rendered")
         print(f"Rendered manual long-form video: {video}")
         if publish:
-            results = publish_long_form_video(video, plan, settings, privacy)
+            results = publish_long_form_video(
+                video,
+                plan,
+                settings,
+                privacy,
+                image_provider=images,
+            )
             youtube_id = results.get("youtube")
             archive.mark(record_id, "published", youtube_id)
             print(f"Published manual long-form video: {results}")
@@ -5153,7 +5527,17 @@ def main() -> int:
         if not video.is_file() or not plan_file.is_file():
             raise BotError("--upload-file phải trỏ đến short.mp4 có plan.json cùng thư mục.")
         plan = ShortPlan.from_dict(json.loads(plan_file.read_text(encoding="utf-8")))
-        thumbnail = create_long_form_thumbnail(plan, video, video.parent, settings) if video.name == "long.mp4" else None
+        thumbnail = (
+            prepare_long_form_thumbnail_for_upload(
+                plan,
+                video,
+                video.parent,
+                settings,
+                image_provider=images,
+            )
+            if video.name == "long.mp4"
+            else None
+        )
         youtube_id = upload_to_youtube(
             video,
             plan,

@@ -935,12 +935,16 @@ def test_ass_filter_path_escapes_windows_drive():
     assert escaped.endswith("/captions_en.ass")
 
 
-def test_create_long_form_thumbnail_reuses_scene_visual_without_openai_image_cost(tmp_path, monkeypatch):
-    scene = bot.long_form_image_path(tmp_path, 1)
-    scene.write_bytes(b"x" * 2048)
+def test_create_long_form_thumbnail_uses_a_ready_scene_without_openai_image_cost(tmp_path, monkeypatch):
+    first_scene = bot.long_form_image_path(tmp_path, 1)
+    second_scene = bot.long_form_image_path(tmp_path, 2)
+    first_scene.write_bytes(b"x" * 2048)
+    second_scene.write_bytes(b"y" * 2048)
     font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
     font_file.parent.mkdir()
     font_file.write_bytes(b"font")
+    bold_font_file = tmp_path / "fonts" / "DejaVuSans-Bold.ttf"
+    bold_font_file.write_bytes(b"bold-font")
     logo = tmp_path / "overlay-logo.png"
     logo.write_bytes(b"png")
     plan = bot.ShortPlan.from_dict({
@@ -948,7 +952,10 @@ def test_create_long_form_thumbnail_reuses_scene_visual_without_openai_image_cos
         "thumbnail_text": "Strait of Hormuz", "description": "#News", "tags": ["News"],
         "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
         "fact_note": "Note", "source_hints": ["News"],
-        "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
+        "scenes": [
+            {"duration": 4, "visual_prompt": "A tanker"},
+            {"duration": 4, "visual_prompt": "A port"},
+        ],
     })
     commands = []
 
@@ -959,6 +966,7 @@ def test_create_long_form_thumbnail_reuses_scene_visual_without_openai_image_cos
     monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
     monkeypatch.setattr(bot, "require_tools", lambda: None)
     monkeypatch.setattr(bot, "run", fake_run)
+    monkeypatch.setattr(bot.random, "choice", lambda candidates: candidates[-1])
 
     thumbnail = bot.create_long_form_thumbnail(plan, tmp_path / "long.mp4", tmp_path, bot.Settings(overlay_logo=logo))
 
@@ -966,9 +974,129 @@ def test_create_long_form_thumbnail_reuses_scene_visual_without_openai_image_cos
     assert thumbnail.is_file()
     assert (tmp_path / "thumbnail_headline.txt").read_text(encoding="utf-8") == "STRAIT OF HORMUZ"
     command = commands[0]
-    assert command[command.index("-i") + 1] == str(scene)
-    assert "drawtext=" in command[command.index("-filter_complex") + 1]
-    assert "scale=130:-1" in command[command.index("-filter_complex") + 1]
+    assert command[command.index("-i") + 1] == str(second_scene)
+    thumbnail_filter = command[command.index("-filter_complex") + 1]
+    assert "drawtext=" in thumbnail_filter
+    assert "scale=130:-1" in thumbnail_filter
+    assert "DejaVuSans-Bold.ttf" in thumbnail_filter
+    assert "drawbox=x=0:y=480:w=iw:h=240:color=black@0.62" in thumbnail_filter
+    assert "fontcolor=0xFF2D2D:fontsize=78" in thumbnail_filter
+    assert "bordercolor=white@0.95" in thumbnail_filter
+
+
+def test_create_long_form_thumbnail_prefers_preserved_wikimedia_source(tmp_path, monkeypatch):
+    wiki_source = tmp_path / "thumbnail_wikimedia_source.jpg"
+    wiki_source.write_bytes(b"w" * 2048)
+    bot.long_form_image_path(tmp_path, 1).write_bytes(b"s" * 2048)
+    font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
+    font_file.parent.mkdir()
+    font_file.write_bytes(b"font")
+    bold_font_file = tmp_path / "fonts" / "DejaVuSans-Bold.ttf"
+    bold_font_file.write_bytes(b"bold-font")
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Ancient City", "angle": "Origins", "title": "Ancient City Explained",
+        "thumbnail_text": "Ancient City", "description": "#History", "tags": ["History"],
+        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
+        "fact_note": "Note", "source_hints": ["History"],
+        "scenes": [{"duration": 4, "visual_prompt": "An ancient city"}],
+    })
+    commands = []
+
+    def fake_run(command):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"j" * 4096)
+
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "run", fake_run)
+    monkeypatch.setattr(
+        bot.random,
+        "choice",
+        lambda _candidates: (_ for _ in ()).throw(AssertionError("random fallback must not run")),
+    )
+
+    thumbnail = bot.create_long_form_thumbnail(
+        plan,
+        tmp_path / "long.mp4",
+        tmp_path,
+        bot.Settings(overlay_logo=tmp_path / "missing-logo.png"),
+    )
+
+    assert thumbnail == tmp_path / "thumbnail.jpg"
+    assert commands[0][commands[0].index("-i") + 1] == str(wiki_source)
+
+
+def test_create_long_form_thumbnail_generates_ai_background_when_no_scene_exists(tmp_path, monkeypatch):
+    font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
+    font_file.parent.mkdir()
+    font_file.write_bytes(b"font")
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Ancient Trade", "angle": "Origins", "title": "Ancient Trade Explained",
+        "thumbnail_text": "Ancient Trade", "description": "#History", "tags": ["History"],
+        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
+        "fact_note": "Note", "source_hints": ["History"],
+        "scenes": [{"duration": 4, "visual_prompt": "A market"}],
+    })
+    image_calls = []
+    commands = []
+
+    class FakeImages:
+        def image(self, **kwargs):
+            image_calls.append(kwargs)
+            kwargs["destination"].write_bytes(b"a" * 4096)
+            return "openai"
+
+    def fake_run(command):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"j" * 4096)
+
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "run", fake_run)
+
+    thumbnail = bot.create_long_form_thumbnail(
+        plan,
+        tmp_path / "missing-long.mp4",
+        tmp_path,
+        bot.Settings(overlay_logo=tmp_path / "missing-logo.png"),
+        image_provider=FakeImages(),
+    )
+
+    assert thumbnail == tmp_path / "thumbnail.jpg"
+    assert image_calls[0]["prefer_web"] is False
+    assert image_calls[0]["width"] == 1920
+    assert image_calls[0]["height"] == 1080
+    assert "no words" in image_calls[0]["generation_prompt"]
+    assert commands[0][commands[0].index("-i") + 1] == str(tmp_path / "thumbnail_ai_source.jpg")
+
+
+def test_failed_long_thumbnail_never_blocks_upload(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "History", "angle": "Origins", "title": "History Explained",
+        "description": "#History", "tags": ["History"], "hook": "Hook.",
+        "narration": "Hook.", "closing_line": "Hook.", "fact_note": "Note",
+        "source_hints": ["History"], "scenes": [{"duration": 4, "visual_prompt": "A scene"}],
+    })
+    monkeypatch.setattr(
+        bot,
+        "create_long_form_thumbnail",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(bot.BotError("thumbnail failed")),
+    )
+
+    assert bot.prepare_long_form_thumbnail_for_upload(
+        plan,
+        tmp_path / "long.mp4",
+        tmp_path,
+        bot.Settings(),
+    ) is None
+
+
+def test_custom_thumbnail_is_disabled_for_shorts():
+    thumbnail = Path("thumbnail.jpg")
+
+    assert bot.youtube_thumbnail_for_upload(Path("short.mp4"), thumbnail) is None
+    assert bot.youtube_thumbnail_for_upload(Path("short_vi.mp4"), thumbnail) is None
+    assert bot.youtube_thumbnail_for_upload(Path("long.mp4"), thumbnail) == thumbnail
 
 
 def test_publish_long_form_uploads_the_prepared_custom_thumbnail(tmp_path, monkeypatch):
@@ -982,7 +1110,7 @@ def test_publish_long_form_uploads_the_prepared_custom_thumbnail(tmp_path, monke
         "source_hints": ["News"], "scenes": [{"duration": 4, "visual_prompt": "A tanker"}],
     })
 
-    monkeypatch.setattr(bot, "create_long_form_thumbnail", lambda *_args: thumbnail)
+    monkeypatch.setattr(bot, "prepare_long_form_thumbnail_for_upload", lambda *_args, **_kwargs: thumbnail)
 
     def fake_upload(*args, **kwargs):
         captured["args"] = args
@@ -1427,6 +1555,115 @@ def test_wikimedia_commons_downloads_public_figure_portrait(tmp_path, monkeypatc
     }]
 
 
+def test_wikimedia_retries_429_with_compliant_user_agent(monkeypatch):
+    calls = []
+    waits = []
+    clock = {"now": 100.0}
+
+    class RateLimitedResponse:
+        status_code = 429
+        headers = {"Retry-After": "3"}
+
+    class SuccessResponse:
+        status_code = 200
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+    responses = [RateLimitedResponse(), SuccessResponse()]
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return responses.pop(0)
+
+    def fake_sleep(seconds):
+        waits.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+    monkeypatch.setattr(bot.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(bot.time, "sleep", fake_sleep)
+    client = bot.WikimediaCommonsImageSearch(bot.Settings())
+
+    response = client._get("https://commons.wikimedia.org/w/api.php", timeout=(1, 1))
+
+    assert isinstance(response, SuccessResponse)
+    assert len(calls) == 2
+    assert waits == [3.0]
+    assert "https://github.com/quannsql/youtube-bot" in calls[0][1]["headers"]["User-Agent"]
+
+
+def test_wikimedia_prioritizes_logo_result_for_logo_query():
+    pages = [
+        {"index": 1, "title": "File:Adidas pink shoe.jpg"},
+        {"index": 2, "title": "File:Adidas 2022 logo.svg"},
+        {"index": 3, "title": "File:Unrelated logo.svg"},
+    ]
+
+    ordered = bot.WikimediaCommonsImageSearch._ordered_pages(pages, "Adidas logo")
+
+    assert ordered[0]["title"] == "File:Adidas 2022 logo.svg"
+
+
+def test_wikimedia_uses_wikipedia_page_image_when_commons_search_is_empty(tmp_path, monkeypatch):
+    from PIL import Image
+
+    encoded = BytesIO()
+    Image.effect_noise((800, 800), 60).convert("RGB").save(encoded, format="JPEG", quality=90)
+    image_bytes = encoded.getvalue()
+
+    class SearchResponse:
+        status_code = 200
+        headers = {}
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class ImageResponse:
+        status_code = 200
+        headers = {"Content-Type": "image/jpeg"}
+        content = image_bytes
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, **_kwargs):
+        if url == "https://commons.wikimedia.org/w/api.php":
+            return SearchResponse({"query": {"pages": []}})
+        if url == "https://en.wikipedia.org/w/api.php":
+            return SearchResponse({
+                "query": {
+                    "pages": [{
+                        "index": 1,
+                        "title": "Adidas",
+                        "canonicalurl": "https://en.wikipedia.org/wiki/Adidas",
+                        "thumbnail": {
+                            "source": "https://upload.wikimedia.org/adidas.jpg",
+                            "width": 800,
+                            "height": 800,
+                        },
+                    }]
+                }
+            })
+        return ImageResponse()
+
+    monkeypatch.setattr(bot.requests, "get", fake_get)
+    client = bot.WikimediaCommonsImageSearch(bot.Settings())
+    client.REQUEST_INTERVAL_SECONDS = 0
+    destination = tmp_path / "adidas.jpg"
+
+    assert client.image("Adidas", destination, width=1024, height=1024)
+    assert bot.comparison_subject_image_ready(destination)
+    assert client.sources[0]["source_page"] == "https://en.wikipedia.org/wiki/Adidas"
+
+
 def test_visual_provider_uses_wikimedia_before_openai(tmp_path):
     destination = tmp_path / "subject.jpg"
     calls = []
@@ -1489,6 +1726,41 @@ def test_missing_comparison_subject_stops_render_instead_of_using_color_panel(tm
     assert all(generation_prompt == "" and prefer_web and web_only for _, generation_prompt, prefer_web, web_only in client.calls)
     assert not (tmp_path / "subject_a.jpg").exists()
     assert not (tmp_path / "subject_b.jpg").exists()
+
+
+def test_comparison_brand_image_retries_with_exact_label_logo_query(tmp_path):
+    from PIL import Image
+
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Nike vs Adidas", "angle": "Differences", "title": "Nike vs Adidas",
+        "subject_a": "Nike", "subject_b": "Adidas",
+        "subject_a_image_query": "Nike",
+        "subject_b_image_query": "Adidas three stripes logo",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Two brands.", "narration": "Two brands. Close.", "closing_line": "Close.",
+        "scenes": [{"duration": 5, "focus": "both", "visual_prompt": "matchup"}],
+        "fact_note": "Note", "source_hints": ["Source"],
+    })
+
+    class Images:
+        s = bot.Settings()
+
+        def __init__(self):
+            self.calls = []
+
+        def image(self, search_query, generation_prompt, destination, width, height, prefer_web, web_only=False):
+            self.calls.append(search_query)
+            if search_query not in {"Nike", "Adidas logo"}:
+                return "missing"
+            Image.effect_noise((400, 400), 60).convert("RGB").save(destination, format="JPEG", quality=90)
+            return "web"
+
+    client = Images()
+    bot.prepare_comparison_subject_images(plan, client, tmp_path)
+
+    assert client.calls == ["Nike", "Adidas logo"]
+    assert bot.comparison_subject_image_ready(tmp_path / "subject_a.jpg")
+    assert bot.comparison_subject_image_ready(tmp_path / "subject_b.jpg")
 
 
 def test_distributed_web_images_stay_within_six_visual_budget():
@@ -1933,6 +2205,38 @@ def test_long_form_images_prefer_real_web_photos_for_named_subjects(tmp_path):
     assert client.web_queries == ["Zelenskyy press conference", "Ukraine defence ministry building"]
     assert client.openai_scenes == ["long_scene_02.jpg", "long_scene_03.jpg"]
     assert all((tmp_path / f"long_scene_{index:02d}.jpg").is_file() for index in range(1, 4))
+
+
+def test_long_form_images_preserve_wikimedia_scene_for_thumbnail_priority(tmp_path):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Colosseum", "angle": "Construction", "title": "The Colosseum",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Close.", "closing_line": "Close.",
+        "scenes": [{
+            "duration": 10,
+            "visual_prompt": "The Colosseum in Rome.",
+            "search_query": "Colosseum Rome",
+        }],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+
+    class FakeImages:
+        s = bot.Settings(brave_web_images_per_long_form=0)
+
+        def __init__(self):
+            self.web_sources = []
+
+        def image(self, search_query, generation_prompt, destination, width, height, prefer_web, web_only=False):
+            destination.write_bytes(b"w" * 2048)
+            self.web_sources.append({
+                "source_page": "https://commons.wikimedia.org/wiki/File:Colosseum.jpg",
+                "image_url": "https://upload.wikimedia.org/colosseum.jpg",
+            })
+            return "web"
+
+    bot.prepare_long_form_images(plan, FakeImages(), tmp_path)
+
+    assert (tmp_path / "thumbnail_wikimedia_source.jpg").read_bytes() == b"w" * 2048
 
 
 def test_long_form_uses_five_brave_slots_and_only_ten_openai_slots(tmp_path):
@@ -2640,11 +2944,14 @@ def test_ensure_dejavu_font_creates_files(tmp_path, monkeypatch):
     bot.ensure_dejavu_font()
     
     font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
+    bold_font_file = tmp_path / "fonts" / "DejaVuSans-Bold.ttf"
     config_file = tmp_path / "fonts.conf"
     
     assert font_file.is_file()
+    assert bold_font_file.is_file()
     assert config_file.is_file()
     assert font_file.stat().st_size > 500000
+    assert bold_font_file.stat().st_size > 500000
     assert "FONTCONFIG_FILE" in os.environ
 
 

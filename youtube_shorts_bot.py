@@ -1912,6 +1912,123 @@ def choose_long_form_explainer_category(excluded: set[str] | None = None) -> Lon
     return random.choice(candidates or list(LONG_FORM_CATEGORIES))
 
 
+def infer_long_form_category_from_text(value: str) -> LongFormCategory:
+    """Best-effort local fallback when the manual-idea classifier returns bad JSON."""
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode().lower()
+    keyword_groups: tuple[tuple[str, tuple[str, ...]], ...] = (
+        (
+            "prehistory",
+            (
+                "prehistory", "prehistoric", "early human", "stone age", "neanderthal",
+                "hunter gatherer", "tien su", "nguoi nguyen thuy", "san bat hai luom",
+            ),
+        ),
+        (
+            "wars",
+            (
+                " war ", "battle", "revolution", "siege", "invasion", "military",
+                "armed conflict", "chien tranh", "tran danh", "cach mang", "xung dot",
+                "quan su", "bao vay",
+            ),
+        ),
+        (
+            "cultures",
+            (
+                "culture", "religion", "faith", "ethnic", "tradition", "ritual",
+                "van hoa", "ton giao", "tin nguong", "dan toc", "truyen thong",
+            ),
+        ),
+        (
+            "civilizations",
+            (
+                "civilization", "empire", "kingdom", "dynasty", "ancient era",
+                "de che", "vuong quoc", "trieu dai", "nen van minh",
+            ),
+        ),
+        (
+            "origins",
+            (
+                "origin of", "origins of", "invented", "invention", "how did", "how the",
+                "began", "started", "nguon goc", "ra doi", "phat minh", "bat dau",
+            ),
+        ),
+        (
+            "figures",
+            (
+                "biography", "life of", "who was", "who is", "president", "founder",
+                "inventor", "artist", "actor", "singer", "footballer", "tieu su",
+                "cuoc doi", "nhan vat",
+            ),
+        ),
+    )
+    padded = f" {normalized} "
+    for category_slug, keywords in keyword_groups:
+        if any(keyword in padded for keyword in keywords):
+            return LONG_FORM_CATEGORY_BY_SLUG[category_slug]
+    return LONG_FORM_CATEGORY_BY_SLUG["events"]
+
+
+def classify_manual_long_form_category(
+    llm: OpenAITextClient,
+    user_idea: str,
+) -> LongFormCategory:
+    """Classify a user-pinned Long idea before planning, then hard-stamp its slug."""
+    category_options = "\n".join(
+        f"- {category.slug}: {category.prompt}" for category in LONG_FORM_CATEGORIES
+    )
+    prompt = f'''Classify this user-requested Long-form video idea into exactly ONE YouTube playlist category.
+The category is filing metadata only: do not rewrite, broaden, or replace the user's idea.
+
+User idea:
+"""{user_idea}"""
+
+Allowed categories:
+{category_options}
+
+Tie-breaking rules:
+- Use wars when a war, battle, revolution, invasion, siege, or military turning point is the central subject.
+- Use figures when a person's life, career, or legacy is central; use wars/events instead when only one conflict or event involving that person is central.
+- Use civilizations when a civilization, empire, kingdom, dynasty, or historical era is central.
+- Use cultures when a people, culture, religion, belief, or tradition is central.
+- Use prehistory for prehistoric life and early humans.
+- Use origins for how an everyday object, custom, job, food, system, or invention began.
+- Use events for a major event that does not fit a more specific category above.
+
+Return exactly:
+{{"topic_category":"one allowed slug"}}'''
+    try:
+        result = extract_json(
+            llm.chat(
+                prompt,
+                temperature=0.0,
+                reasoning_effort="low",
+            )
+        )
+        category_slug = str(result.get("topic_category") or "").strip().lower()
+        category = LONG_FORM_CATEGORY_BY_SLUG.get(category_slug)
+        if category:
+            LOG.info(
+                "Manual Long-form idea classified as %s -> playlist %r.",
+                category.slug,
+                category.playlist_title,
+            )
+            return category
+        LOG.warning(
+            "Manual Long-form classifier returned unknown category %r; using local fallback.",
+            category_slug,
+        )
+    except Exception as exc:
+        LOG.warning("Manual Long-form playlist classification failed (%s); using local fallback.", exc)
+
+    category = infer_long_form_category_from_text(user_idea)
+    LOG.info(
+        "Manual Long-form local fallback selected %s -> playlist %r.",
+        category.slug,
+        category.playlist_title,
+    )
+    return category
+
+
 def recent_long_form_subject_texts(past: list[dict[str, str]], limit: int = 12) -> list[str]:
     """Topic+title of recent long-form videos; used as a subject cooldown list."""
     subjects: list[str] = []
@@ -3007,6 +3124,7 @@ def plan_long_form_from_idea(
     user_idea: str,
 ) -> ShortPlan:
     """Build a long-form plan around a user-supplied idea, bypassing lane/novelty/Vietnam gates."""
+    category = classify_manual_long_form_category(llm, user_idea)
     target_min_words, target_max_words = target_long_form_word_bounds(duration)
     min_words, max_words = long_form_word_bounds(duration)
     scene_count = random.randint(min_scenes, max_scenes)
@@ -3019,6 +3137,8 @@ Create ONE English long-form video plan for a horizontal 16:9 video.
 Target duration: exactly {duration} seconds, about {duration // 60} to {round(duration / 60, 1)} minutes.
 The user has explicitly requested THIS exact idea. Build the entire video around it and do NOT substitute a different topic:
 """{user_idea}"""
+Assigned playlist category: {category.slug} ({category.playlist_title}).
+This category is filing metadata only and must not change the user's requested subject.
 Fresh related news headlines from public RSS (use as factual leads when they fit the idea; ignore unrelated ones): {json.dumps(news_context, ensure_ascii=False)}
 
 Rules:
@@ -3044,11 +3164,13 @@ Return raw JSON only using exactly this schema:
             )
         )
     )
+    draft.topic_category = category.slug
     review_prompt = f'''Act as the final long-form documentary and retention editor for a {duration}-second horizontal YouTube video. Return only JSON.
 Keep the video centered on the user's requested idea and improve the hook, chapter flow, concreteness, and closing line. Return exactly:
 {{"plan":{LONG_FORM_PLAN_SCHEMA}}}
 Rules:
 - The subject MUST stay the user's idea: """{user_idea}""". Do not swap in a different topic.
+- The fixed playlist category is {category.slug} ({category.playlist_title}); it is metadata only and must not alter the subject.
 - Keep only claims supportable by the related news below or clearly phrased as general background; do NOT invent numbers, quotes, dates, or source names.
 - Keep {scene_count} scenes totaling {duration} seconds; narration must begin with hook and end with closing_line; aim for {target_min_words}-{target_max_words} spoken English words.
 - Make the title explicitly name the main subject and thumbnail_text 2-5 words naming it. Preserve this visual direction: {manual_visual_rules}
@@ -3068,6 +3190,10 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     except Exception as exc:
         LOG.warning("Manual long-form review pass failed (%s); using the draft.", exc)
         plan = draft
+    # The review schema intentionally contains only editorial fields. Hard-stamp
+    # the category chosen from the user's exact idea so the upload gate cannot
+    # silently treat a manual Long as a Short.
+    plan.topic_category = category.slug
     ensure_title_names_main_subject(plan)
     ensure_long_form_hook_and_closing(plan)
     normalize_scene_count(plan, scene_count)
@@ -3078,7 +3204,13 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
             "Manual long-form narration has %d words (safety range %d-%d for %ds); rendering it anyway.",
             words, min_words, max_words, duration,
         )
-    LOG.info("Manual long-form plan ready: %r (%d scenes, %d words).", plan.title, len(plan.scenes), words)
+    LOG.info(
+        "Manual long-form plan ready: %r (%d scenes, %d words, playlist category=%s).",
+        plan.title,
+        len(plan.scenes),
+        words,
+        plan.topic_category,
+    )
     return plan
 
 
@@ -4626,7 +4758,20 @@ def upload_to_youtube(
     # it blank, so they never match a category and never join a playlist.
     category = LONG_FORM_CATEGORY_BY_SLUG.get(plan.topic_category)
     if settings.youtube_playlist_enabled and playlist_ready and category:
+        LOG.info(
+            "Filing Long-form video %s into playlist category %s (%r).",
+            video_id,
+            category.slug,
+            category.playlist_title,
+        )
         add_video_to_playlist(service, video_id, category, settings)
+    elif settings.youtube_playlist_enabled and playlist_ready and video.name == "long.mp4":
+        LOG.warning(
+            "Long-form video %s was uploaded but playlist filing was skipped because "
+            "topic_category=%r is missing or unknown.",
+            video_id,
+            plan.topic_category,
+        )
     return video_id
 
 

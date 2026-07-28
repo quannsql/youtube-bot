@@ -3155,17 +3155,35 @@ def test_plan_long_form_from_idea_seeds_idea_and_has_no_vietnam_hard_block(monke
 
         def chat(self, prompt, **kwargs):
             prompts.append(prompt)
+            if "Classify this user-requested Long-form video idea" in prompt:
+                return json.dumps({"topic_category": "wars"})
             return json.dumps(plan_json)
 
     # A Vietnam-related idea must NOT be rejected by the manual planner.
     plan = bot.plan_long_form_from_idea(FakeClient(), 300, 4, 4, idea)
     assert len(plan.scenes) == 4
     assert abs(sum(scene.duration for scene in plan.scenes) - 300) < 0.1
-    assert idea in prompts[0]
-    assert "explicitly requested THIS exact idea" in prompts[0]
-    assert "Fresh related news headlines" in prompts[0]  # news grounding is wired in
+    assert plan.topic_category == "wars"
+    assert bot.LONG_FORM_CATEGORY_BY_SLUG[plan.topic_category].playlist_title
+    planning_prompt = next(prompt for prompt in prompts if "explicitly requested THIS exact idea" in prompt)
+    assert idea in planning_prompt
+    assert "Assigned playlist category: wars" in planning_prompt
+    assert "Fresh related news headlines" in planning_prompt  # news grounding is wired in
     # The auto-flow Vietnam hard rule must be absent from the manual prompt.
-    assert "public controversy related to Vietnam" not in prompts[0]
+    assert "public controversy related to Vietnam" not in planning_prompt
+
+
+def test_manual_long_form_category_classifier_uses_a_safe_local_fallback():
+    class InvalidClassifier:
+        def chat(self, prompt, **kwargs):
+            return json.dumps({"topic_category": "not-a-real-category"})
+
+    category = bot.classify_manual_long_form_category(
+        InvalidClassifier(),
+        "How coffee began and became part of everyday life",
+    )
+
+    assert category.slug == "origins"
 
 
 def test_fetch_news_for_idea_parses_and_dedups(monkeypatch):

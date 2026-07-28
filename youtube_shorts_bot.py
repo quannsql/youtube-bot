@@ -156,7 +156,6 @@ class Settings:
     brave_search_api_key: str = ""
     openai_text_endpoint: str = "https://api.openai.com/v1/responses"
     openai_image_endpoint: str = "https://api.openai.com/v1/images/generations"
-    openai_tts_endpoint: str = "https://api.openai.com/v1/audio/speech"
     text_model: str = "gpt-5.4-mini"
     text_reasoning_effort: str = "low"
     text_long_form_reasoning_effort: str = "medium"
@@ -212,6 +211,8 @@ class Settings:
     google_tts_service_account: Path = DATA_DIR / "google_tts_service_account.json"
     google_tts_voice: str = "en-US-Chirp3-HD-Leda"
     google_tts_speaking_rate: float = 1.05
+    google_tts_vietnamese_voice: str = "vi-VN-Chirp3-HD-Aoede"
+    google_tts_vietnamese_speaking_rate: float = 1.0
     youtube_client_secrets: Path = DATA_DIR / "client_secrets.json"
     youtube_token: Path = DATA_DIR / "youtube_token.json"
     youtube_privacy: str = "private"
@@ -219,8 +220,6 @@ class Settings:
     # Off by default because it needs a token carrying the wider "youtube" scope.
     youtube_playlist_enabled: bool = False
     youtube_playlist_privacy: str = "public"
-    social_openai_tts_voice: str = "nova"
-    social_openai_tts_speed: float = 1.0
     publish_facebook: bool = False
     facebook_graph_version: str = "v25.0"
     facebook_page_id: str = ""
@@ -318,13 +317,19 @@ class Settings:
                 or "en-US-Chirp3-HD-Leda"
             ),
             google_tts_speaking_rate=float(os.getenv("GOOGLE_TTS_SPEAKING_RATE", "1.05")),
+            google_tts_vietnamese_voice=(
+                os.getenv("GOOGLE_TTS_VI_VOICE", "vi-VN-Chirp3-HD-Aoede").strip()
+                or "vi-VN-Chirp3-HD-Aoede"
+            ),
+            google_tts_vietnamese_speaking_rate=min(
+                2.0,
+                max(0.25, float(os.getenv("GOOGLE_TTS_VI_SPEAKING_RATE", "1.0"))),
+            ),
             youtube_client_secrets=DATA_DIR / os.getenv("YOUTUBE_CLIENT_SECRETS", "client_secrets.json"),
             youtube_token=DATA_DIR / os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
             youtube_privacy=os.getenv("YOUTUBE_PRIVACY_STATUS", "private"),
             youtube_playlist_enabled=env_bool("YOUTUBE_PLAYLIST_ENABLED", False),
             youtube_playlist_privacy=os.getenv("YOUTUBE_PLAYLIST_PRIVACY", "public").strip() or "public",
-            social_openai_tts_voice=os.getenv("SOCIAL_OPENAI_TTS_VOICE", "nova").strip() or "nova",
-            social_openai_tts_speed=min(4.0, max(0.25, float(os.getenv("SOCIAL_OPENAI_TTS_SPEED", "1.0")))),
             publish_facebook=env_bool("PUBLISH_FACEBOOK", False),
             facebook_graph_version=os.getenv("FACEBOOK_GRAPH_VERSION", "v25.0"),
             facebook_page_id=os.getenv("FACEBOOK_PAGE_ID", "").strip(),
@@ -534,7 +539,17 @@ def narration_word_bounds(duration: int) -> tuple[int, int]:
 
 
 def target_narration_word_bounds(duration: int) -> tuple[int, int]:
-    """Preferred pacing sent to the writer; not a hard requirement."""
+    """Preferred English pacing sent to the writer; not a hard requirement."""
+    if duration < MIN_SHORT_DURATION_SECONDS:
+        return narration_word_bounds(duration)
+    # Recent Google Chirp narration in production lands near 2.4 spoken words
+    # per second. Keep a little room for punctuation and pauses instead of asking
+    # the writer for the old 3.0-3.45 words/sec, which routinely overfilled 60s.
+    return max(24, round(duration * 2.25)), round(duration * 2.55)
+
+
+def target_vietnamese_narration_word_bounds(duration: int) -> tuple[int, int]:
+    """Vietnamese tokens are mostly syllables, so their count runs higher than English words."""
     if duration < MIN_SHORT_DURATION_SECONDS:
         return narration_word_bounds(duration)
     return max(24, round(duration * 3.0)), round(duration * 3.45)
@@ -1505,7 +1520,7 @@ class VisualAssetProvider:
 
 
 class GoogleCloudTTS:
-    """Google Cloud Text-to-Speech narration for English YouTube videos."""
+    """Google Cloud Text-to-Speech narration with a selectable Chirp voice."""
 
     def __init__(self, settings: Settings) -> None:
         self.s = settings
@@ -1533,6 +1548,9 @@ class GoogleCloudTTS:
             raise BotError("Thiếu google-cloud-texttospeech. Chạy: pip install -r requirements.txt") from exc
         try:
             selected_voice = voice or self.s.google_tts_voice
+            selected_speaking_rate = (
+                self.s.google_tts_speaking_rate if speaking_rate is None else speaking_rate
+            )
             client = texttospeech.TextToSpeechClient.from_service_account_file(
                 str(self.s.google_tts_service_account)
             )
@@ -1544,7 +1562,7 @@ class GoogleCloudTTS:
                 ),
                 audio_config=texttospeech.AudioConfig(
                     audio_encoding=texttospeech.AudioEncoding.MP3,
-                    speaking_rate=speaking_rate or self.s.google_tts_speaking_rate,
+                    speaking_rate=selected_speaking_rate,
                 ),
             )
         except Exception as exc:
@@ -1552,68 +1570,19 @@ class GoogleCloudTTS:
         destination.write_bytes(response.audio_content)
 
 
-class OpenAITTS:
-    """OpenAI speech generation with a flow-specific voice direction."""
-
-    def __init__(
-        self,
-        settings: Settings,
-        *,
-        voice: str,
-        speed: float,
-        instructions: str,
-        label: str,
-    ) -> None:
-        self.s = settings
-        self.voice = voice
-        self.speed = speed
-        self.instructions = instructions
-        self.label = label
-
-    def speech(self, text: str, destination: Path) -> None:
-        payload = {
-            "model": "gpt-4o-mini-tts",
-            "voice": self.voice,
-            "input": text,
-            "instructions": self.instructions,
-            "response_format": "mp3",
-            "speed": self.speed,
-        }
-        try:
-            response = requests.post(
-                self.s.openai_tts_endpoint,
-                headers={
-                    "Authorization": f"Bearer {self.s.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=(self.s.text_connect_timeout, self.s.text_read_timeout),
-            )
-        except requests.RequestException as exc:
-            raise BotError(f"OpenAI TTS ({self.label}) không thể kết nối: {exc}") from exc
-        if not response.ok:
-            detail = response.text[:500].strip() or "empty response"
-            raise BotError(f"OpenAI TTS ({self.label}) thất bại (HTTP {response.status_code}): {detail}")
-        if not response.content:
-            raise BotError(f"OpenAI TTS ({self.label}) trả audio rỗng.")
-        destination.write_bytes(response.content)
-
-
-class OpenAIShortVietnameseTTS(OpenAITTS):
-    """Nova narration for Vietnamese Facebook/TikTok Shorts."""
+class GoogleCloudVietnameseTTS:
+    """Vietnamese social narration using the configured Google Chirp voice."""
 
     def __init__(self, settings: Settings) -> None:
-        super().__init__(
-            settings,
-            voice=settings.social_openai_tts_voice,
-            speed=settings.social_openai_tts_speed,
-            instructions=(
-                "Speak natural Vietnamese from Vietnam with an emo teenager vibe: intimate, slightly moody, "
-                "emotionally honest, and conversational. Keep the short documentary narration clear and "
-                "controlled, with subtle dramatic tension and natural pauses. Avoid caricature, exaggerated "
-                "whining, breathiness, or singing. Do not add, omit, or translate words."
-            ),
-            label="Vietnamese social narration",
+        self.s = settings
+        self.google = GoogleCloudTTS(settings)
+
+    def speech(self, text: str, destination: Path) -> None:
+        self.google.speech(
+            text,
+            destination,
+            voice=self.s.google_tts_vietnamese_voice,
+            speaking_rate=self.s.google_tts_vietnamese_speaking_rate,
         )
 
 
@@ -1963,6 +1932,50 @@ Rejected candidates from this run: {json.dumps(rejected, ensure_ascii=False)}'''
     return extract_json(llm.chat(prompt, temperature=0.35))
 
 
+def repair_short_narration_length(
+    llm: OpenAITextClient,
+    plan: ShortPlan,
+    duration: int,
+    target_minimum_words: int,
+    target_maximum_words: int,
+) -> ShortPlan:
+    """Repair narration length without allowing the model to replace the matchup."""
+    schema = (
+        '{"hook":"first spoken sentence","narration":"complete repaired narration",'
+        '"closing_line":"last spoken sentence",'
+        '"scene_voiceovers":["one exact consecutive narration segment per existing scene"]}'
+    )
+    prompt = f'''Repair only the spoken English copy in this comparison Short so it fits a {duration}-second voice-over.
+Return raw JSON only with this schema:
+{schema}
+Rules:
+- Keep exactly the same matchup, factual claims, neutral position, and scene order. Do not add facts, dates, numbers, quotes, sources, or a winner.
+- Write {target_minimum_words}-{target_maximum_words} natural spoken English words. Expand clarity when too short and remove repetition when too long; never pad with filler.
+- Return exactly {len(plan.scenes)} non-empty scene_voiceovers in the existing scene order.
+- Each scene segment must discuss the same subject as its current focus. Explicitly name that subject in middle scenes; do not move an A fact into a B scene or vice versa.
+- Joining scene_voiceovers with single spaces MUST equal narration verbatim. Narration MUST start with hook and end with closing_line.
+Plan to repair: {json.dumps(plan.to_dict(), ensure_ascii=False)}'''
+    repaired = extract_json(llm.chat(prompt, temperature=0.2))
+    required = {"hook", "narration", "closing_line", "scene_voiceovers"}
+    if not isinstance(repaired, dict) or not required.issubset(repaired):
+        raise BotError("OpenAI narration repair thiếu hook, narration, closing_line hoặc scene_voiceovers.")
+    scene_voiceovers = repaired["scene_voiceovers"]
+    if (
+        not isinstance(scene_voiceovers, list)
+        or len(scene_voiceovers) != len(plan.scenes)
+        or any(not str(segment).strip() for segment in scene_voiceovers)
+    ):
+        raise BotError(
+            f"OpenAI narration repair phải trả đúng {len(plan.scenes)} scene_voiceovers không rỗng."
+        )
+    plan.hook = str(repaired["hook"]).strip()
+    plan.narration = str(repaired["narration"]).strip()
+    plan.closing_line = str(repaired["closing_line"]).strip()
+    for scene, segment in zip(plan.scenes, scene_voiceovers):
+        scene.voiceover = str(segment).strip()
+    return plan
+
+
 def plan_short(
     llm: OpenAITextClient,
     archive: Archive,
@@ -2040,7 +2053,31 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     if abs(scene_total - duration) > 0.1:
         raise BotError(f"OpenAI chia cảnh {scene_total:g}s, không đúng mục tiêu {duration}s.")
     if not minimum_words <= words <= maximum_words:
-        raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
+        for repair_attempt in range(1, 3):
+            LOG.warning(
+                "English narration has %d words (safety range %d-%d); "
+                "requesting pacing repair %d/2 for %d-%d words.",
+                words,
+                minimum_words,
+                maximum_words,
+                repair_attempt,
+                target_minimum_words,
+                target_maximum_words,
+            )
+            try:
+                plan = repair_short_narration_length(
+                    llm,
+                    plan,
+                    duration,
+                    target_minimum_words,
+                    target_maximum_words,
+                )
+                synchronize_comparison_scene_voiceovers(plan)
+                words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
+            except Exception as exc:
+                LOG.warning("English narration pacing repair %d/2 failed: %s", repair_attempt, exc)
+            if minimum_words <= words <= maximum_words:
+                break
     clean_narration = re.sub(r"[\W_]+", "", plan.narration).lower()
     clean_hook = re.sub(r"[\W_]+", "", plan.hook).lower()
     clean_closing = re.sub(r"[\W_]+", "", plan.closing_line).lower()
@@ -2063,7 +2100,15 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     synchronize_comparison_scene_voiceovers(plan)
     words = len(re.findall(r"\b\w+\b", plan.narration, flags=re.UNICODE))
     if not minimum_words <= words <= maximum_words:
-        raise BotError(f"Kịch bản có {words} từ, ngoài khoảng phù hợp cho Short {duration}s.")
+        # The render is audio-led, so word count must not kill an otherwise valid
+        # scheduled job. The measured narration still defines the final timeline.
+        LOG.warning(
+            "English narration still has %d words outside the %d-%d safety range; "
+            "rendering with its measured audio duration instead of aborting.",
+            words,
+            minimum_words,
+            maximum_words,
+        )
     LOG.info("Plan ready: %r (%d scenes, %d words)", plan.title, len(plan.scenes), words)
     return plan
 
@@ -2842,7 +2887,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
 
 
 def plan_social_vietnamese(llm: OpenAITextClient, plan: ShortPlan, duration: int) -> SocialPlan:
-    target_minimum_words, target_maximum_words = target_narration_word_bounds(duration)
+    target_minimum_words, target_maximum_words = target_vietnamese_narration_word_bounds(duration)
     minimum_words, maximum_words = narration_word_bounds(duration)
     schema = (
         '{"title":"Vietnamese title, <=100 characters","description":"Vietnamese caption with exactly 2 relevant hashtags",'
@@ -4047,7 +4092,7 @@ def render_comparison_social_visuals(
 
 def render_social_video(
     social: SocialPlan,
-    tts: OpenAIShortVietnameseTTS,
+    tts: GoogleCloudVietnameseTTS,
     output_dir: Path,
     settings: Settings,
     plan: ShortPlan | None = None,
@@ -4056,7 +4101,10 @@ def render_social_video(
     if not visuals.is_file():
         raise BotError(f"Không tìm thấy visuals.mp4 để tạo bản social: {visuals}")
     narration = output_dir / "narration_vi.mp3"
-    LOG.info("Generating Vietnamese narration for Facebook/TikTok with OpenAI gpt-4o-mini-tts…")
+    LOG.info(
+        "Generating Vietnamese narration for Facebook/TikTok with Google Cloud %s…",
+        settings.google_tts_vietnamese_voice,
+    )
     comparison = plan is not None and is_comparison_plan(plan)
     if comparison:
         synchronize_social_scene_voiceovers(social, plan)
@@ -4580,7 +4628,7 @@ def social_planning_duration(output_dir: Path, fallback_duration: int) -> int:
         return fallback_duration
 
 
-def prepare_social_video(plan: ShortPlan, llm: OpenAITextClient, tts: OpenAIShortVietnameseTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
+def prepare_social_video(plan: ShortPlan, llm: OpenAITextClient, tts: GoogleCloudVietnameseTTS, output_dir: Path, settings: Settings) -> tuple[Path, SocialPlan]:
     social_file = output_dir / "social_vi.json"
     if social_file.is_file():
         social = SocialPlan.from_dict(json.loads(social_file.read_text(encoding="utf-8")))
@@ -4842,7 +4890,7 @@ def run_manual_short_flow(
     llm: OpenAITextClient,
     images: VisualAssetProvider,
     tts: GoogleCloudTTS,
-    social_tts: OpenAIShortVietnameseTTS,
+    social_tts: GoogleCloudVietnameseTTS,
 ) -> tuple[str | None, str]:
     """Render one comparison Short from a manual idea. Returns (youtube_id, title)."""
     plan = plan_short_from_idea(llm, duration, idea)
@@ -4963,7 +5011,7 @@ def run_manual_idea(
     llm: OpenAITextClient,
     images: VisualAssetProvider,
     tts: GoogleCloudTTS,
-    social_tts: OpenAIShortVietnameseTTS,
+    social_tts: GoogleCloudVietnameseTTS,
 ) -> int:
     """Dispatch a manually submitted idea (from --idea text or a --idea-id queue row)."""
     idea_id: int | None = args.idea_id
@@ -5079,7 +5127,7 @@ def main() -> int:
     images = VisualAssetProvider(settings)
     llm = OpenAITextClient(settings)
     tts = GoogleCloudTTS(settings)
-    social_tts = OpenAIShortVietnameseTTS(settings)
+    social_tts = GoogleCloudVietnameseTTS(settings)
     if args.idea is not None or args.idea_id is not None or (args.subject_a and args.subject_b):
         return run_manual_idea(args, settings, archive, llm, images, tts, social_tts)
     if args.long_form or env_forces_long_form:

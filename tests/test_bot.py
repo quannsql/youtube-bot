@@ -399,6 +399,95 @@ def test_research_prompt_receives_archive_and_rejected_candidates(tmp_path):
     assert "subject_a_image_query" in prompts[2]
 
 
+def test_plan_short_repairs_too_short_quality_pass_instead_of_aborting(tmp_path):
+    def segment(prefix, count):
+        words = prefix.split()
+        return " ".join(words + [f"detail{index}" for index in range(count - len(words))])
+
+    initial_segments = [
+        segment("Alpha and Beta begin this comparison", 12),
+        segment("Alpha takes the first contrast", 14),
+        segment("Beta takes the second contrast", 14),
+        segment("Alpha adds another established difference", 14),
+        segment("Beta adds the final established difference", 14),
+        segment("Alpha and Beta end without a winner", 12),
+    ]
+    repaired_segments = [
+        segment("Alpha and Beta begin this comparison", 20),
+        segment("Alpha takes the first contrast", 24),
+        segment("Beta takes the second contrast", 24),
+        segment("Alpha adds another established difference", 24),
+        segment("Beta adds the final established difference", 24),
+        segment("Alpha and Beta end without a winner", 24),
+    ]
+    short_plan = {
+        "topic": "Alpha vs Beta",
+        "angle": "Their established differences",
+        "title": "Alpha vs Beta: The Differences",
+        "description": "Alpha and Beta compared. #Shorts",
+        "tags": ["comparison", "shorts"],
+        "thumbnail_text": "Alpha vs Beta",
+        "hook": initial_segments[0],
+        "narration": " ".join(initial_segments),
+        "closing_line": initial_segments[-1],
+        "subject_a": "Alpha",
+        "subject_b": "Beta",
+        "subject_a_image_query": "Alpha portrait",
+        "subject_b_image_query": "Beta portrait",
+        "subject_fame_score": 9,
+        "fascination_score": 8,
+        "clarity_score": 9,
+        "scenes": [
+            {
+                "duration": 10,
+                "focus": focus,
+                "visual_prompt": f"Comparison scene {index}",
+                "voiceover": voiceover,
+            }
+            for index, (focus, voiceover) in enumerate(
+                zip(["both", "a", "b", "a", "b", "both"], initial_segments),
+                start=1,
+            )
+        ],
+        "fact_note": "No unsupported facts.",
+        "source_hints": ["Official sources"],
+    }
+    repaired_copy = {
+        "hook": repaired_segments[0],
+        "narration": " ".join(repaired_segments),
+        "closing_line": repaired_segments[-1],
+        "scene_voiceovers": repaired_segments,
+    }
+    prompts = []
+
+    class FakeClient:
+        def __init__(self):
+            self.responses = [
+                {
+                    "subject_a": "Alpha",
+                    "subject_b": "Beta",
+                    "matchup_hook": "Alpha versus Beta",
+                    "key_contrasts": ["one", "two"],
+                    "surprise": "Neither is declared the winner.",
+                },
+                short_plan,
+                {"quality_check": {"hook_score": 9, "clarity_score": 9}, "plan": short_plan},
+                repaired_copy,
+            ]
+
+        def chat(self, prompt, temperature=0.55):
+            prompts.append(prompt)
+            return json.dumps(self.responses.pop(0))
+
+    client = FakeClient()
+    result = bot.plan_short(client, bot.Archive(tmp_path / "shorts.db"), "comparisons", 60)
+
+    assert bot.spoken_word_count(result.narration) == 140
+    assert "Repair only the spoken English copy" in prompts[3]
+    assert result.narration == " ".join(scene.voiceover for scene in result.scenes)
+    assert client.responses == []
+
+
 def test_choose_novel_plan_passes_duplicate_candidate_to_retry(tmp_path, monkeypatch):
     duplicate_plan = bot.ShortPlan.from_dict({
         "topic": "Antikythera mechanism", "angle": "Ancient gears predicted eclipses",
@@ -681,7 +770,8 @@ def test_settings_reads_corner_overlay_video_options(monkeypatch):
 
 
 def test_audio_led_short_keeps_word_target_as_guidance_not_a_hard_gate():
-    assert bot.target_narration_word_bounds(60) == (180, 207)
+    assert bot.target_narration_word_bounds(60) == (135, 153)
+    assert bot.target_vietnamese_narration_word_bounds(60) == (180, 207)
     assert bot.narration_word_bounds(60) == (90, 244)
 
 
@@ -692,19 +782,19 @@ def test_settings_reads_scheduled_daily_limit(monkeypatch):
     assert bot.Settings.from_env().scheduled_daily_limit == 6
 
 
-def test_settings_defaults_english_to_google_leda_and_social_to_openai_nova(monkeypatch):
+def test_settings_defaults_english_to_google_leda_and_vietnamese_to_google_aoede(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
     monkeypatch.delenv("GOOGLE_TTS_VOICE", raising=False)
     monkeypatch.delenv("GOOGLE_TTS_SPEAKING_RATE", raising=False)
-    monkeypatch.delenv("SOCIAL_OPENAI_TTS_VOICE", raising=False)
-    monkeypatch.delenv("SOCIAL_OPENAI_TTS_SPEED", raising=False)
+    monkeypatch.delenv("GOOGLE_TTS_VI_VOICE", raising=False)
+    monkeypatch.delenv("GOOGLE_TTS_VI_SPEAKING_RATE", raising=False)
 
     settings = bot.Settings.from_env()
 
     assert settings.google_tts_voice == "en-US-Chirp3-HD-Leda"
     assert settings.google_tts_speaking_rate == 1.05
-    assert settings.social_openai_tts_voice == "nova"
-    assert settings.social_openai_tts_speed == 1.0
+    assert settings.google_tts_vietnamese_voice == "vi-VN-Chirp3-HD-Aoede"
+    assert settings.google_tts_vietnamese_speaking_rate == 1.0
 
 
 def test_openai_text_uses_responses_api_and_extracts_output(monkeypatch):
@@ -2296,32 +2386,22 @@ def test_google_tts_language_code_supports_chirp_3_hd_leda():
     assert bot.GoogleCloudTTS.language_code_for_voice("en-US-Chirp3-HD-Leda") == "en-US"
 
 
-def test_openai_short_vietnamese_tts_uses_nova_emo_voice(tmp_path, monkeypatch):
+def test_google_short_vietnamese_tts_uses_chirp_aoede(tmp_path, monkeypatch):
     captured = {}
 
-    class FakeResponse:
-        ok = True
-        status_code = 200
-        content = b"mp3-bytes"
-        text = ""
+    def fake_speech(_self, text, destination, voice=None, speaking_rate=None):
+        captured.update(text=text, voice=voice, speaking_rate=speaking_rate)
+        destination.write_bytes(b"mp3-bytes")
 
-    def fake_post(url, headers, json, timeout):
-        captured.update(url=url, headers=headers, payload=json, timeout=timeout)
-        return FakeResponse()
-
-    monkeypatch.setattr(bot.requests, "post", fake_post)
+    monkeypatch.setattr(bot.GoogleCloudTTS, "speech", fake_speech)
     destination = tmp_path / "narration_vi.mp3"
-    settings = bot.Settings(openai_api_key="openai")
+    settings = bot.Settings()
 
-    bot.OpenAIShortVietnameseTTS(settings).speech("Xin chào, đây là đoạn đọc tiếng Việt.", destination)
+    bot.GoogleCloudVietnameseTTS(settings).speech("Xin chào, đây là đoạn đọc tiếng Việt.", destination)
 
     assert destination.read_bytes() == b"mp3-bytes"
-    assert captured["url"] == "https://api.openai.com/v1/audio/speech"
-    assert captured["headers"]["Authorization"] == "Bearer openai"
-    assert captured["payload"]["model"] == "gpt-4o-mini-tts"
-    assert captured["payload"]["voice"] == "nova"
-    assert captured["payload"]["speed"] == 1.0
-    assert "emo teenager vibe" in captured["payload"]["instructions"]
+    assert captured["voice"] == "vi-VN-Chirp3-HD-Aoede"
+    assert captured["speaking_rate"] == 1.0
 
 
 def test_facebook_page_upload_posts_video(tmp_path, monkeypatch):

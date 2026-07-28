@@ -121,9 +121,9 @@ SCHEDULED_DAILY_LIMIT=2
 GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json
 GOOGLE_TTS_VOICE=en-US-Chirp3-HD-Leda
 GOOGLE_TTS_SPEAKING_RATE=1.05
-# Vietnamese Short narration for Facebook/TikTok via OpenAI gpt-4o-mini-tts
-SOCIAL_OPENAI_TTS_VOICE=nova
-SOCIAL_OPENAI_TTS_SPEED=1.0
+# Vietnamese Short narration for Facebook/TikTok via Google Cloud Chirp 3 HD
+GOOGLE_TTS_VI_VOICE=vi-VN-Chirp3-HD-Aoede
+GOOGLE_TTS_VI_SPEAKING_RATE=1.0
 YOUTUBE_CLIENT_SECRETS=client_secrets.json
 YOUTUBE_TOKEN_FILE=youtube_token.json
 YOUTUBE_PRIVACY_STATUS=private
@@ -142,7 +142,7 @@ TIKTOK_DISABLE_STITCH=false
 
 `OPENAI_TEXT_ATTEMPTS`/`OPENAI_TEXT_RETRY_BACKOFF_SECONDS` và `OPENAI_IMAGE_ATTEMPTS`/`OPENAI_IMAGE_RETRY_BACKOFF_SECONDS` giúp cron chịu được lỗi mạng/rate-limit tạm thời. Chất lượng và kích thước GPT Image 2 không có biến môi trường để nâng lên, tránh vô tình tiêu credits ở mức `medium/high`.
 
-Narration tiếng Anh của cả Short và Long dùng Google Cloud Chirp 3 HD, mặc định `en-US-Chirp3-HD-Leda` (giọng nữ); có thể đổi bằng `GOOGLE_TTS_VOICE` và `GOOGLE_TTS_SPEAKING_RATE`. Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Voice tiếng Việt dùng OpenAI `gpt-4o-mini-tts`, mặc định `nova` với phong cách “emo teenager”; có thể đổi qua `SOCIAL_OPENAI_TTS_VOICE` và `SOCIAL_OPENAI_TTS_SPEED`. Trước khi gọi Brave hoặc GPT Image 2, bot luôn tạo audio tiếng Anh và lấy thời lượng thật làm timeline: các scene sẽ được co/giãn theo audio, nên không cần tạo lại voice chỉ để khớp thời lượng. Bản tiếng Việt cũng tự co/giãn từ visual đã có, không tạo thêm ảnh. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. Nếu Page token hết hạn hoặc bạn muốn bot tự lấy token Page mỗi lần chạy, đặt thêm `FACEBOOK_USER_ACCESS_TOKEN` là long-lived user token có quyền quản lý Page; bot sẽ gọi `/me/accounts` để lấy Page token khớp `FACEBOOK_PAGE_ID`. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
+Narration tiếng Anh của cả Short và Long dùng Google Cloud Chirp 3 HD, mặc định `en-US-Chirp3-HD-Leda` (giọng nữ); có thể đổi bằng `GOOGLE_TTS_VOICE` và `GOOGLE_TTS_SPEAKING_RATE`. Khi bật `PUBLISH_FACEBOOK=true` hoặc `PUBLISH_TIKTOK=true`, bot vẫn upload `short.mp4` tiếng Anh lên YouTube, sau đó tạo `social_vi.json` và `short_vi.mp4` tiếng Việt từ cùng `visuals.mp4` để publish lên Facebook/TikTok. Voice tiếng Việt cũng dùng Google Cloud Chirp 3 HD, mặc định `vi-VN-Chirp3-HD-Aoede`; có thể đổi qua `GOOGLE_TTS_VI_VOICE` và `GOOGLE_TTS_VI_SPEAKING_RATE`, dùng chung service-account JSON với voice tiếng Anh. Trước khi gọi Brave hoặc GPT Image 2, bot luôn tạo audio tiếng Anh và lấy thời lượng thật làm timeline: các scene sẽ được co/giãn theo audio, nên không cần tạo lại voice chỉ để khớp thời lượng. Bản tiếng Việt cũng tự co/giãn từ visual đã có, không tạo thêm ảnh. Facebook dùng Meta Graph Video API cho Page, cần `FACEBOOK_PAGE_ID` và Page access token có quyền publish video. Nếu Page token hết hạn hoặc bạn muốn bot tự lấy token Page mỗi lần chạy, đặt thêm `FACEBOOK_USER_ACCESS_TOKEN` là long-lived user token có quyền quản lý Page; bot sẽ gọi `/me/accounts` để lấy Page token khớp `FACEBOOK_PAGE_ID`. TikTok dùng Content Posting API Direct Post, cần app có Content Posting API, scope `video.publish`, và `TIKTOK_ACCESS_TOKEN` của tài khoản đã authorize; app chưa audit thường chỉ post được ở chế độ private/`SELF_ONLY`.
 
 Không thêm `BOT_DATA_DIR=.` vào Railway Variables: điều đó sẽ làm bot ghi dữ liệu vào filesystem tạm thay vì Volume. Để kiểm tra file trên Volume, Railway CLI hỗ trợ `railway volume files list /`.
 

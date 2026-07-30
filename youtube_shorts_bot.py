@@ -46,6 +46,16 @@ LONG_FORM_INTERMEDIATE_WIDTH = 2304
 LONG_FORM_SCENE_RENDER_TIMEOUT_SECONDS = 120
 LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS = 900
 
+
+def long_form_render_timeout_seconds(target_duration: float) -> int:
+    """Scale the concat/mux ceiling with the video length.
+
+    The flat 900s ceiling was written for 4-minute videos; a 15-minute render can
+    exceed real time on a shared Railway CPU, and a timeout there throws away a
+    video whose narration and images have already been paid for.
+    """
+    return max(LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS, int(target_duration * 4))
+
 # Windows PowerShell sessions can still inherit cp1252. Keep CLI output
 # deterministic instead of failing on non-ASCII text in paths or user themes.
 for _stream in (sys.stdout, sys.stderr):
@@ -177,17 +187,23 @@ class Settings:
     image_attempts: int = 3
     image_retry_backoff_seconds: int = 10
     brave_web_images_per_short: int = 2
-    # Stick-figure explainer long-form generates every beat as an illustration by
-    # default; real web photos are fetched only for scenes the planner tags with a
-    # search_query (a genuinely famous real place/landmark/artifact).
-    brave_web_images_per_long_form: int = 0
-    long_form_openai_images: int = 15
+    # Long-form mixes cartoon stick-figure beats with real photos. Web images are
+    # free relative to GPT Image, so a meaningful slice of every video is now
+    # sourced from Brave/Wikimedia — both for cost and because real archive photos
+    # of famous places, artifacts, and figures make an explainer more credible.
+    brave_web_images_per_long_form: int = 12
+    long_form_openai_images: int = 30
+    # Spend one extra GPT Image call per Long on a purpose-built thumbnail hero
+    # image. A frame lifted from the video was never composed to sell the click.
+    long_form_ai_thumbnail: bool = True
     language: str = "en"
     duration: int = 20
-    long_form_min_duration_seconds: int = 240
-    long_form_max_duration_seconds: int = 300
-    long_form_min_scenes: int = 15
-    long_form_max_scenes: int = 15
+    # 10-15 minutes. Long-form retention on YouTube rewards a fully developed
+    # explainer, and the ad-eligible watch time is far better than a 4-minute cut.
+    long_form_min_duration_seconds: int = 600
+    long_form_max_duration_seconds: int = 900
+    long_form_min_scenes: int = 42
+    long_form_max_scenes: int = 42
     long_form_timezone: str = "Asia/Bangkok"
     long_form_interval_days: int = 2
     scheduled_daily_limit: int = 2
@@ -239,10 +255,11 @@ class Settings:
     @classmethod
     def from_env(cls, duration_override: int | None = None) -> "Settings":
         openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        brave_long_form_images = min(10, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "0"))))
-        # Stick-figure long-form: every beat is its own AI illustration, so more
-        # images means a tighter match to the narration. Configurable, default 15.
-        long_form_ai_images = min(30, max(1, int(os.getenv("LONG_FORM_AI_IMAGES", "15"))))
+        brave_long_form_images = min(40, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "12"))))
+        # A 10-15 minute explainer needs a new visual every ~15 seconds or the eye
+        # gives up long before the story does. The two budgets add up to the scene
+        # count, so raise them together when changing the pacing.
+        long_form_ai_images = min(80, max(1, int(os.getenv("LONG_FORM_AI_IMAGES", "30"))))
         overlay_logo = Path(os.getenv("OVERLAY_LOGO_FILE", "overlay-logo.png"))
         if not overlay_logo.is_absolute():
             overlay_logo = ROOT / overlay_logo
@@ -289,9 +306,10 @@ class Settings:
             brave_web_images_per_long_form=brave_long_form_images,
             language=os.getenv("SHORT_LANGUAGE", "en"),
             duration=duration,
-            long_form_min_duration_seconds=max(60, int(os.getenv("LONG_FORM_MIN_DURATION_SECONDS", "240"))),
-            long_form_max_duration_seconds=max(60, int(os.getenv("LONG_FORM_MAX_DURATION_SECONDS", "300"))),
+            long_form_min_duration_seconds=max(60, int(os.getenv("LONG_FORM_MIN_DURATION_SECONDS", "600"))),
+            long_form_max_duration_seconds=max(60, int(os.getenv("LONG_FORM_MAX_DURATION_SECONDS", "900"))),
             long_form_openai_images=long_form_ai_images,
+            long_form_ai_thumbnail=env_bool("LONG_FORM_AI_THUMBNAIL", True),
             long_form_min_scenes=long_form_ai_images + brave_long_form_images,
             long_form_max_scenes=long_form_ai_images + brave_long_form_images,
             long_form_timezone=os.getenv("LONG_FORM_TIMEZONE", "Asia/Bangkok").strip() or "Asia/Bangkok",
@@ -365,6 +383,37 @@ class Scene:
 
 
 @dataclass
+class Chapter:
+    """One long-form milestone: the question it opens with and where it starts.
+
+    ``opening_sentence`` is the verbatim narration sentence that begins the
+    chapter. Locating it inside the narration is what lets the bot derive real
+    YouTube chapter timestamps from the measured TTS audio without a second
+    alignment pass.
+    """
+
+    title: str
+    question: str = ""
+    opening_sentence: str = ""
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "Chapter | None":
+        if not isinstance(value, dict):
+            return None
+        title = re.sub(r"\s+", " ", str(value.get("title") or "")).strip()
+        if not title:
+            return None
+        return cls(
+            # YouTube truncates long chapter labels in the progress bar tooltip.
+            title=title[:60],
+            question=re.sub(r"\s+", " ", str(value.get("question") or "")).strip()[:200],
+            opening_sentence=re.sub(
+                r"\s+", " ", str(value.get("opening_sentence") or "")
+            ).strip()[:400],
+        )
+
+
+@dataclass
 class ShortPlan:
     topic: str
     angle: str
@@ -396,6 +445,14 @@ class ShortPlan:
     # written, used to file the upload into that topic's playlist. Shorts leave it
     # empty, which is what keeps them out of playlists.
     topic_category: str = ""
+    # Long-form only: the milestone structure of the script. Used both to steer the
+    # writing (each chapter is a question the chapter then answers) and to publish
+    # real YouTube chapter timestamps in the description.
+    chapters: list[Chapter] = field(default_factory=list)
+    # Long-form only: what the thumbnail image should actually depict — one
+    # recognizable hero character or object. Kept separate from thumbnail_text
+    # (the words drawn on top) because the image and the copy carry different jobs.
+    thumbnail_subject: str = ""
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ShortPlan":
@@ -449,6 +506,15 @@ class ShortPlan:
             # Read back so the slug survives the plan.json round-trip a resumed
             # long-form job depends on.
             topic_category=str(value.get("topic_category") or "").strip()[:40],
+            chapters=[
+                chapter
+                for chapter in (
+                    Chapter.from_dict(raw)
+                    for raw in (value.get("chapters") or [])
+                )
+                if chapter is not None
+            ][:12],
+            thumbnail_subject=str(value.get("thumbnail_subject") or "").strip()[:300],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1809,18 +1875,23 @@ LONG_FORM_IMAGE_STYLE_SUFFIX = (
 )
 
 LONG_FORM_VISUAL_STYLE_RULES = (
-    "This is a CARTOON STICK-FIGURE EXPLAINER channel (animated-cartoon look). Write each visual_prompt as one concrete, self-contained "
+    "This is a CARTOON STICK-FIGURE EXPLAINER channel (animated-cartoon look) that CUTS TO REAL PHOTOGRAPHS whenever a real "
+    "image makes the point land harder. Write each visual_prompt as one concrete, self-contained "
     "sentence describing a friendly CARTOON STICK-FIGURE illustration that literally acts out what the narration covers at this exact beat: "
     "show the specific action, people, animals, objects, and setting as cute cartoon stick figures in clear poses, plus a few simple "
     "recognizable cartoon props and scenery so the idea reads instantly (e.g. 'cartoon stick-figure hunters throwing spears at a stick-figure "
     "mammoth beside a cave', 'a cartoon stick figure gathering berries into a woven basket', 'a cartoon stick-figure king handing a scroll to "
     "a kneeling stick figure'). Vary the composition and the number of figures between scenes and keep each image easy to read at a glance. "
     "In visual_prompt avoid readable text, logos, and the names of real people; show roles and actions instead (a king, a soldier, an early human, a scientist). "
-    "SCENE 1 IS THE THUMBNAIL: make scene 1 a bold, clear cartoon stick-figure illustration of the video's MAIN subject/action, and leave its "
-    "search_query empty so the thumbnail is an on-topic cartoon image, never a photo. "
-    "For the other scenes, give a search_query ONLY when a real photo of a genuinely famous real PLACE, landmark, building, map, or artifact would "
-    "help the explanation (e.g. 'Great Pyramid of Giza', 'Western Wall Jerusalem', 'Colosseum Rome'); leave search_query empty for "
-    "ordinary actions, people, animals, and concepts, which must stay cartoon stick-figure illustrations. Most beats should be cartoon stick-figure illustrations. "
+    "REAL PHOTOS ARE ENCOURAGED: set search_query whenever the beat names something a viewer would want to actually SEE — a famous place, "
+    "landmark, building, city skyline, ruin, monument, historical map, museum artifact, artwork, manuscript or document, famous vehicle or "
+    "machine, or a widely published historical photograph or portrait of a well-known figure (e.g. 'Great Pyramid of Giza', 'Western Wall "
+    "Jerusalem', 'Rosetta Stone British Museum', 'Trans-Siberian Railway train'). Write search_query as the plain 2-5 word name a picture "
+    "researcher would type, not a sentence. AIM FOR ROUGHLY ONE IN THREE SCENES TO CARRY A search_query, spread evenly through the video "
+    "rather than clustered, so the explainer keeps alternating between cartoon explanation and real-world proof. "
+    "Leave search_query empty for ordinary actions, feelings, and abstract concepts, which must stay cartoon stick-figure illustrations. "
+    "Always still write a full cartoon visual_prompt even for a scene that has a search_query, because it is the fallback when no real photo is found. "
+    "Make scene 1 a bold, clear cartoon stick-figure illustration of the video's MAIN subject/action and leave its search_query empty. "
     "Do not mention Vietnam, Vietnamese people, Vietnamese officials, or Vietnam-related locations."
 )
 
@@ -1843,6 +1914,9 @@ class LongFormCategory:
     prompt: str
     playlist_title: str
     playlist_description: str
+    # Short all-caps label drawn as a badge on the thumbnail. A consistent badge
+    # per topic area makes the channel recognizable in a crowded feed.
+    kicker: str = ""
 
 
 # Human, everyday-life-centered explainer topics. Deliberately excludes hard
@@ -1853,42 +1927,49 @@ LONG_FORM_CATEGORIES: tuple[LongFormCategory, ...] = (
         prompt="Human history and civilizations, ancient to modern: how a people, empire, kingdom, dynasty, or era lived, rose, or fell.",
         playlist_title="Civilizations Explained: Empires, Dynasties & Eras",
         playlist_description="How great civilizations rose, ruled, and fell — empires, dynasties, and the eras that shaped the world we live in.",
+        kicker="CIVILIZATIONS",
     ),
     LongFormCategory(
         slug="prehistory",
         prompt="Prehistory and early humans: how prehistoric people and early humans survived — hunting, gathering, fire, tools, shelter, clothing, and migration.",
         playlist_title="Before History: How Early Humans Survived",
         playlist_description="Life before writing: how prehistoric people found food, made fire and tools, built shelter, and spread across the planet.",
+        kicker="EARLY HUMANS",
     ),
     LongFormCategory(
         slug="cultures",
         prompt="Peoples, cultures, and religions: the origin, journey, beliefs, traditions, and defining moments of a people or faith, explained factually and respectfully.",
         playlist_title="Peoples, Cultures & Religions Explained",
         playlist_description="The origins, journeys, beliefs, and traditions of the world's peoples and faiths — explained factually and respectfully.",
+        kicker="CULTURES & FAITHS",
     ),
     LongFormCategory(
         slug="wars",
         prompt="Wars, battles, revolutions, and turning points, past or present: what happened, why it happened, and what changed.",
         playlist_title="Wars & Revolutions: The Turning Points Explained",
         playlist_description="The battles, revolutions, and turning points that redrew the map — what happened, why it happened, and what changed.",
+        kicker="TURNING POINTS",
     ),
     LongFormCategory(
         slug="figures",
         prompt="Notable figures, past or present: who they were, what they did, and why they still matter.",
         playlist_title="People Who Shaped the World",
         playlist_description="Notable figures past and present: who they were, what they actually did, and why they still matter today.",
+        kicker="WHO THEY WERE",
     ),
     LongFormCategory(
         slug="events",
         prompt="Major events, past or present: a clear explanation of what happened and why it mattered.",
         playlist_title="Moments That Changed Everything",
         playlist_description="Major events, past and present — a clear explanation of what happened and why it mattered.",
+        kicker="WHAT HAPPENED",
     ),
     LongFormCategory(
         slug="origins",
         prompt="Origins of the everyday world: how familiar things — money, food, cities, farming, trade, writing, holidays, everyday customs, jobs, and famous inventions — actually began and became part of daily life.",
         playlist_title="Origins: How Everyday Things Began",
         playlist_description="Where the familiar world came from — money, food, cities, farming, trade, writing, holidays, jobs, and famous inventions.",
+        kicker="ORIGINS",
     ),
 )
 
@@ -2133,14 +2214,16 @@ PLAN_SCHEMA = '''{
 LONG_FORM_PLAN_SCHEMA = '''{
   "topic":"specific subject/event/process to explain, not related to Vietnam",
   "angle":"specific explanatory angle with broad viewer appeal",
-  "title":"<=100 chars, English, clickable but factual, explicitly names the main subject/people/event/place/figure",
-  "thumbnail_text":"2-5 words, names the same main subject for large thumbnail text",
+  "title":"<=70 chars, English, curiosity-driven but factual, names the main subject in the first 40 characters",
+  "thumbnail_text":"2-4 punchy words, <=22 characters total, names the same main subject in words big enough to read on a phone",
+  "thumbnail_subject":"what the thumbnail IMAGE should show: one recognizable hero character or object doing one clear action, described visually (no words or letters in the image)",
   "description":"English YouTube description with exactly 2 hashtags and a brief AI-assisted disclosure",
   "tags":["exactly 2 tags"],
-  "hook":"first spoken sentence, <=18 words",
+  "hook":"the cold open, 2-3 spoken sentences and <=55 words: the single most surprising concrete fact, then the question the video answers, then the promise of the payoff",
+  "chapters":[{"title":"<=60 chars milestone label for the YouTube chapter list","question":"the concrete question a viewer has at this point","opening_sentence":"the exact verbatim first sentence of this chapter, copied character for character from narration"}],
   "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=18 words",
-  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 cartoon stick-figure illustration prompt that literally acts out this beat (specific cartoon stick-figure people, actions, props, and setting); scene 1 must clearly show the video's main subject for the thumbnail","search_query":"leave empty for cartoon stick-figure beats (always empty for scene 1); set to a 2-5 word photo search ONLY for a genuinely famous real place, landmark, building, map, or artifact (e.g. 'Great Pyramid of Giza')"}],
+  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 cartoon stick-figure illustration prompt that literally acts out this beat (specific cartoon stick-figure people, actions, props, and setting)","search_query":"leave empty for cartoon stick-figure beats; set to a 2-5 word photo search when a real photograph would genuinely help (famous place, landmark, building, map, artifact, artwork, document, or historical photograph), e.g. 'Great Pyramid of Giza'"}],
   "fact_note":"what uncertainty was preserved or avoided",
   "source_hints":["credible general-knowledge lead for later verification"]
 }'''
@@ -2440,6 +2523,16 @@ def target_long_form_word_bounds(duration: int) -> tuple[int, int]:
     produced ~9-minute videos from a 6.6-minute plan.
     """
     return round(duration * 2.4), round(duration * 2.6)
+
+
+def long_form_chapter_bounds(duration: int) -> tuple[int, int]:
+    """How many milestone chapters a video of this length should carry.
+
+    Roughly one chapter every 90-110 seconds. Fewer than that and a long video
+    reads as one undifferentiated block; more and the YouTube chapter list turns
+    into noise. YouTube itself needs at least three chapters to show any.
+    """
+    return max(3, round(duration / 110)), max(4, round(duration / 90))
 
 
 def image_scene_prompt_horizontal(visual_prompt: str) -> str:
@@ -2813,46 +2906,207 @@ def ensure_long_form_hook_and_closing(plan: ShortPlan) -> None:
         plan.narration = f"{plan.narration} {plan.closing_line}"
 
 
+def replace_long_form_hook(plan: ShortPlan, new_hook: str) -> None:
+    """Swap the cold open in both plan.hook and the narration it prefixes.
+
+    ``ensure_long_form_hook_and_closing`` guarantees the narration starts with the
+    old hook, but only under punctuation-insensitive comparison, so the prefix is
+    located by consuming the same number of alphanumeric characters rather than by
+    a literal ``startswith``.
+    """
+    new_hook = re.sub(r"\s+", " ", new_hook).strip()
+    old_hook = plan.hook.strip()
+    if not new_hook or new_hook == old_hook:
+        return
+    old_normalized = re.sub(r"[\W_]+", "", old_hook).lower()
+    narration = plan.narration.strip()
+    consumed = 0
+    prefix_length = -1
+    if old_normalized:
+        for position, character in enumerate(narration):
+            if character.isalnum():
+                consumed += 1
+                if consumed == len(old_normalized):
+                    prefix_length = position + 1
+                    break
+    if (
+        prefix_length > 0
+        and re.sub(r"[\W_]+", "", narration[:prefix_length]).lower() == old_normalized
+    ):
+        plan.narration = f"{new_hook} {narration[prefix_length:].lstrip()}".strip()
+    else:
+        LOG.info("Could not locate the old hook in the narration; prepending the new one instead.")
+        plan.narration = f"{new_hook} {narration}".strip()
+    plan.hook = new_hook
+    if plan.chapters:
+        # Chapter 1 always opens on the hook, so its marker sentence has to move with it.
+        first_sentence = re.split(r"(?<=[.!?])\s+", new_hook)[0].strip()
+        plan.chapters[0].opening_sentence = first_sentence[:400]
+
+
+LONG_FORM_PACKAGING_SCHEMA = '''{
+  "title_options":["five distinct candidate titles, each <=70 characters"],
+  "title":"the single strongest option, <=70 characters",
+  "thumbnail_text":"2-4 words, <=22 characters total",
+  "thumbnail_subject":"what the thumbnail image shows: one hero character or object, close up, mid-action, no words or letters",
+  "hook":"the rewritten cold open, 2-3 spoken sentences, <=55 words",
+  "packaging_note":"one sentence on why this title and thumbnail pair earns the click"
+}'''
+
+
+def optimize_long_form_packaging(llm: OpenAITextClient, plan: ShortPlan) -> None:
+    """Rewrite the title, thumbnail copy, and cold open purely for click-through.
+
+    Kept as its own pass because the script editor optimizes for accuracy and flow,
+    and reliably under-invests in the three things that decide whether the video is
+    ever opened. Packaging is cosmetic, so any failure here leaves the plan intact.
+    """
+    prompt = f'''Act as a YouTube packaging strategist. You optimize titles, thumbnails, and cold opens for click-through rate and first-30-second retention on an educational explainer channel. Return only JSON.
+
+Return exactly:
+{LONG_FORM_PACKAGING_SCHEMA}
+
+The video already exists and its facts are fixed. You are ONLY repackaging it. Every promise you make must be paid off by the narration below — a title the video does not deliver destroys the channel.
+
+TITLE rules:
+- At most 70 characters so it is not truncated on a phone. Shorter is usually stronger.
+- Name the concrete subject inside the first 40 characters. A viewer scrolling must know what this is about instantly.
+- Add exactly ONE curiosity gap: the surprising outcome, the question left open, the thing that does not add up, or the detail that contradicts what people assume. One, not three.
+- Use plain, specific, concrete words. Prefer a real noun over an abstraction ("the tunnel they dug for eight months", not "an incredible feat").
+- Never use ALL-CAPS words, exclamation spam, "You Won't Believe", "SHOCKING", "Insane", emoji, or a promise the script does not deliver.
+- Write five genuinely different candidates — vary the angle (the question, the surprising fact, the stakes, the person, the reversal) rather than rewording one idea — then pick the strongest as title.
+
+THUMBNAIL rules:
+- thumbnail_text is read at the size of a postage stamp: 2-4 words, at most 22 characters. It must ADD to the title, not repeat it word for word.
+- thumbnail_subject describes the picture, not the words: ONE hero character or object, framed close, caught mid-action, with a clear emotion or a dramatic moment, instantly recognizable as this subject. Name what it is doing and what is around it. No text, letters, logos, or watermarks in the image.
+
+HOOK rules:
+- 2-3 spoken sentences, at most 55 words, written to be said out loud.
+- Sentence 1: the single most surprising, concrete, specific fact in the script — something the viewer can picture. No generalities.
+- Sentence 2: the exact question this video answers.
+- Sentence 3: what the viewer will understand by the end.
+- No greeting, no channel introduction, no "in this video", no restating the title.
+- It must use only facts already present in the narration below.
+
+Current title: {json.dumps(plan.title, ensure_ascii=False)}
+Current thumbnail text: {json.dumps(plan.thumbnail_text, ensure_ascii=False)}
+Current hook: {json.dumps(plan.hook, ensure_ascii=False)}
+Topic: {json.dumps(plan.topic, ensure_ascii=False)}
+Angle: {json.dumps(plan.angle, ensure_ascii=False)}
+Chapters: {json.dumps([chapter.title for chapter in plan.chapters], ensure_ascii=False)}
+Narration: {json.dumps(plan.narration, ensure_ascii=False)}'''
+    LOG.info("Packaging pass: optimizing the long-form title, thumbnail, and cold open for CTR...")
+    try:
+        packaging = extract_json(
+            llm.chat(
+                prompt,
+                temperature=0.7,
+                reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+            )
+        )
+    except Exception as exc:
+        LOG.warning("Long-form packaging pass failed; keeping the editor's title and hook: %s", exc)
+        return
+
+    title = re.sub(r"\s+", " ", str(packaging.get("title") or "")).strip()
+    if title and not mentions_vietnam(title):
+        LOG.info("Packaging retitled the video: %r -> %r", plan.title, title[:100])
+        plan.title = title[:100]
+
+    thumbnail_text = re.sub(r"\s+", " ", str(packaging.get("thumbnail_text") or "")).strip()
+    if thumbnail_text and not mentions_vietnam(thumbnail_text):
+        plan.thumbnail_text = thumbnail_text[:48]
+
+    thumbnail_subject = re.sub(r"\s+", " ", str(packaging.get("thumbnail_subject") or "")).strip()
+    if thumbnail_subject and not mentions_vietnam(thumbnail_subject):
+        plan.thumbnail_subject = thumbnail_subject[:300]
+
+    hook = re.sub(r"\s+", " ", str(packaging.get("hook") or "")).strip()
+    if hook and not mentions_vietnam(hook):
+        replace_long_form_hook(plan, hook)
+
+    LOG.info(
+        "Packaging ready: title=%r (%d chars), thumbnail_text=%r, hook=%d words. %s",
+        plan.title,
+        len(plan.title),
+        plan.thumbnail_text,
+        spoken_word_count(plan.hook),
+        str(packaging.get("packaging_note") or "")[:200],
+    )
+
+
 def expand_long_form_plan(
     llm: OpenAITextClient,
     plan: ShortPlan,
     duration: int,
-    min_words: int,
-    max_words: int,
-    news_context: list[dict[str, str]],
+    target_min_words: int,
+    target_max_words: int,
+    min_chapters: int,
+    max_chapters: int,
 ) -> ShortPlan:
-    current_words = spoken_word_count(plan.narration)
-    expand_prompt = f'''Act as a senior long-form documentary script doctor. Return only JSON.
-The current plan is too short for a {duration}-second horizontal YouTube video: it has {current_words} words, but it must have {min_words}-{max_words} spoken English words.
+    """Deepen a script that came back too short for its target runtime.
 
-Expand ONLY the narration, hook if needed, closing_line if needed, and scene visual prompts if they need to match the expanded chapters. Keep the same topic, title, tags, description, scene count, and scene durations.
+    The rendered video follows the narration audio, so an under-written script
+    silently produces a 6-minute video from a 12-minute plan. This is the only
+    thing standing between a thin draft and a short upload, so it asks for more
+    substance — not more words — and returns the original plan if it cannot.
+    """
+    current_words = spoken_word_count(plan.narration)
+    expand_prompt = f'''Act as a senior explainer script doctor for an educational YouTube channel. Return only JSON.
+The current script is too short for a {duration}-second horizontal video: it has {current_words} spoken English words, but it needs {target_min_words}-{target_max_words}.
+
+Expand ONLY the narration, the chapters, and scene visual prompts where they must match new material. Keep the same topic, angle, title, thumbnail_text, thumbnail_subject, tags, description, scene count, and scene durations.
 
 Expansion requirements:
-- Write natural spoken documentary prose, not bullet points.
-- Add context, timeline, explanation, stakes, uncertainty, and likely next consequences.
-- Do not invent precise numbers, quotes, dates, casualty figures, scores, or market data not present in the supplied context.
+- ADD SUBSTANCE, NOT WORDS. Never restate a point in different words, never add filler transitions, and never summarize what was just said. If you cannot add a real fact, add a concrete detail: what it looked like, what it cost someone, what had to happen first.
+- The best places to expand are: the step-by-step of how something actually worked, the obstacle that had to be solved, the moment it nearly failed, an everyday comparison that makes a hard idea obvious, and the consequence that followed.
+- Keep the question-then-answer chapter chain: {min_chapters}-{max_chapters} chapters, each raising one concrete question, answering it with specifics, and handing off to the next. Deepen existing chapters before adding new ones.
+- Every chapter's opening_sentence must remain the exact verbatim first sentence of that chapter in the final narration. Update it if the sentence changed; these become YouTube chapter timestamps.
+- Write natural spoken English prose for a general viewer, one clear idea per sentence, not bullet points.
+- Rely on well-established general knowledge. Do NOT invent statistics, dates, quotations, casualty numbers, or source names, and stay qualitative when a precise figure is uncertain.
+- Treat sensitive peoples, cultures, and religions with respect and neutrality.
 - Do not mention Vietnam or any Vietnam-related person, place, or event.
-- Keep the story strictly within politics, military affairs, economics, technology industry, sports, or major world news. Do not add science, climate research, space, medicine, or academic-study material.
-- Keep every chapter tied to a concrete current event and an ordinary-viewer consequence; avoid abstract geopolitical or economic theory.
+- Do not drift into hard science, physics, chemistry, astronomy, space, or cosmology.
 - The narration must begin with hook and end with closing_line.
-- Final narration word count must be {min_words}-{max_words}.
+- Final narration word count must be {target_min_words}-{target_max_words}.
 
-News context: {json.dumps(news_context, ensure_ascii=False)}
 Plan to expand: {json.dumps(plan.to_dict(), ensure_ascii=False)}
 
 Return exactly:
 {{"plan":{LONG_FORM_PLAN_SCHEMA}}}'''
-    LOG.info("Long-form script was too short (%d words). Requesting expansion pass...", current_words)
-    expanded = extract_json(
-        llm.chat(
-            expand_prompt,
-            temperature=0.45,
-            reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
-        )
+    LOG.info(
+        "Long-form script is short (%d words, target %d-%d). Requesting a depth pass…",
+        current_words,
+        target_min_words,
+        target_max_words,
     )
-    if not isinstance(expanded.get("plan"), dict):
-        raise BotError("OpenAI long-form expansion pass thieu truong plan.")
-    return ShortPlan.from_dict(expanded["plan"])
+    try:
+        expanded = extract_json(
+            llm.chat(
+                expand_prompt,
+                temperature=0.45,
+                reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+            )
+        )
+        if not isinstance(expanded.get("plan"), dict):
+            raise BotError("OpenAI long-form expansion pass thieu truong plan.")
+        candidate = ShortPlan.from_dict(expanded["plan"])
+    except Exception as exc:
+        LOG.warning("Long-form depth pass failed; keeping the shorter script: %s", exc)
+        return plan
+    expanded_words = spoken_word_count(candidate.narration)
+    if expanded_words <= current_words:
+        LOG.warning(
+            "Depth pass returned %d words, no longer than the original %d; keeping the original.",
+            expanded_words,
+            current_words,
+        )
+        return plan
+    # The expansion schema carries only editorial fields, so anything stamped onto
+    # the reviewed plan has to be carried across by hand.
+    candidate.topic_category = plan.topic_category
+    LOG.info("Depth pass expanded the script from %d to %d words.", current_words, expanded_words)
+    return candidate
 
 
 def plan_long_form(
@@ -2872,6 +3126,7 @@ def plan_long_form(
     category = topic_category or random.choice(list(LONG_FORM_CATEGORIES))
     target_min_words, target_max_words = target_long_form_word_bounds(duration)
     min_words, max_words = long_form_word_bounds(duration)
+    min_chapters, max_chapters = long_form_chapter_bounds(duration)
     scene_count = random.randint(min_scenes, max_scenes)
     target_scene_duration = round(duration / scene_count, 2)
     prompt = f'''Act as a senior educational explainer writer and factual script editor for a stick-figure explainer YouTube channel.
@@ -2889,13 +3144,19 @@ Hard rules:
 - Do NOT center the video on Vietnam or any Vietnam-related person, place, or event.
 - COOLDOWN RULE: Do not choose a subject that overlaps the recently covered subjects, the existing archive, or the rejected candidates above, even with a new angle. Pick a genuinely different subject each time.
 - This is EXPLAINER content, not a news bulletin. Actually teach the viewer: what it is, who/where/when, how it happened or works step by step, and why it matters.
-- STRUCTURE: a strong hook, then clear chapters that build in logical order — set the scene (context) → explain the core in simple, concrete steps → show why it matters → a memorable close. Escalate curiosity; keep every chapter concrete and easy to picture.
+- STRUCTURE: this is a {duration // 60}-minute video, so it needs real depth. Write {min_chapters}-{max_chapters} chapters and list them in the chapters field, in the order they are spoken.
+- CHAPTER RULE — QUESTION THEN ANSWER: every chapter opens by raising ONE concrete question the viewer now wants answered, spends the chapter answering it with specifics, and ends by opening the next question. Put that question in the chapter's question field. This question-answer chain is what keeps a viewer for {duration // 60} minutes.
+- MILESTONES: anchor the story on concrete milestones — the turning points, the moments where things changed, the before-and-after. Name each milestone plainly and say what it changed. A chapter title should read like a milestone or a question, not a vague label.
+- Each chapter's opening_sentence field must be the EXACT verbatim first sentence of that chapter as it appears in narration, copied character for character. The first chapter's opening_sentence must be the first sentence of hook. These are used to build YouTube chapter timestamps, so an inexact copy breaks the video.
+- DEPTH: because the video is long, go past the summary — give the specifics a viewer remembers: the concrete details of how something was actually done, what it looked and felt like at the time, the obstacle that had to be solved, the mistake or surprise, and the consequence that followed. Use short, vivid examples rather than lists of facts.
 - ACCURACY: rely on well-established general knowledge. Do NOT invent precise statistics, dates, quotations, casualty numbers, or source names. Stay qualitative when a precise figure is uncertain; never fabricate facts or citations.
 - Treat sensitive peoples, cultures, and religions with respect and neutrality: explain and inform, never judge, mock, or push a viewpoint.
-- HOOK: the first spoken sentence must be a specific, scroll-stopping statement that names the concrete subject and the intriguing question. No vague throat-clearing like "History is full of mysteries" — front-load the single most surprising or important idea.
+- HOOK (this decides whether anyone watches): 2-3 sentences, at most 55 words. Sentence 1 states the single most surprising, concrete, specific fact about the subject — a real image a viewer can picture, never a generality like "History is full of mysteries". Sentence 2 turns it into the exact question the video answers. Sentence 3 promises what the viewer will understand by the end. Do not greet the viewer, do not say "in this video", and do not describe the channel.
+- RETENTION: every 60-90 seconds, plant a forward hook — tease the thing you have not explained yet before you explain it. Never let a chapter end on a flat summary.
 - CLARITY: write plain, vivid spoken English for a general viewer with no background. One clear idea per sentence, define any name or term the moment it first appears, and use concrete cause-and-effect and everyday comparisons instead of jargon. A distracted viewer must be able to follow it on the first listen.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
-- TITLE REQUIREMENT: the title must explicitly name the concrete subject (the people, event, place, figure, or process), not only a vague promise. Put that subject early. Set thumbnail_text to 2-5 bold words that name the same subject; never use a vague slogan.
+- TITLE (this decides the click): at most 70 characters so it does not truncate on a phone. Name the concrete subject inside the first 40 characters, then add ONE curiosity gap — the surprising outcome, the unanswered question, or the thing that does not add up. It must be literally true and deliverable by the script; no bait the video does not pay off. No ALL-CAPS words, no clickbait punctuation spam.
+- THUMBNAIL: thumbnail_text is 2-4 words and at most 22 characters — it is read on a phone at thumbnail size, so long phrases are wasted. thumbnail_subject describes the IMAGE: ONE hero character or object, close up, mid-action, instantly recognizable as this subject, with a clear emotion or dramatic moment. No words or letters in the image.
 - Use a save/share test: the viewer should finish able to explain the subject to a friend in a sentence or two.
 - WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words and treat {target_max_words} as a hard ceiling — the timeline follows the narration audio, so every extra 100 words adds about 40 seconds to the video. Never pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
@@ -2924,10 +3185,14 @@ Rules:
 - Reject a draft that repeats a subject from the archive, the rejected candidates, or this cooldown list of recently covered subjects: {json.dumps(covered_subjects, ensure_ascii=False)}. A new angle does not make a repeated subject acceptable.
 - Keep only well-established, general-knowledge claims; cut any invented statistic, date, quotation, casualty number, or source name, and stay qualitative when a figure is uncertain.
 - Treat sensitive peoples, cultures, and religions with respect and neutrality; explain, never judge or push a viewpoint.
-- The hook (first spoken sentence) must be a specific, scroll-stopping statement that names the concrete subject and the intriguing question, not vague throat-clearing; rewrite any weak opening. Then keep clear chapters that build understanding step by step, a satisfying payoff, and a reason viewers would save or share the video. The title must explicitly name the concrete subject, and thumbnail_text must be 2-5 words that name that same subject rather than a vague teaser.
+- HOOK: the cold open must be 2-3 sentences and at most 55 words — a specific, scroll-stopping fact, then the exact question the video answers, then the promise of the payoff. Rewrite any vague throat-clearing, any greeting, and any "in this video".
+- CHAPTERS: keep {min_chapters}-{max_chapters} chapters. Each must raise one concrete question, answer it with specifics, and hand off to the next. Every chapter's opening_sentence must be the exact verbatim first sentence of that chapter in narration — fix any that no longer match after your edits, because they become YouTube chapter timestamps.
+- MILESTONES AND DEPTH: keep the concrete turning points, the obstacle that had to be solved, the surprise, and the consequence. Cut abstract summary sentences in favour of specific, picturable detail. Never let a chapter end flat — it should open the next question.
+- TITLE: at most 70 characters, subject named inside the first 40, exactly one curiosity gap, literally true and paid off by the script. No ALL-CAPS words, no punctuation spam.
+- THUMBNAIL: thumbnail_text is 2-4 words and at most 22 characters. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
 - Rewrite any sentence a general viewer could not follow on first listen: prefer plain spoken English, one idea per sentence, defined terms, and concrete comparisons over jargon.
 - The narration must begin with hook and end with closing_line.
-- The scenes must total exactly {duration} seconds and be stick-figure explainer visual prompts (with a real-photo search_query only for genuinely famous real places, landmarks, or artifacts).
+- The scenes must total exactly {duration} seconds and be stick-figure explainer visual prompts. Roughly one scene in three should carry a real-photo search_query for a famous place, landmark, building, map, artifact, artwork, document, or historical photograph, spread evenly rather than clustered; add search_query values where the draft missed an obvious one.
 - Keep it a clear explainer that teaches the subject; do not turn it into a dry list or an abstract essay.
 - Reject or rewrite any drift into hard science, physics, chemistry, astronomy, space, or cosmology; keep the video about people, cultures, events, and everyday things a general viewer relates to.
 - Aim for roughly {target_min_words}-{target_max_words} words. If the draft narration exceeds {target_max_words} words, cut secondary detail until it fits; the final video length follows the narration audio directly. Never pad with filler.
@@ -2950,6 +3215,14 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     # through the review model, which returns only the schema's fields, so anything
     # carried on the draft would be dropped.
     plan.topic_category = category.slug
+    if spoken_word_count(plan.narration) < target_min_words:
+        plan = expand_long_form_plan(
+            llm, plan, duration, target_min_words, target_max_words, min_chapters, max_chapters
+        )
+    # Anchor the narration to its hook first: the packaging pass swaps the cold
+    # open by prefix, which needs the narration to actually start with it.
+    ensure_long_form_hook_and_closing(plan)
+    optimize_long_form_packaging(llm, plan)
     ensure_title_names_main_subject(plan)
     ensure_long_form_hook_and_closing(plan)
     normalize_scene_count(plan, scene_count)
@@ -3127,6 +3400,7 @@ def plan_long_form_from_idea(
     category = classify_manual_long_form_category(llm, user_idea)
     target_min_words, target_max_words = target_long_form_word_bounds(duration)
     min_words, max_words = long_form_word_bounds(duration)
+    min_chapters, max_chapters = long_form_chapter_bounds(duration)
     scene_count = random.randint(min_scenes, max_scenes)
     target_scene_duration = round(duration / scene_count, 2)
     news_context = fetch_news_for_idea(user_idea)
@@ -3144,9 +3418,13 @@ Fresh related news headlines from public RSS (use as factual leads when they fit
 Rules:
 - Treat the user's idea as the mandatory subject and thesis. Interpret it faithfully even if it is written in another language; the finished narration is in English.
 - Prefer concrete, current facts drawn from the related news above when they fit the idea, but do not copy unrelated stories and do not fabricate details beyond what the leads support.
-- Structure: a strong hook, clear chapters that escalate, concrete explanation, and a memorable close. The narration must begin verbatim with hook and end verbatim with closing_line.
+- Structure: write {min_chapters}-{max_chapters} chapters and list them in the chapters field in spoken order. Every chapter raises ONE concrete question, answers it with specifics, and hands off to the next question. Anchor the story on concrete milestones and turning points. The narration must begin verbatim with hook and end verbatim with closing_line.
+- Each chapter's opening_sentence must be the EXACT verbatim first sentence of that chapter as it appears in narration; the first one is the first sentence of hook. These become YouTube chapter timestamps, so an inexact copy breaks the video.
+- HOOK: 2-3 sentences, at most 55 words — the single most surprising concrete fact, then the exact question the video answers, then the promise of the payoff. No greeting, no "in this video", no vague throat-clearing.
+- DEPTH: this is a {duration // 60}-minute video, so go past the summary — the concrete detail of how it was actually done, the obstacle, the surprise, the consequence. Every 60-90 seconds, tease something you have not explained yet.
 - Do NOT invent statistics, dates, quotations, casualty numbers, market data, scores, or source names. Build from general knowledge and stay qualitative when a precise figure is unknown; never fabricate precise facts or citations.
-- TITLE: explicitly name the central person, place, event, company, route, or work of the idea. Set thumbnail_text to 2-5 bold words naming that same subject.
+- TITLE: at most 70 characters, naming the central person, place, event, company, route, or work of the idea inside the first 40 characters, plus exactly one curiosity gap the script actually pays off. No ALL-CAPS words, no punctuation spam.
+- THUMBNAIL: thumbnail_text is 2-4 words and at most 22 characters naming that same subject. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
 - WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words. The timeline follows the narration audio, so do not pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
 - Visuals: {manual_visual_rules}
@@ -3194,6 +3472,13 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     # the category chosen from the user's exact idea so the upload gate cannot
     # silently treat a manual Long as a Short.
     plan.topic_category = category.slug
+    if spoken_word_count(plan.narration) < target_min_words:
+        plan = expand_long_form_plan(
+            llm, plan, duration, target_min_words, target_max_words, min_chapters, max_chapters
+        )
+        plan.topic_category = category.slug
+    ensure_long_form_hook_and_closing(plan)
+    optimize_long_form_packaging(llm, plan)
     ensure_title_names_main_subject(plan)
     ensure_long_form_hook_and_closing(plan)
     normalize_scene_count(plan, scene_count)
@@ -3455,35 +3740,323 @@ def ffmpeg_filter_path(path: Path) -> str:
 YOUTUBE_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 
 
+THUMBNAIL_WIDTH = 1280
+THUMBNAIL_HEIGHT = 720
+# Text sits in the left column; the AI hero image is prompted to keep its subject
+# on the right so the two never fight for the same pixels.
+THUMBNAIL_TEXT_LEFT = 104
+THUMBNAIL_TEXT_RIGHT = 736
+THUMBNAIL_ACCENT = (240, 46, 46)
+THUMBNAIL_INK = (255, 255, 255)
+
+
 def thumbnail_headline(plan: ShortPlan) -> str:
     """Return a concise, concrete subject label for a YouTube thumbnail."""
     raw = plan.thumbnail_text or plan.topic or plan.title
     clean = re.sub(r"\s+", " ", raw).strip()
     words = clean.split()
-    # The writer normally returns 2-5 words. The fallback keeps old plans and
+    # The writer normally returns 2-4 words. The fallback keeps old plans and
     # malformed model output readable without hiding the named subject.
     return " ".join(words[:6]).upper() or "DOCUMENTARY"
 
 
-def thumbnail_headline_lines(text: str, max_line_chars: int = 22) -> str:
-    """Wrap thumbnail copy into at most two large, readable lines."""
-    words = text.split()
-    if not words:
-        return "DOCUMENTARY"
+def thumbnail_kicker(plan: ShortPlan) -> str:
+    """The small badge label above the headline, taken from the explainer topic area."""
+    category = LONG_FORM_CATEGORY_BY_SLUG.get(plan.topic_category)
+    return (category.kicker if category else "") or "EXPLAINED"
+
+
+def long_form_thumbnail_prompt(plan: ShortPlan) -> str:
+    """Prompt one purpose-built thumbnail hero image.
+
+    Two things matter more than prettiness here: a single subject big enough to
+    read at 210 pixels wide, and deliberate empty space on the left for the
+    headline. A generic scene loses the click even when it looks good.
+    """
+    subject = (
+        plan.thumbnail_subject
+        or plan.thumbnail_text
+        or plan.topic
+        or plan.title
+    )
+    return (
+        f"YouTube thumbnail illustration: {subject.strip().rstrip('.')}. "
+        "ONE single hero character or object, very large in frame, positioned on the RIGHT side, "
+        "close up and caught mid-action with a clear readable emotion or dramatic moment. "
+        "Keep the LEFT 45 percent of the image simple and uncluttered as empty background space. "
+        "Bold expressive cartoon explainer style, thick clean outlines, exaggerated friendly faces, "
+        "highly saturated punchy colors, strong rim lighting and high contrast against a simple "
+        "uncluttered background, clear silhouette that reads instantly at small size. "
+        "No text, no words, no letters, no numbers, no logos, no watermark, no borders, no collage, "
+        "no split screen. Horizontal 16:9."
+    )
+
+
+def _thumbnail_font(size: int):
+    from PIL import ImageFont
+
+    candidates = (
+        DATA_DIR / "fonts" / "DejaVuSans-Bold.ttf",
+        ROOT / "fonts" / "DejaVuSans-Bold.ttf",
+        DATA_DIR / "fonts" / "DejaVuSans.ttf",
+        ROOT / "fonts" / "DejaVuSans.ttf",
+    )
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(str(candidate), size)
+        except Exception:
+            continue
+    raise BotError("Không tìm thấy font DejaVuSans để tạo thumbnail long-form.")
+
+
+def _cover_fit(image, width: int, height: int):
+    """Scale and centre-crop so the image fills the frame without distortion."""
+    from PIL import Image
+
+    source = image.convert("RGB")
+    scale = max(width / max(1, source.width), height / max(1, source.height))
+    resized = source.resize(
+        (max(width, int(source.width * scale + 0.5)), max(height, int(source.height * scale + 0.5))),
+        Image.LANCZOS,
+    )
+    left = (resized.width - width) // 2
+    top = (resized.height - height) // 2
+    return resized.crop((left, top, left + width, top + height))
+
+
+def _left_scrim_mask(width: int, height: int, reach: float = 0.66, strength: float = 0.86):
+    """A left-to-right darkening ramp so headline text stays legible over any background.
+
+    Built as a one-pixel-tall ramp and stretched, which keeps it to plain Pillow
+    rather than depending on an ffmpeg build that includes the GPL `geq` filter.
+    """
+    from PIL import Image
+
+    ramp = Image.new("L", (width, 1))
+    edge = max(1, int(width * reach))
+    ramp.putdata([
+        int(255 * strength * (1 - x / edge) ** 1.5) if x < edge else 0
+        for x in range(width)
+    ])
+    return ramp.resize((width, height), Image.BILINEAR)
+
+
+def _wrap_to_width(draw, text: str, font, max_width: int) -> list[str]:
     lines: list[str] = []
     current = ""
-    for word in words:
+    for word in text.split():
         candidate = f"{current} {word}".strip()
-        if current and len(candidate) > max_line_chars:
+        if current and draw.textlength(candidate, font=font) > max_width:
             lines.append(current)
             current = word
         else:
             current = candidate
     if current:
         lines.append(current)
-    if len(lines) <= 2:
-        return "\n".join(lines)
-    return f"{lines[0]}\n{lines[1]}…"
+    return lines
+
+
+def _headline_stroke_width(size: int) -> int:
+    return max(5, size // 9)
+
+
+def _fit_headline(draw, text: str, max_width: int, max_lines: int = 3):
+    """Pick the largest font size at which the headline still fits the text column.
+
+    Both conditions matter. Checking only the line count lets a single long word
+    such as "CONSTANTINOPLE" sit on its own line and run straight across the hero
+    subject, because the greedy wrapper never splits a word.
+    """
+    for size in range(112, 31, -4):
+        font = _thumbnail_font(size)
+        lines = _wrap_to_width(draw, text, font, max_width)
+        budget = max_width - 2 * _headline_stroke_width(size)
+        if len(lines) <= max_lines and all(
+            draw.textlength(line, font=font) <= budget for line in lines
+        ):
+            return font, lines, size
+    # Nothing fits: keep the smallest size and let the copy be clipped to the
+    # line budget rather than let it spill over the picture.
+    font = _thumbnail_font(32)
+    return font, _wrap_to_width(draw, text, font, max_width)[:max_lines], 32
+
+
+def render_long_form_thumbnail_image(
+    background: Path,
+    headline: str,
+    kicker: str,
+    destination: Path,
+    logo: Path | None = None,
+) -> Path:
+    """Compose the finished 1280x720 thumbnail: hero image, scrim, badge, headline.
+
+    Composed in Pillow rather than with ffmpeg drawtext so the headline can be
+    auto-sized to the copy, stroked heavily enough to survive a busy background,
+    and kept clear of the hero subject.
+    """
+    from PIL import Image, ImageDraw, ImageEnhance
+
+    with Image.open(background) as opened:
+        canvas = _cover_fit(opened, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+    # Feed-level punch. YouTube renders thumbnails small and slightly washed out,
+    # so a flat image reads as flatter still next to competing videos.
+    canvas = ImageEnhance.Color(canvas).enhance(1.22)
+    canvas = ImageEnhance.Contrast(canvas).enhance(1.12)
+    canvas = ImageEnhance.Sharpness(canvas).enhance(1.35)
+    canvas = Image.composite(
+        Image.new("RGB", canvas.size, (6, 8, 14)),
+        canvas,
+        _left_scrim_mask(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT),
+    )
+
+    draw = ImageDraw.Draw(canvas)
+    column_width = THUMBNAIL_TEXT_RIGHT - THUMBNAIL_TEXT_LEFT
+    font, lines, size = _fit_headline(draw, headline, column_width)
+    if not lines:
+        lines = ["EXPLAINED"]
+    line_height = int(size * 1.12)
+    kicker_font = _thumbnail_font(34)
+    kicker_text = kicker.strip().upper()[:20]
+    kicker_height = 58 if kicker_text else 0
+    block_height = kicker_height + len(lines) * line_height
+    top = max(48, (THUMBNAIL_HEIGHT - block_height) // 2)
+
+    if kicker_text:
+        badge_width = int(draw.textlength(kicker_text, font=kicker_font)) + 44
+        draw.rounded_rectangle(
+            (THUMBNAIL_TEXT_LEFT, top, THUMBNAIL_TEXT_LEFT + badge_width, top + 46),
+            radius=10,
+            fill=THUMBNAIL_ACCENT,
+        )
+        draw.text(
+            (THUMBNAIL_TEXT_LEFT + 22, top + 23),
+            kicker_text,
+            font=kicker_font,
+            fill=THUMBNAIL_INK,
+            anchor="lm",
+        )
+
+    headline_top = top + kicker_height
+    # Accent bar down the left edge of the headline, the channel's visual signature.
+    draw.rounded_rectangle(
+        (
+            THUMBNAIL_TEXT_LEFT - 30,
+            headline_top + 6,
+            THUMBNAIL_TEXT_LEFT - 16,
+            headline_top + len(lines) * line_height - 6,
+        ),
+        radius=7,
+        fill=THUMBNAIL_ACCENT,
+    )
+    stroke = _headline_stroke_width(size)
+    for index, line in enumerate(lines):
+        y = headline_top + index * line_height
+        draw.text(
+            (THUMBNAIL_TEXT_LEFT + 5, y + 6),
+            line,
+            font=font,
+            fill=(0, 0, 0),
+            stroke_width=stroke,
+            stroke_fill=(0, 0, 0),
+        )
+        draw.text(
+            (THUMBNAIL_TEXT_LEFT, y),
+            line,
+            font=font,
+            fill=THUMBNAIL_INK,
+            stroke_width=stroke,
+            stroke_fill=(10, 10, 14),
+        )
+
+    if logo is not None and logo.is_file():
+        try:
+            with Image.open(logo) as opened_logo:
+                brand = opened_logo.convert("RGBA")
+            scale = 150 / max(1, brand.width)
+            brand = brand.resize((150, max(1, int(brand.height * scale))), Image.LANCZOS)
+            canvas.paste(brand, (THUMBNAIL_WIDTH - brand.width - 40, 36), brand)
+        except Exception as exc:
+            LOG.warning("Could not overlay the logo on the long-form thumbnail: %s", exc)
+
+    # Step the quality down rather than fail: YouTube rejects anything over 2 MB.
+    for quality in (92, 85, 78, 70):
+        canvas.save(destination, format="JPEG", quality=quality, optimize=True, progressive=True)
+        if destination.stat().st_size <= YOUTUBE_THUMBNAIL_MAX_BYTES:
+            break
+    return destination
+
+
+def extract_video_frame(video: Path, destination: Path, at_seconds: float = 3.0) -> Path | None:
+    """Grab one frame as the thumbnail background of last resort."""
+    require_tools()
+    try:
+        run([
+            "ffmpeg", "-y", "-ss", str(at_seconds), "-i", str(video),
+            "-frames:v", "1", "-q:v", "2", str(destination),
+        ])
+    except BotError as exc:
+        LOG.warning("Could not extract a thumbnail frame from %s: %s", video.name, exc)
+        return None
+    return destination if destination.is_file() and destination.stat().st_size >= 1024 else None
+
+
+def long_form_thumbnail_background(
+    plan: ShortPlan,
+    video: Path,
+    output_dir: Path,
+    settings: Settings,
+    image_provider: VisualAssetProvider | None = None,
+) -> Path | None:
+    """Pick the hero image behind the thumbnail, best option first.
+
+    A purpose-built AI hero comes first because it is the only source composed for
+    the job: one big subject, on the right, with space left for the headline. The
+    remaining sources are all salvage, and none of them cost an image credit.
+    """
+    def usable(path: Path) -> bool:
+        return path.is_file() and path.stat().st_size >= 1024
+
+    ai_source = output_dir / "thumbnail_ai_source.jpg"
+    if usable(ai_source):
+        LOG.info("Reusing the already generated long-form thumbnail hero image.")
+        return ai_source
+    if settings.long_form_ai_thumbnail:
+        provider = image_provider or VisualAssetProvider(settings)
+        LOG.info("Generating a dedicated long-form thumbnail hero image…")
+        try:
+            provider.image(
+                search_query="",
+                generation_prompt=long_form_thumbnail_prompt(plan),
+                destination=ai_source,
+                width=1920,
+                height=1080,
+                prefer_web=False,
+            )
+        except Exception as exc:
+            LOG.warning("Thumbnail hero image generation failed; falling back: %s", exc)
+        if usable(ai_source):
+            return ai_source
+
+    wiki_source = output_dir / "thumbnail_wikimedia_source.jpg"
+    if usable(wiki_source):
+        LOG.info("Using the preserved Wikimedia photo as the long-form thumbnail background.")
+        return wiki_source
+
+    # Scene 1 is written to show the video's main subject, so it beats a random beat.
+    scene_candidates = [
+        long_form_image_path(output_dir, index)
+        for index in range(1, len(plan.scenes) + 1)
+        if usable(long_form_image_path(output_dir, index))
+    ]
+    if scene_candidates:
+        source = scene_candidates[0]
+        LOG.info("Using long-form scene %s as the thumbnail background.", source.name)
+        return source
+
+    if video.is_file():
+        LOG.warning("No thumbnail image source was available; extracting a frame from %s.", video.name)
+        return extract_video_frame(video, output_dir / "thumbnail_frame_source.jpg")
+    return None
 
 
 def create_long_form_thumbnail(
@@ -3493,113 +4066,34 @@ def create_long_form_thumbnail(
     settings: Settings,
     image_provider: VisualAssetProvider | None = None,
 ) -> Path:
-    """Build a Long thumbnail from a random scene, with AI and video-frame fallbacks."""
+    """Build the Long thumbnail: a dedicated AI hero image plus a composed headline."""
     destination = output_dir / "thumbnail.jpg"
     if destination.is_file() and 1024 <= destination.stat().st_size <= YOUTUBE_THUMBNAIL_MAX_BYTES:
         LOG.info("Reusing prepared long-form YouTube thumbnail: %s", destination.name)
         return destination
 
-    wiki_source = output_dir / "thumbnail_wikimedia_source.jpg"
-    source: Path | None = (
-        wiki_source
-        if wiki_source.is_file() and wiki_source.stat().st_size >= 1024
-        else None
-    )
-    if source is not None:
-        LOG.info("Using preserved Wikimedia image as the long-form thumbnail background.")
-
-    scene_candidates = [
-        long_form_image_path(output_dir, index)
-        for index in range(1, len(plan.scenes) + 1)
-        if (
-            long_form_image_path(output_dir, index).is_file()
-            and long_form_image_path(output_dir, index).stat().st_size >= 1024
-        )
-    ]
-    if source is None and scene_candidates:
-        source = random.choice(scene_candidates)
-        LOG.info(
-            "No Wikimedia thumbnail source was available; selected random long-form scene %s "
-            "as the background (no new image credit).",
-            source.name,
-        )
-
-    if source is None:
-        ai_source = output_dir / "thumbnail_ai_source.jpg"
-        if not ai_source.is_file() or ai_source.stat().st_size < 1024:
-            provider = image_provider or VisualAssetProvider(settings)
-            prompt = (
-                f"A bold, high-contrast horizontal YouTube documentary thumbnail background about "
-                f"{plan.thumbnail_text or plan.topic or plan.title}. "
-                "One immediately recognizable central subject, expressive stick-figure explainer style, "
-                "clean cinematic composition, strong depth and lighting, no words, no letters, no logos, "
-                "no watermark, 16:9."
-            )
-            LOG.warning(
-                "No usable long-form scene image was found; generating one AI thumbnail background."
-            )
-            try:
-                provider.image(
-                    search_query="",
-                    generation_prompt=prompt,
-                    destination=ai_source,
-                    width=1920,
-                    height=1080,
-                    prefer_web=False,
-                )
-            except Exception as exc:
-                LOG.warning("AI thumbnail background generation failed: %s", exc)
-        if ai_source.is_file() and ai_source.stat().st_size >= 1024:
-            source = ai_source
-
-    if source is None and video.is_file():
-        source = video
-        LOG.warning(
-            "AI thumbnail background was unavailable; extracting a frame from %s instead.",
-            video.name,
-        )
+    source = long_form_thumbnail_background(plan, video, output_dir, settings, image_provider)
     if source is None or not source.is_file():
-        raise BotError(f"Không tìm thấy visual để tạo thumbnail long-form: {source}")
-    bold_font_file = DATA_DIR / "fonts" / "DejaVuSans-Bold.ttf"
-    regular_font_file = DATA_DIR / "fonts" / "DejaVuSans.ttf"
-    font_file = bold_font_file if bold_font_file.is_file() else regular_font_file
-    if not font_file.is_file():
-        raise BotError(f"Không tìm thấy font để tạo thumbnail: {font_file}")
+        raise BotError("Không tìm thấy visual để tạo thumbnail long-form.")
 
-    headline_file = output_dir / "thumbnail_headline.txt"
-    headline_file.write_text(thumbnail_headline_lines(thumbnail_headline(plan)), encoding="utf-8")
-    visual_filter = (
-        "scale=1280:720:force_original_aspect_ratio=increase,"
-        "crop=1280:720,eq=contrast=1.08:saturation=1.12,"
-        "drawbox=x=0:y=0:w=iw:h=ih:color=black@0.10:t=fill,"
-        "drawbox=x=0:y=480:w=iw:h=240:color=black@0.62:t=fill,"
-        f"drawtext=fontfile='{ffmpeg_filter_path(font_file)}':"
-        f"textfile='{ffmpeg_filter_path(headline_file)}':"
-        "fontcolor=0xFF2D2D:fontsize=78:line_spacing=8:borderw=5:bordercolor=white@0.95:"
-        "shadowcolor=black@0.95:shadowx=5:shadowy=5:x=60:y=h-text_h-36:fix_bounds=1"
-    )
-    command = ["ffmpeg", "-y", "-i", str(source)]
     logo = settings.overlay_logo
-    if logo.is_file():
-        command.extend([
-            "-loop", "1", "-i", str(logo),
-            "-filter_complex",
-            f"[0:v]{visual_filter}[base];"
-            "[1:v]scale=130:-1:flags=lanczos,format=rgba[logo];"
-            "[base][logo]overlay=x=W-w-42:y=42:format=auto[v]",
-            "-map", "[v]",
-        ])
-    else:
-        command.extend(["-vf", visual_filter])
-    command.extend(["-frames:v", "1", "-q:v", "4", str(destination)])
-    require_tools()
-    LOG.info("Creating 16:9 long-form YouTube thumbnail from %s…", source.name)
-    run(command)
+    LOG.info("Composing the 16:9 long-form YouTube thumbnail from %s…", source.name)
+    render_long_form_thumbnail_image(
+        background=source,
+        headline=thumbnail_headline(plan),
+        kicker=thumbnail_kicker(plan),
+        destination=destination,
+        logo=logo if logo.is_file() else None,
+    )
     if not destination.is_file() or destination.stat().st_size < 1024:
         raise BotError("Thumbnail long-form không tạo được ảnh JPEG hợp lệ.")
     if destination.stat().st_size > YOUTUBE_THUMBNAIL_MAX_BYTES:
         raise BotError("Thumbnail long-form vượt giới hạn 2 MB của YouTube API.")
-    LOG.info("Created long-form YouTube thumbnail: %s (%.1f MB)", destination.name, destination.stat().st_size / (1024 * 1024))
+    LOG.info(
+        "Created long-form YouTube thumbnail: %s (%.2f MB)",
+        destination.name,
+        destination.stat().st_size / (1024 * 1024),
+    )
     return destination
 
 
@@ -3883,6 +4377,110 @@ def distributed_web_image_indexes(scene_count: int, requested: int) -> set[int]:
     if count == scene_count:
         return set(range(1, scene_count + 1))
     return {max(1, min(scene_count, round((index + 1) * (scene_count + 1) / (count + 1)))) for index in range(count)}
+
+
+def _normalized_chars_with_word_index(text: str) -> tuple[str, list[int]]:
+    """Strip text to bare alphanumerics, remembering which word each character came from.
+
+    Matching on this form survives the punctuation and spacing drift between the
+    narration the model wrote and the opening_sentence it copied out, while the
+    word index is what converts a match position into a timestamp.
+    """
+    chars: list[str] = []
+    word_of_char: list[int] = []
+    words_seen = 0
+    in_word = False
+    for character in text:
+        if character.isalnum():
+            if not in_word:
+                in_word = True
+                words_seen += 1
+            chars.append(character.lower())
+            word_of_char.append(words_seen - 1)
+        else:
+            in_word = False
+    return "".join(chars), word_of_char
+
+
+# YouTube only renders a chapter list when it starts at 0:00, has at least three
+# entries, and every chapter runs 10 seconds or longer.
+YOUTUBE_MIN_CHAPTERS = 3
+YOUTUBE_MIN_CHAPTER_SECONDS = 10
+
+
+def format_timestamp(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def long_form_chapter_marks(plan: ShortPlan, narration_seconds: float) -> list[tuple[int, str]]:
+    """Locate each chapter in the narration and convert it to a start time.
+
+    Google TTS renders a single narration at a near-constant pace, so a chapter's
+    word offset divided by the total word count is an accurate enough share of the
+    measured audio to place a chapter marker — no forced alignment needed.
+    """
+    if narration_seconds <= 0 or not plan.chapters:
+        return []
+    narration_chars, word_of_char = _normalized_chars_with_word_index(plan.narration)
+    total_words = word_of_char[-1] + 1 if word_of_char else 0
+    if not narration_chars or total_words <= 0:
+        return []
+
+    marks: list[tuple[int, str]] = []
+    search_from = 0
+    for chapter in plan.chapters:
+        needle, _ = _normalized_chars_with_word_index(chapter.opening_sentence)
+        # Match on a prefix: a later editing pass often trims the tail of a
+        # sentence while leaving its opening words untouched.
+        needle = needle[:120]
+        if len(needle) < 12:
+            LOG.info("Chapter %r has no usable opening sentence; skipping its marker.", chapter.title)
+            continue
+        position = narration_chars.find(needle, search_from)
+        if position < 0:
+            LOG.info("Chapter %r does not match the final narration; skipping its marker.", chapter.title)
+            continue
+        search_from = position + len(needle)
+        start = word_of_char[position] / total_words * narration_seconds
+        marks.append((int(start), chapter.title))
+
+    if not marks:
+        return []
+    # The first chapter must sit at 0:00 even if the hook was re-prefixed above it.
+    marks[0] = (0, marks[0][1])
+    spaced: list[tuple[int, str]] = [marks[0]]
+    for start, title in marks[1:]:
+        if start - spaced[-1][0] >= YOUTUBE_MIN_CHAPTER_SECONDS:
+            spaced.append((start, title))
+    if len(spaced) < YOUTUBE_MIN_CHAPTERS or spaced[-1][0] >= narration_seconds:
+        LOG.info(
+            "Only %d usable chapter marker(s) for %.0fs of narration; publishing without a chapter list.",
+            len(spaced),
+            narration_seconds,
+        )
+        return []
+    return spaced
+
+
+def apply_long_form_chapters_to_description(plan: ShortPlan, narration_seconds: float) -> int:
+    """Append the timestamped chapter list to the description. Returns how many were added."""
+    marks = long_form_chapter_marks(plan, narration_seconds)
+    if not marks:
+        return 0
+    block = "\n\nChapters:\n" + "\n".join(
+        f"{format_timestamp(start)} {title}" for start, title in marks
+    )
+    if "\nChapters:\n" in plan.description:
+        LOG.info("Description already carries a chapter list; leaving it as it is.")
+        return len(marks)
+    plan.description = (plan.description + block)[:5000]
+    LOG.info("Added %d YouTube chapter markers to the long-form description.", len(marks))
+    return len(marks)
 
 
 def append_web_source_credits(plan: ShortPlan, sources: list[dict[str, str]]) -> None:
@@ -4280,16 +4878,67 @@ def long_form_clip_ready(clip: Path, expected_duration: float) -> bool:
         return False
 
 
+def long_form_web_search_query(plan: ShortPlan, scene: Scene) -> str:
+    """The phrase to send to Brave/Wikimedia for this beat.
+
+    A visual_prompt describes a cartoon, so searching it returns cartoons or
+    nothing at all. A beat the planner did not tag falls back to the video's own
+    named subject, which at least yields a real photo of the thing being explained.
+
+    The fallback deliberately reads plan.topic rather than plan.thumbnail_text:
+    the packaging pass rewrites thumbnail_text into a teaser ("One Road?"), which
+    is exactly the wrong thing to hand an image search.
+    """
+    tagged = scene.search_query.strip()
+    if tagged:
+        return re.sub(r"\s+", " ", tagged)[:120]
+    anchor = (plan.topic or plan.title or plan.thumbnail_text).strip()
+    return re.sub(r"\s+", " ", anchor)[:120]
+
+
+def long_form_web_scene_indexes(plan: ShortPlan, budget: int) -> set[int]:
+    """Choose which scenes get a real photo, honouring the planner's tags first.
+
+    ``budget`` is a ceiling, not a quota to hit at any cost: a tagged beat asked
+    for a real photo on editorial grounds, so those win the slots. When the
+    planner tags more beats than the budget allows, the survivors are spread
+    across the video instead of clustering in the opening minutes, which is what
+    taking the first N would do.
+    """
+    if budget <= 0 or not plan.scenes:
+        return set()
+    tagged = [
+        index for index, scene in enumerate(plan.scenes, start=1) if scene.search_query.strip()
+    ]
+    if len(tagged) > budget:
+        positions = sorted(distributed_web_image_indexes(len(tagged), budget))
+        return {tagged[position - 1] for position in positions}
+    chosen = set(tagged)
+    # Spend any leftover budget on evenly spaced beats, which fall back to a
+    # subject-level search. Scene 1 is skipped so the opening stays on-brand.
+    for index in sorted(distributed_web_image_indexes(len(plan.scenes), budget)):
+        if len(chosen) >= budget:
+            break
+        if index > 1:
+            chosen.add(index)
+    return chosen
+
+
 def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, output_dir: Path) -> int:
     """Fill every scene image: real web photos first, then OpenAI within budget.
 
-    Pass 1 tries Brave for every scene that has a real-subject search_query
-    (plus the evenly spaced legacy web slots), so real newsmakers appear as
-    themselves. Pass 2 generates the remaining scenes with OpenAI, spreading
-    the image budget across the video so any reused frames never cluster.
+    Pass 1 tries Brave then Wikimedia for the beats chosen for a real photo, so
+    famous places, artifacts, and figures appear as themselves. Pass 2 generates
+    the remaining scenes with OpenAI, spreading the image budget across the video
+    so any reused frames never cluster.
     """
     prepared = 0
-    web_indexes = distributed_web_image_indexes(len(plan.scenes), client.s.brave_web_images_per_long_form)
+    web_indexes = long_form_web_scene_indexes(plan, client.s.brave_web_images_per_long_form)
+    LOG.info(
+        "Long-form visuals: %d scene(s) will try a real web photo, up to %d generated by OpenAI.",
+        len(web_indexes),
+        client.s.long_form_openai_images,
+    )
 
     def image_ready(path: Path) -> bool:
         return path.is_file() and path.stat().st_size >= 1024
@@ -4298,7 +4947,7 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
         image_file = long_form_image_path(output_dir, index)
         if image_ready(image_file):
             continue
-        if not scene.search_query and index not in web_indexes:
+        if index not in web_indexes:
             continue
         source_pages_before = {
             str(source.get("source_page") or "")
@@ -4306,7 +4955,7 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
             if isinstance(source, dict)
         }
         source = client.image(
-            search_query=scene.search_query or scene.visual_prompt,
+            search_query=long_form_web_search_query(plan, scene),
             generation_prompt=image_scene_prompt_horizontal(scene.visual_prompt),
             destination=image_file,
             width=1920,
@@ -4474,10 +5123,11 @@ def render_long_form_from_assets(
         f"trim=duration={target_duration},setpts=PTS-STARTPTS,format=yuv420p,"
         "unsharp=5:5:1.0:5:5:0.0"
     )
+    render_timeout = long_form_render_timeout_seconds(target_duration)
     LOG.info("Concatenating and normalizing %d long-form scene clips...", len(clips))
     run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)],
-        timeout_seconds=LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS,
+        timeout_seconds=render_timeout,
     )
 
     captions = output_dir / "long_captions_en.ass"
@@ -4494,7 +5144,7 @@ def render_long_form_from_assets(
         target_duration,
         settings,
         long_form=True,
-        timeout_seconds=LONG_FORM_FINAL_RENDER_TIMEOUT_SECONDS,
+        timeout_seconds=render_timeout,
     )
     return final_video
 
@@ -5334,6 +5984,9 @@ def run_long_form_flow(
                 output_dir,
             )
             duration = rescale_scene_durations(plan, narration_seconds, "Long-form")
+            # Chapters can only be timed once the narration has actually been
+            # measured, so this runs after TTS and before the description is saved.
+            apply_long_form_chapters_to_description(plan, narration_seconds)
             (output_dir / "plan.json").write_text(
                 json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -5482,6 +6135,7 @@ def run_manual_long_form_flow(
     try:
         narration, narration_seconds = prepare_long_form_narration(plan, tts, output_dir)
         duration = rescale_scene_durations(plan, narration_seconds, "Manual long-form")
+        apply_long_form_chapters_to_description(plan, narration_seconds)
         (output_dir / "plan.json").write_text(
             json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
         )

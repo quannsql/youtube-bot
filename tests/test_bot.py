@@ -178,7 +178,7 @@ def test_vietnamese_comparison_uses_scene_audio_to_retime_pointer_visuals(tmp_pa
     assert captured_durations == part_seconds
 
 
-def test_thumbnail_headline_uses_named_subject_and_wraps_to_two_lines():
+def test_thumbnail_headline_uses_named_subject():
     plan = bot.ShortPlan.from_dict({
         "topic": "The Strait of Hormuz", "angle": "Oil risk", "title": "The Trade Crisis",
         "thumbnail_text": "Strait of Hormuz", "description": "#News", "tags": ["News"],
@@ -187,10 +187,23 @@ def test_thumbnail_headline_uses_named_subject_and_wraps_to_two_lines():
         "scenes": [{"duration": 4, "visual_prompt": "A ship"}],
     })
 
-    headline = bot.thumbnail_headline(plan)
+    assert bot.thumbnail_headline(plan) == "STRAIT OF HORMUZ"
 
-    assert headline == "STRAIT OF HORMUZ"
-    assert bot.thumbnail_headline_lines("THE STRAIT OF HORMUZ AND GLOBAL OIL PRICES RISE") == "THE STRAIT OF HORMUZ\nAND GLOBAL OIL PRICES…"
+
+def test_thumbnail_kicker_comes_from_the_explainer_category():
+    plan = bot.ShortPlan.from_dict({
+        "topic": "The Silk Road", "angle": "Trade", "title": "The Silk Road",
+        "thumbnail_text": "Silk Road", "description": "#History", "tags": ["History"],
+        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
+        "fact_note": "Note", "source_hints": ["History"],
+        "scenes": [{"duration": 4, "visual_prompt": "A camel"}],
+        "topic_category": "civilizations",
+    })
+
+    assert bot.thumbnail_kicker(plan) == "CIVILIZATIONS"
+    # A Short (or a pre-category plan) still gets a usable badge.
+    plan.topic_category = ""
+    assert bot.thumbnail_kicker(plan) == "EXPLAINED"
 
 
 def test_title_is_prefixed_with_the_named_subject_when_the_planner_returns_a_vague_headline():
@@ -724,10 +737,10 @@ def test_settings_accepts_48_second_duration(monkeypatch):
     settings = bot.Settings.from_env()
 
     assert settings.duration == 48
-    # Stick-figure long-form defaults to 15 AI images; an explicit Brave override adds web slots.
-    assert settings.long_form_min_scenes == 20
-    assert settings.long_form_max_scenes == 20
-    assert settings.long_form_openai_images == 15
+    # Long-form defaults to 30 AI images; an explicit Brave override replaces the web slots.
+    assert settings.long_form_min_scenes == 35
+    assert settings.long_form_max_scenes == 35
+    assert settings.long_form_openai_images == 30
     assert settings.brave_web_images_per_long_form == 5
     assert settings.text_model == "gpt-5.4-mini"
     assert settings.text_reasoning_effort == "low"
@@ -741,11 +754,33 @@ def test_settings_reads_long_form_ai_image_count(monkeypatch):
 
     settings = bot.Settings.from_env()
 
-    # No forced Brave slots by default, so every scene is an AI cartoon stick-figure image.
+    # The scene count is the AI budget plus the default real-photo budget.
     assert settings.long_form_openai_images == 18
-    assert settings.brave_web_images_per_long_form == 0
-    assert settings.long_form_min_scenes == 18
-    assert settings.long_form_max_scenes == 18
+    assert settings.brave_web_images_per_long_form == 12
+    assert settings.long_form_min_scenes == 30
+    assert settings.long_form_max_scenes == 30
+
+
+def test_settings_defaults_long_form_to_a_ten_to_fifteen_minute_video(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    for name in ("LONG_FORM_MIN_DURATION_SECONDS", "LONG_FORM_MAX_DURATION_SECONDS",
+                 "LONG_FORM_AI_IMAGES", "BRAVE_WEB_IMAGES_PER_LONG_FORM", "LONG_FORM_AI_THUMBNAIL"):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = bot.Settings.from_env()
+
+    assert settings.long_form_min_duration_seconds == 600
+    assert settings.long_form_max_duration_seconds == 900
+    # ~42 visuals across 10-15 minutes keeps a new image on screen every ~15-21s.
+    assert settings.long_form_min_scenes == 42
+    assert settings.long_form_ai_thumbnail is True
+
+
+def test_settings_can_turn_off_the_generated_thumbnail_hero_image(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.setenv("LONG_FORM_AI_THUMBNAIL", "false")
+
+    assert bot.Settings.from_env().long_form_ai_thumbnail is False
 
 
 def test_settings_reads_corner_overlay_video_options(monkeypatch):
@@ -935,19 +970,15 @@ def test_ass_filter_path_escapes_windows_drive():
     assert escaped.endswith("/captions_en.ass")
 
 
-def test_create_long_form_thumbnail_uses_a_ready_scene_without_openai_image_cost(tmp_path, monkeypatch):
-    first_scene = bot.long_form_image_path(tmp_path, 1)
-    second_scene = bot.long_form_image_path(tmp_path, 2)
-    first_scene.write_bytes(b"x" * 2048)
-    second_scene.write_bytes(b"y" * 2048)
-    font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
-    font_file.parent.mkdir()
-    font_file.write_bytes(b"font")
-    bold_font_file = tmp_path / "fonts" / "DejaVuSans-Bold.ttf"
-    bold_font_file.write_bytes(b"bold-font")
-    logo = tmp_path / "overlay-logo.png"
-    logo.write_bytes(b"png")
-    plan = bot.ShortPlan.from_dict({
+def _write_test_jpeg(path, color=(40, 90, 160), size=(1600, 900)):
+    from PIL import Image
+
+    Image.new("RGB", size, color).save(path, format="JPEG", quality=80)
+    return path
+
+
+def _long_form_plan(**overrides):
+    payload = {
         "topic": "Strait of Hormuz", "angle": "Oil risk", "title": "Strait of Hormuz Risk",
         "thumbnail_text": "Strait of Hormuz", "description": "#News", "tags": ["News"],
         "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
@@ -956,118 +987,149 @@ def test_create_long_form_thumbnail_uses_a_ready_scene_without_openai_image_cost
             {"duration": 4, "visual_prompt": "A tanker"},
             {"duration": 4, "visual_prompt": "A port"},
         ],
-    })
-    commands = []
-
-    def fake_run(command):
-        commands.append(command)
-        Path(command[-1]).write_bytes(b"j" * 4096)
-
-    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(bot, "require_tools", lambda: None)
-    monkeypatch.setattr(bot, "run", fake_run)
-    monkeypatch.setattr(bot.random, "choice", lambda candidates: candidates[-1])
-
-    thumbnail = bot.create_long_form_thumbnail(plan, tmp_path / "long.mp4", tmp_path, bot.Settings(overlay_logo=logo))
-
-    assert thumbnail == tmp_path / "thumbnail.jpg"
-    assert thumbnail.is_file()
-    assert (tmp_path / "thumbnail_headline.txt").read_text(encoding="utf-8") == "STRAIT OF HORMUZ"
-    command = commands[0]
-    assert command[command.index("-i") + 1] == str(second_scene)
-    thumbnail_filter = command[command.index("-filter_complex") + 1]
-    assert "drawtext=" in thumbnail_filter
-    assert "scale=130:-1" in thumbnail_filter
-    assert "DejaVuSans-Bold.ttf" in thumbnail_filter
-    assert "drawbox=x=0:y=480:w=iw:h=240:color=black@0.62" in thumbnail_filter
-    assert "fontcolor=0xFF2D2D:fontsize=78" in thumbnail_filter
-    assert "bordercolor=white@0.95" in thumbnail_filter
+        "topic_category": "events",
+    }
+    payload.update(overrides)
+    return bot.ShortPlan.from_dict(payload)
 
 
-def test_create_long_form_thumbnail_prefers_preserved_wikimedia_source(tmp_path, monkeypatch):
-    wiki_source = tmp_path / "thumbnail_wikimedia_source.jpg"
-    wiki_source.write_bytes(b"w" * 2048)
-    bot.long_form_image_path(tmp_path, 1).write_bytes(b"s" * 2048)
-    font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
-    font_file.parent.mkdir()
-    font_file.write_bytes(b"font")
-    bold_font_file = tmp_path / "fonts" / "DejaVuSans-Bold.ttf"
-    bold_font_file.write_bytes(b"bold-font")
-    plan = bot.ShortPlan.from_dict({
-        "topic": "Ancient City", "angle": "Origins", "title": "Ancient City Explained",
-        "thumbnail_text": "Ancient City", "description": "#History", "tags": ["History"],
-        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
-        "fact_note": "Note", "source_hints": ["History"],
-        "scenes": [{"duration": 4, "visual_prompt": "An ancient city"}],
-    })
-    commands = []
+def test_render_long_form_thumbnail_image_writes_a_valid_youtube_thumbnail(tmp_path):
+    from PIL import Image
 
-    def fake_run(command):
-        commands.append(command)
-        Path(command[-1]).write_bytes(b"j" * 4096)
+    background = _write_test_jpeg(tmp_path / "hero.jpg")
+    destination = tmp_path / "thumbnail.jpg"
 
-    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(bot, "require_tools", lambda: None)
-    monkeypatch.setattr(bot, "run", fake_run)
-    monkeypatch.setattr(
-        bot.random,
-        "choice",
-        lambda _candidates: (_ for _ in ()).throw(AssertionError("random fallback must not run")),
+    bot.render_long_form_thumbnail_image(
+        background=background,
+        headline="STRAIT OF HORMUZ",
+        kicker="WHAT HAPPENED",
+        destination=destination,
     )
+
+    with Image.open(destination) as rendered:
+        assert rendered.size == (bot.THUMBNAIL_WIDTH, bot.THUMBNAIL_HEIGHT)
+        assert rendered.format == "JPEG"
+    assert 1024 <= destination.stat().st_size <= bot.YOUTUBE_THUMBNAIL_MAX_BYTES
+
+
+def test_thumbnail_headline_is_auto_sized_down_so_long_copy_still_fits(tmp_path):
+    from PIL import Image, ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (bot.THUMBNAIL_WIDTH, bot.THUMBNAIL_HEIGHT)))
+    column = bot.THUMBNAIL_TEXT_RIGHT - bot.THUMBNAIL_TEXT_LEFT
+
+    _short_font, short_lines, short_size = bot._fit_headline(draw, "ROME", column)
+    _long_font, long_lines, long_size = bot._fit_headline(
+        draw, "THE FORGOTTEN TUNNEL UNDER CONSTANTINOPLE", column
+    )
+
+    assert short_lines == ["ROME"]
+    # Longer copy must shrink rather than overflow the text column.
+    assert long_size < short_size
+    assert len(long_lines) <= 3
+
+
+def test_create_long_form_thumbnail_generates_a_dedicated_hero_image(tmp_path, monkeypatch):
+    plan = _long_form_plan()
+    image_calls = []
+
+    class FakeImages:
+        def image(self, **kwargs):
+            image_calls.append(kwargs)
+            _write_test_jpeg(kwargs["destination"], color=(180, 60, 30))
+            return "openai"
+
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
 
     thumbnail = bot.create_long_form_thumbnail(
         plan,
         tmp_path / "long.mp4",
         tmp_path,
         bot.Settings(overlay_logo=tmp_path / "missing-logo.png"),
+        image_provider=FakeImages(),
     )
 
     assert thumbnail == tmp_path / "thumbnail.jpg"
-    assert commands[0][commands[0].index("-i") + 1] == str(wiki_source)
+    assert thumbnail.is_file()
+    # Exactly one image credit: the hero is generated once and reused thereafter.
+    assert len(image_calls) == 1
+    assert image_calls[0]["prefer_web"] is False
+    assert image_calls[0]["width"] == 1920 and image_calls[0]["height"] == 1080
+    prompt = image_calls[0]["generation_prompt"]
+    assert "RIGHT side" in prompt
+    assert "LEFT 45 percent" in prompt
+    assert "no words" in prompt
 
 
-def test_create_long_form_thumbnail_generates_ai_background_when_no_scene_exists(tmp_path, monkeypatch):
-    font_file = tmp_path / "fonts" / "DejaVuSans.ttf"
-    font_file.parent.mkdir()
-    font_file.write_bytes(b"font")
-    plan = bot.ShortPlan.from_dict({
-        "topic": "Ancient Trade", "angle": "Origins", "title": "Ancient Trade Explained",
-        "thumbnail_text": "Ancient Trade", "description": "#History", "tags": ["History"],
-        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
-        "fact_note": "Note", "source_hints": ["History"],
-        "scenes": [{"duration": 4, "visual_prompt": "A market"}],
-    })
-    image_calls = []
-    commands = []
+def test_long_form_thumbnail_prompt_uses_the_packaged_hero_subject():
+    plan = _long_form_plan(thumbnail_subject="a startled harbour pilot gripping a ship wheel")
+
+    assert "startled harbour pilot" in bot.long_form_thumbnail_prompt(plan)
+
+
+def test_create_long_form_thumbnail_reuses_a_generated_hero_without_a_second_credit(tmp_path, monkeypatch):
+    plan = _long_form_plan()
+    _write_test_jpeg(tmp_path / "thumbnail_ai_source.jpg")
 
     class FakeImages:
         def image(self, **kwargs):
-            image_calls.append(kwargs)
-            kwargs["destination"].write_bytes(b"a" * 4096)
-            return "openai"
-
-    def fake_run(command):
-        commands.append(command)
-        Path(command[-1]).write_bytes(b"j" * 4096)
+            raise AssertionError("must not spend another image credit")
 
     monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(bot, "require_tools", lambda: None)
-    monkeypatch.setattr(bot, "run", fake_run)
 
     thumbnail = bot.create_long_form_thumbnail(
         plan,
-        tmp_path / "missing-long.mp4",
+        tmp_path / "long.mp4",
         tmp_path,
         bot.Settings(overlay_logo=tmp_path / "missing-logo.png"),
         image_provider=FakeImages(),
     )
 
-    assert thumbnail == tmp_path / "thumbnail.jpg"
-    assert image_calls[0]["prefer_web"] is False
-    assert image_calls[0]["width"] == 1920
-    assert image_calls[0]["height"] == 1080
-    assert "no words" in image_calls[0]["generation_prompt"]
-    assert commands[0][commands[0].index("-i") + 1] == str(tmp_path / "thumbnail_ai_source.jpg")
+    assert thumbnail.is_file()
+
+
+def test_create_long_form_thumbnail_falls_back_to_wikimedia_when_generation_is_off(tmp_path, monkeypatch):
+    plan = _long_form_plan()
+    wiki_source = _write_test_jpeg(tmp_path / "thumbnail_wikimedia_source.jpg", color=(20, 120, 70))
+    _write_test_jpeg(bot.long_form_image_path(tmp_path, 1), color=(120, 20, 70))
+
+    class FakeImages:
+        def image(self, **kwargs):
+            raise AssertionError("generation is disabled for this run")
+
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    settings = bot.Settings(overlay_logo=tmp_path / "missing-logo.png", long_form_ai_thumbnail=False)
+
+    chosen = bot.long_form_thumbnail_background(plan, tmp_path / "long.mp4", tmp_path, settings, FakeImages())
+
+    assert chosen == wiki_source
+    assert bot.create_long_form_thumbnail(
+        plan, tmp_path / "long.mp4", tmp_path, settings, image_provider=FakeImages()
+    ).is_file()
+
+
+def test_long_form_thumbnail_background_falls_back_to_the_opening_scene(tmp_path, monkeypatch):
+    plan = _long_form_plan()
+    first_scene = _write_test_jpeg(bot.long_form_image_path(tmp_path, 1))
+    _write_test_jpeg(bot.long_form_image_path(tmp_path, 2))
+
+    class FakeImages:
+        def image(self, **kwargs):
+            raise bot.BotError("image service is down")
+
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+
+    chosen = bot.long_form_thumbnail_background(
+        plan,
+        tmp_path / "missing-long.mp4",
+        tmp_path,
+        bot.Settings(overlay_logo=tmp_path / "missing-logo.png"),
+        FakeImages(),
+    )
+
+    # Scene 1 is written to show the main subject, so it beats a random later beat.
+    assert chosen == first_scene
+
 
 
 def test_failed_long_thumbnail_never_blocks_upload(tmp_path, monkeypatch):
@@ -2181,7 +2243,7 @@ def test_long_form_images_prefer_real_web_photos_for_named_subjects(tmp_path):
     })
 
     class FakeImages:
-        s = bot.Settings(brave_web_images_per_long_form=0)
+        s = bot.Settings(brave_web_images_per_long_form=2)
 
         def __init__(self):
             self.web_queries = []
@@ -2221,7 +2283,7 @@ def test_long_form_images_preserve_wikimedia_scene_for_thumbnail_priority(tmp_pa
     })
 
     class FakeImages:
-        s = bot.Settings(brave_web_images_per_long_form=0)
+        s = bot.Settings(brave_web_images_per_long_form=1)
 
         def __init__(self):
             self.web_sources = []
@@ -3364,3 +3426,314 @@ def test_saved_token_reports_the_scopes_it_was_actually_granted(tmp_path):
 
     widened = set(Credentials.from_authorized_user_file(str(token), bot.YOUTUBE_SCOPES).scopes or ())
     assert bot.YOUTUBE_PLAYLIST_SCOPE in widened, "the trap this test exists to prevent"
+
+
+def _chaptered_plan(narration, chapters, **overrides):
+    payload = {
+        "topic": "The Silk Road", "angle": "Trade", "title": "The Silk Road Explained",
+        "thumbnail_text": "Silk Road", "description": "A trade route. #History #Explained",
+        "tags": ["History", "Explained"],
+        "hook": narration.split(".")[0].strip() + ".",
+        "narration": narration, "closing_line": narration.split(". ")[-1].strip(),
+        "fact_note": "Note", "source_hints": ["History"],
+        "scenes": [{"duration": 10, "visual_prompt": "A camel caravan"}],
+        "chapters": chapters,
+        "topic_category": "civilizations",
+    }
+    payload.update(overrides)
+    return bot.ShortPlan.from_dict(payload)
+
+
+def test_chapter_bounds_scale_with_the_video_length():
+    assert bot.long_form_chapter_bounds(600) == (5, 7)
+    assert bot.long_form_chapter_bounds(900) == (8, 10)
+    # YouTube needs three chapters before it renders any, so never ask for fewer.
+    assert bot.long_form_chapter_bounds(60)[0] >= 3
+
+
+def test_chapters_survive_the_plan_json_round_trip():
+    plan = _chaptered_plan(
+        "One. Two. Three.",
+        [{"title": "Opening", "question": "Why?", "opening_sentence": "One."}],
+    )
+
+    reloaded = bot.ShortPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+
+    assert reloaded.chapters[0].title == "Opening"
+    assert reloaded.chapters[0].question == "Why?"
+    assert reloaded.chapters[0].opening_sentence == "One."
+
+
+def test_chapter_timestamps_are_derived_from_the_measured_narration():
+    # 100 words across 200 seconds is one word every 2 seconds, so a chapter that
+    # opens on word 25 lands at 0:50 and one opening on word 50 lands at 1:40.
+    words = [f"word{index:03d}" for index in range(100)]
+    words[25] = "Secondchapter"
+    words[50] = "Thirdchapter"
+    narration = " ".join(words) + "."
+    plan = _chaptered_plan(
+        narration,
+        [
+            {"title": "Opening", "opening_sentence": "word000 word001 word002"},
+            {"title": "The turning point", "opening_sentence": "Secondchapter word026 word027"},
+            {"title": "What changed", "opening_sentence": "Thirdchapter word051 word052"},
+        ],
+    )
+
+    marks = bot.long_form_chapter_marks(plan, 200.0)
+
+    assert marks == [(0, "Opening"), (50, "The turning point"), (100, "What changed")]
+
+
+def test_chapter_list_is_appended_to_the_description_once():
+    words = [f"word{index:03d}" for index in range(90)]
+    words[30] = "Middlechapter"
+    words[60] = "Laterchapter"
+    plan = _chaptered_plan(
+        " ".join(words) + ".",
+        [
+            {"title": "Start", "opening_sentence": "word000 word001 word002"},
+            {"title": "Middle part", "opening_sentence": "Middlechapter word031 word032"},
+            {"title": "Later part", "opening_sentence": "Laterchapter word061 word062"},
+        ],
+    )
+
+    assert bot.apply_long_form_chapters_to_description(plan, 180.0) == 3
+    assert "\nChapters:\n0:00 Start" in plan.description
+    assert "1:00 Middle part" in plan.description
+
+    # A resumed job must not stack a second copy onto the same description.
+    assert bot.apply_long_form_chapters_to_description(plan, 180.0) == 3
+    assert plan.description.count("Chapters:") == 1
+
+
+def test_chapter_list_is_skipped_when_the_markers_do_not_match_the_narration():
+    plan = _chaptered_plan(
+        "One. Two. Three. Four.",
+        [
+            {"title": "Start", "opening_sentence": "One."},
+            {"title": "Ghost", "opening_sentence": "A sentence that was edited away entirely."},
+            {"title": "Other ghost", "opening_sentence": "Another sentence nobody wrote."},
+        ],
+    )
+
+    assert bot.long_form_chapter_marks(plan, 200.0) == []
+    assert bot.apply_long_form_chapters_to_description(plan, 200.0) == 0
+    assert "Chapters:" not in plan.description
+
+
+def test_chapters_closer_than_ten_seconds_are_dropped():
+    # YouTube rejects a chapter list where any chapter runs under 10 seconds.
+    words = [f"word{index:03d}" for index in range(100)]
+    words[2] = "Earlychapter"
+    words[50] = "Latechapter"
+    words[75] = "Finalchapter"
+    plan = _chaptered_plan(
+        " ".join(words) + ".",
+        [
+            {"title": "Start", "opening_sentence": "word000 word001"},
+            {"title": "Too soon", "opening_sentence": "Earlychapter word003 word004"},
+            {"title": "Late chapter", "opening_sentence": "Latechapter word051 word052"},
+            {"title": "Final chapter", "opening_sentence": "Finalchapter word076 word077"},
+        ],
+    )
+
+    titles = [title for _start, title in bot.long_form_chapter_marks(plan, 100.0)]
+
+    # Every marker resolves; only the one two seconds after the start is dropped.
+    assert titles == ["Start", "Late chapter", "Final chapter"]
+
+
+def test_format_timestamp_matches_the_youtube_chapter_format():
+    assert bot.format_timestamp(0) == "0:00"
+    assert bot.format_timestamp(65) == "1:05"
+    assert bot.format_timestamp(3725) == "1:02:05"
+
+
+def test_replacing_the_hook_rewrites_the_narration_opening_and_first_chapter():
+    plan = _chaptered_plan(
+        "Old opening line. Then the body continues here.",
+        [{"title": "Start", "opening_sentence": "Old opening line."}],
+    )
+    plan.hook = "Old opening line."
+
+    bot.replace_long_form_hook(plan, "A far better cold open. It asks the real question.")
+
+    assert plan.hook == "A far better cold open. It asks the real question."
+    assert plan.narration.startswith("A far better cold open. It asks the real question.")
+    assert "Then the body continues here." in plan.narration
+    assert "Old opening line" not in plan.narration
+    # The first chapter marker must follow the new opening, not the discarded one.
+    assert plan.chapters[0].opening_sentence == "A far better cold open."
+
+
+def test_replacing_the_hook_prepends_when_the_old_one_is_not_in_the_narration():
+    plan = _chaptered_plan("Body only, no hook here.", [])
+    plan.hook = "A hook that was never spoken."
+
+    bot.replace_long_form_hook(plan, "New hook.")
+
+    assert plan.narration == "New hook. Body only, no hook here."
+
+
+def test_packaging_pass_overwrites_title_hook_and_thumbnail_fields():
+    plan = _chaptered_plan(
+        "Old opening. Body sentence.",
+        [{"title": "Start", "opening_sentence": "Old opening."}],
+    )
+    plan.hook = "Old opening."
+    plan.title = "A vague title"
+
+    class FakeLLM:
+        long_form_reasoning_effort = "medium"
+
+        def chat(self, prompt, **_kwargs):
+            assert "packaging strategist" in prompt
+            return json.dumps({
+                "title_options": ["a", "b", "c", "d", "e"],
+                "title": "The Silk Road: the road that was never one road",
+                "thumbnail_text": "One Road?",
+                "thumbnail_subject": "a startled cartoon merchant clutching a bolt of silk",
+                "hook": "Nobody ever walked the whole Silk Road. So why do we call it a road?",
+                "packaging_note": "Contradiction in the first four words.",
+            })
+
+    bot.optimize_long_form_packaging(FakeLLM(), plan)
+
+    assert plan.title == "The Silk Road: the road that was never one road"
+    assert plan.thumbnail_text == "One Road?"
+    assert plan.thumbnail_subject.startswith("a startled cartoon merchant")
+    assert plan.narration.startswith("Nobody ever walked the whole Silk Road.")
+    assert "Body sentence." in plan.narration
+
+
+def test_packaging_pass_keeps_the_plan_when_the_model_fails():
+    plan = _chaptered_plan("Old opening. Body.", [])
+    plan.hook = "Old opening."
+    original = plan.to_dict()
+
+    class BrokenLLM:
+        long_form_reasoning_effort = "medium"
+
+        def chat(self, _prompt, **_kwargs):
+            raise bot.BotError("model unavailable")
+
+    bot.optimize_long_form_packaging(BrokenLLM(), plan)
+
+    assert plan.to_dict() == original
+
+
+def test_packaging_pass_rejects_vietnam_related_copy():
+    plan = _chaptered_plan("Old opening. Body.", [])
+    plan.hook = "Old opening."
+
+    class VietnamLLM:
+        long_form_reasoning_effort = "medium"
+
+        def chat(self, _prompt, **_kwargs):
+            return json.dumps({"title": "Why Hanoi changed everything", "hook": "Old opening."})
+
+    bot.optimize_long_form_packaging(VietnamLLM(), plan)
+
+    assert plan.title == "The Silk Road Explained"
+
+
+def test_web_search_query_uses_the_planner_tag_and_never_the_cartoon_prompt():
+    plan = _chaptered_plan("Body.", [])
+    tagged = bot.Scene(
+        duration=5,
+        visual_prompt="cartoon stick figures trading silk",
+        search_query="Great Wall of China",
+    )
+    untagged = bot.Scene(duration=5, visual_prompt="cartoon stick figures trading silk")
+
+    assert bot.long_form_web_search_query(plan, tagged) == "Great Wall of China"
+    # An untagged beat falls back to the video's subject, not its cartoon description.
+    assert bot.long_form_web_search_query(plan, untagged) == "The Silk Road"
+
+    # The packaging pass turns thumbnail_text into a teaser, which would be a
+    # useless image search; the fallback must stay on the topic instead.
+    plan.thumbnail_text = "One Road?"
+    assert bot.long_form_web_search_query(plan, untagged) == "The Silk Road"
+
+
+def test_web_scene_selection_prefers_planner_tagged_beats():
+    plan = _chaptered_plan("Body.", [])
+    plan.scenes = [
+        bot.Scene(duration=5, visual_prompt="p"),
+        bot.Scene(duration=5, visual_prompt="p", search_query="Colosseum Rome"),
+        bot.Scene(duration=5, visual_prompt="p"),
+        bot.Scene(duration=5, visual_prompt="p", search_query="Rosetta Stone"),
+        bot.Scene(duration=5, visual_prompt="p"),
+        bot.Scene(duration=5, visual_prompt="p"),
+    ]
+
+    assert {2, 4} <= bot.long_form_web_scene_indexes(plan, 4)
+    # A budget of zero means no real photos at all, planner tags included.
+    assert bot.long_form_web_scene_indexes(plan, 0) == set()
+    # Scene 1 stays a cartoon so the video opens on brand.
+    assert 1 not in bot.long_form_web_scene_indexes(plan, 4)
+
+
+def test_web_scene_selection_spreads_tagged_beats_when_over_budget():
+    plan = _chaptered_plan("Body.", [])
+    plan.scenes = [
+        bot.Scene(duration=5, visual_prompt="p", search_query=f"query {index}")
+        for index in range(1, 13)
+    ]
+
+    chosen = bot.long_form_web_scene_indexes(plan, 3)
+
+    assert len(chosen) == 3
+    # Spread across the video rather than clustered in the first three beats.
+    assert max(chosen) > 6
+
+
+def test_depth_pass_runs_only_when_the_script_is_short_and_never_shrinks_it():
+    plan = _chaptered_plan("Hook here. " + " ".join(f"word{i:03d}" for i in range(50)) + ".", [])
+
+    class ShrinkingLLM:
+        long_form_reasoning_effort = "medium"
+
+        def chat(self, prompt, **_kwargs):
+            assert "too short" in prompt
+            shrunk = plan.to_dict()
+            shrunk["narration"] = "Hook here. Much shorter now."
+            return json.dumps({"plan": shrunk})
+
+    result = bot.expand_long_form_plan(ShrinkingLLM(), plan, 600, 1440, 1560, 5, 7)
+
+    # A "expansion" that came back shorter is rejected rather than shipped.
+    assert result is plan
+
+
+def test_depth_pass_keeps_the_longer_script_and_carries_the_playlist_slug():
+    plan = _chaptered_plan("Hook here. Short body.", [])
+    plan.topic_category = "civilizations"
+
+    class ExpandingLLM:
+        long_form_reasoning_effort = "medium"
+
+        def chat(self, _prompt, **_kwargs):
+            grown = plan.to_dict()
+            grown["narration"] = "Hook here. " + " ".join(f"word{i:03d}" for i in range(300)) + "."
+            grown.pop("topic_category", None)
+            return json.dumps({"plan": grown})
+
+    result = bot.expand_long_form_plan(ExpandingLLM(), plan, 600, 1440, 1560, 5, 7)
+
+    assert bot.spoken_word_count(result.narration) > bot.spoken_word_count(plan.narration)
+    # The expansion schema drops the slug, so the caller must not lose the playlist.
+    assert result.topic_category == "civilizations"
+
+
+def test_depth_pass_falls_back_to_the_original_when_the_model_fails():
+    plan = _chaptered_plan("Hook here. Short body.", [])
+
+    class BrokenLLM:
+        long_form_reasoning_effort = "medium"
+
+        def chat(self, _prompt, **_kwargs):
+            raise bot.BotError("model unavailable")
+
+    assert bot.expand_long_form_plan(BrokenLLM(), plan, 600, 1440, 1560, 5, 7) is plan

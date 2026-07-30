@@ -165,6 +165,8 @@ Cron khuyến nghị cho service Railway riêng:
 
 Cron gọi service mỗi ngày lúc 20:00 Việt Nam. Bot kiểm tra ngày local trong PostgreSQL và chỉ tạo khi video dài gần nhất đã cách ít nhất `LONG_FORM_INTERVAL_DAYS=2` ngày: ví dụ tạo thứ Hai thì thứ Tư mới tạo tiếp. Lưu ý: `LONG_FORM_INTERVAL_DAYS` càng lớn thì càng CHỜ LÂU (chặt hơn), và một video đã tạo TRONG CÙNG NGÀY local luôn chặn lượt tiếp theo cho tới hôm sau. Muốn chạy thử ngay mà bỏ qua chốt lịch: chạy CLI với `--long-form-force-new`, hoặc trên Railway (không có cờ CLI) đặt biến `LONG_FORM_FORCE_NEW=true` cho service Long rồi deploy lại — nhớ trả về `false` sau khi test xong để lịch hằng ngày hoạt động lại.
 
+**Dung lượng Volume:** một video 10-15 phút cần khoảng **450-550 MB trống** lúc cao điểm (42 scene clip + visual track + file cuối). Bot tự xoá clip trung gian ngay sau mỗi bước và dọn thư mục job cũ (>36h) khi bắt đầu, nhưng Volume vẫn nên tối thiểu **1 GB**. Nếu không đủ, bot dừng sớm với thông báo rõ ràng thay vì để FFmpeg chết vì `No space left on device` — lúc đó hãy tăng Volume hoặc giảm `LONG_FORM_MAX_DURATION_SECONDS`.
+
 Long-form config:
 
 ```dotenv

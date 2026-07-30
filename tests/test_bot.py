@@ -4,6 +4,7 @@ import base64
 from io import BytesIO
 import re
 import sys
+import time
 from pathlib import Path
 import requests
 import pytest
@@ -3909,3 +3910,190 @@ def test_shorts_keep_anchoring_on_their_thumbnail_text():
     bot.ensure_title_names_main_subject(plan)
 
     assert plan.title == "Strait of Hormuz: The Trade Crisis"
+
+
+def test_discard_files_reclaims_space_and_tolerates_missing_files(tmp_path):
+    present = tmp_path / "clip.mp4"
+    present.write_bytes(b"x" * (2 * 1024 * 1024))
+    absent = tmp_path / "gone.mp4"
+
+    reclaimed = bot.discard_files([present, absent], "test clip")
+
+    assert not present.exists()
+    assert 1.9 < reclaimed < 2.1
+
+
+def test_purge_removes_old_job_folders_but_never_the_current_one(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    generated = tmp_path / "generated"
+    generated.mkdir()
+
+    current = generated / "long-current"
+    stale = generated / "long-stale"
+    recent = generated / "long-recent"
+    for folder in (current, stale, recent):
+        folder.mkdir()
+        (folder / "long_scene_01.jpg").write_bytes(b"x" * (1024 * 1024))
+
+    old = time.time() - 72 * 3600
+    os.utime(stale, (old, old))
+    os.utime(current, (old, old))  # old, but it is the live job
+
+    reclaimed = bot.purge_stale_generated_dirs(keep=current)
+
+    assert current.is_dir(), "the running job must never be deleted"
+    assert recent.is_dir(), "a folder inside the age window is left alone"
+    assert not stale.exists()
+    assert 0.9 < reclaimed < 1.1
+
+
+def test_purge_is_a_no_op_when_nothing_has_been_generated(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+
+    assert bot.purge_stale_generated_dirs(keep=None) == 0.0
+
+
+def test_render_refuses_to_start_when_the_volume_is_nearly_full(tmp_path, monkeypatch):
+    plan = _chaptered_plan("Hook. Body.", [])
+    plan.scenes = [bot.Scene(duration=10, visual_prompt="beat") for _ in range(3)]
+    for index in range(1, 4):
+        bot.long_form_image_path(tmp_path, index).write_bytes(b"x" * 2048)
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "log_free_disk_space", lambda _path, _label: 120.0)
+    monkeypatch.setattr(
+        bot, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not spend a render"))
+    )
+
+    with pytest.raises(bot.BotError, match="Không đủ dung lượng"):
+        bot.render_long_form_from_assets(
+            plan, tmp_path, 600.0, bot.Settings(), tmp_path / "n.mp3", 600.0
+        )
+
+
+def test_a_finished_visual_track_skips_the_scene_clips_entirely(tmp_path, monkeypatch):
+    plan = _chaptered_plan("Hook. Body.", [])
+    plan.scenes = [bot.Scene(duration=10, visual_prompt="beat") for _ in range(3)]
+    for index in range(1, 4):
+        bot.long_form_image_path(tmp_path, index).write_bytes(b"x" * 2048)
+    visuals = tmp_path / "long_visuals.mp4"
+    visuals.write_bytes(b"v" * 4096)
+    # A leftover clip from the interrupted run must be reclaimed, not re-rendered.
+    leftover = bot.long_form_scene_clips(tmp_path, 3)[0]
+    leftover.write_bytes(b"c" * 4096)
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "log_free_disk_space", lambda _path, _label: 5000.0)
+    monkeypatch.setattr(bot, "media_duration", lambda _path: 30.0)
+    monkeypatch.setattr(bot, "caption_cues_from_text", lambda _text, _seconds: [])
+    monkeypatch.setattr(bot, "write_ass_captions", lambda *_a, **_k: None)
+    muxed = []
+
+    def fake_mux(visual, _narr, _caps, output, *_a, **_k):
+        muxed.append(visual)
+        output.write_bytes(b"f" * 4096)
+
+    monkeypatch.setattr(bot, "mux_video_audio_with_captions", fake_mux)
+    monkeypatch.setattr(
+        bot, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no clip re-render"))
+    )
+
+    final = bot.render_long_form_from_assets(
+        plan, tmp_path, 30.0, bot.Settings(), tmp_path / "n.mp3", 30.0
+    )
+
+    assert final == tmp_path / "long.mp4" and final.is_file()
+    assert muxed == [visuals]
+    assert not leftover.exists()
+    # The silent track is dropped once long.mp4 supersedes it.
+    assert not visuals.exists()
+
+
+def test_long_form_muxes_at_a_leaner_bitrate_than_a_short(tmp_path, monkeypatch):
+    logo = tmp_path / "logo.png"
+    logo.write_bytes(b"png")
+    settings = bot.Settings(overlay_logo=logo)
+    commands = []
+    monkeypatch.setattr(bot, "run", lambda command, timeout_seconds=None: commands.append(command))
+
+    for long_form in (True, False):
+        bot.mux_video_audio_with_captions(
+            tmp_path / "v.mp4", tmp_path / "a.mp3", tmp_path / "c.ass",
+            tmp_path / "out.mp4", 30.0, settings, long_form=long_form,
+        )
+
+    long_crf = commands[0][commands[0].index("-crf") + 1]
+    short_crf = commands[1][commands[1].index("-crf") + 1]
+    # A 10-15 minute Long has to share the volume with its own source track.
+    assert long_crf == "20"
+    assert short_crf == "18"
+
+
+def _make_job_dir(generated, name, mb, age_hours=0):
+    import os
+
+    folder = generated / name
+    folder.mkdir()
+    (folder / "long_scene_01.jpg").write_bytes(b"x" * int(mb * 1024 * 1024))
+    if age_hours:
+        old = time.time() - age_hours * 3600
+        os.utime(folder, (old, old))
+    return folder
+
+
+def test_pressure_purge_removes_todays_debris_that_the_age_cutoff_would_keep(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    current = _make_job_dir(generated, "long-current", 1)
+    fresh_debris = _make_job_dir(generated, "long-failed-today", 2)
+    a_short = _make_job_dir(generated, "20260730-120000-some-short", 1)
+
+    # Still short of what the render needs even after the age-based sweep.
+    monkeypatch.setattr(bot, "log_free_disk_space", lambda _p, _l: 100.0)
+    bot.free_disk_space_for_long_form(current, needed_mb=500.0)
+
+    assert current.is_dir(), "the running job is never deleted"
+    assert not fresh_debris.exists(), "same-day long-form debris must go under pressure"
+    assert a_short.is_dir(), "a Short job sharing the volume is not collateral damage"
+
+
+def test_pressure_purge_leaves_everything_alone_when_there_is_room(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    current = _make_job_dir(generated, "long-current", 1)
+    fresh_debris = _make_job_dir(generated, "long-failed-today", 2)
+
+    monkeypatch.setattr(bot, "log_free_disk_space", lambda _p, _l: 5000.0)
+    bot.free_disk_space_for_long_form(current, needed_mb=500.0)
+
+    assert fresh_debris.is_dir(), "no need to delete anything when the volume has room"
+
+
+def test_render_purges_before_giving_up_on_a_full_volume(tmp_path, monkeypatch):
+    plan = _chaptered_plan("Hook. Body.", [])
+    plan.scenes = [bot.Scene(duration=10, visual_prompt="beat") for _ in range(3)]
+    for index in range(1, 4):
+        bot.long_form_image_path(tmp_path, index).write_bytes(b"x" * 2048)
+    freed = []
+
+    monkeypatch.setattr(bot, "require_tools", lambda: None)
+    monkeypatch.setattr(bot, "log_free_disk_space", lambda _p, _l: 120.0)
+    monkeypatch.setattr(
+        bot, "free_disk_space_for_long_form",
+        lambda output_dir, needed_mb: (freed.append(needed_mb), 120.0)[1],
+    )
+    monkeypatch.setattr(
+        bot, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not render"))
+    )
+
+    with pytest.raises(bot.BotError, match="Không đủ dung lượng"):
+        bot.render_long_form_from_assets(
+            plan, tmp_path, 600.0, bot.Settings(), tmp_path / "n.mp3", 600.0
+        )
+
+    # It tries to reclaim space before declaring the volume too small.
+    assert freed == [bot.long_form_render_disk_requirement_mb(600.0)]

@@ -4237,7 +4237,11 @@ def mux_video_audio_with_captions(
         "-t", str(target_duration),
         "-c:v", "libx264",
         "-preset", "veryfast",
-        "-crf", "18",
+        # A 10-15 minute Long at CRF 18 is a ~260 MB upload that has to sit on the
+        # volume beside its source track. CRF 20 is visually indistinguishable on
+        # flat cartoon art and YouTube re-encodes it regardless. Shorts are 60s, so
+        # disk is never the constraint there and they keep the higher quality.
+        "-crf", "20" if long_form else "18",
         "-c:a", "aac",
         "-movflags", "+faststart",
         str(output),
@@ -4922,6 +4926,123 @@ def long_form_image_path(output_dir: Path, index: int) -> Path:
     return output_dir / f"long_scene_{index:02d}.jpg"
 
 
+def long_form_scene_clips(output_dir: Path, scene_count: int) -> list[Path]:
+    return [output_dir / f"long_scene_{index:02d}.mp4" for index in range(1, scene_count + 1)]
+
+
+def log_free_disk_space(path: Path, label: str) -> float:
+    """Report free space on the volume. Returns free MB (0.0 if it cannot be read).
+
+    A 10-15 minute render writes several hundred MB of intermediates, and the
+    failure mode when the volume fills is an opaque FFmpeg exit code, so the
+    numbers around each large write are worth having in the log.
+    """
+    try:
+        usage = shutil.disk_usage(path if path.exists() else path.parent)
+    except OSError as exc:
+        LOG.debug("Could not read disk usage for %s: %s", path, exc)
+        return 0.0
+    free_mb = usage.free / (1024 * 1024)
+    LOG.info(
+        "Disk %s: %.0f MB free of %.0f MB on the volume.",
+        label,
+        free_mb,
+        usage.total / (1024 * 1024),
+    )
+    return free_mb
+
+
+def discard_files(paths: list[Path], label: str) -> float:
+    """Delete finished intermediates. Returns the MB reclaimed."""
+    reclaimed = 0.0
+    removed = 0
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            path.unlink()
+        except OSError as exc:
+            LOG.warning("Could not remove %s %s: %s", label, path.name, exc)
+            continue
+        reclaimed += size / (1024 * 1024)
+        removed += 1
+    if removed:
+        LOG.info("Reclaimed %.0f MB by removing %d %s file(s).", reclaimed, removed, label)
+    return reclaimed
+
+
+def purge_stale_generated_dirs(
+    keep: Path | None,
+    max_age_hours: int = 36,
+    name_prefix: str = "",
+) -> float:
+    """Delete leftover job folders from earlier runs. Returns the MB reclaimed.
+
+    A failed run never reaches the publish-time cleanup, so its several hundred MB
+    of images and clips stay on the volume forever. Long-form only runs every few
+    days, so anything older than a day and a half is certainly dead.
+
+    ``max_age_hours=0`` ignores age entirely. Pair it with ``name_prefix`` so the
+    caller deletes only the family of jobs it owns.
+    """
+    generated = DATA_DIR / "generated"
+    if not generated.is_dir():
+        return 0.0
+    cutoff = time.time() - max_age_hours * 3600
+    reclaimed = 0.0
+    for candidate in generated.iterdir():
+        try:
+            if not candidate.is_dir() or not candidate.name.startswith(name_prefix):
+                continue
+            if keep is not None and candidate.resolve() == keep.resolve():
+                continue
+            if max_age_hours > 0 and candidate.stat().st_mtime >= cutoff:
+                continue
+            size = sum(item.stat().st_size for item in candidate.rglob("*") if item.is_file())
+            shutil.rmtree(candidate)
+        except OSError as exc:
+            LOG.warning("Could not remove stale job folder %s: %s", candidate.name, exc)
+            continue
+        reclaimed += size / (1024 * 1024)
+        LOG.info("Removed stale job folder %s (%.0f MB).", candidate.name, size / (1024 * 1024))
+    return reclaimed
+
+
+def free_disk_space_for_long_form(output_dir: Path, needed_mb: float) -> float:
+    """Make room for the render, escalating only as far as the volume forces.
+
+    Age is a poor signal on its own: the folders that fill the volume are usually
+    from failed runs earlier the same day, which a 36-hour cutoff will not touch.
+    Disk pressure is the real trigger, so when space is still short every other
+    long-form job folder goes, regardless of age. Only ``long-`` folders are
+    touched, so a Short job sharing the volume is never collateral damage.
+    """
+    purge_stale_generated_dirs(keep=output_dir)
+    free_mb = log_free_disk_space(output_dir, "after removing stale job folders")
+    if free_mb <= 0 or free_mb >= needed_mb:
+        return free_mb
+    LOG.warning(
+        "Only %.0f MB free but this render needs about %.0f MB; removing every other "
+        "long-form job folder regardless of age.",
+        free_mb,
+        needed_mb,
+    )
+    purge_stale_generated_dirs(keep=output_dir, max_age_hours=0, name_prefix="long-")
+    return log_free_disk_space(output_dir, "after the full long-form purge")
+
+
+def long_form_render_disk_requirement_mb(target_duration: float) -> float:
+    """Peak volume space a render of this length needs, plus headroom.
+
+    Measured over a full 684-second run: scene clips ~0.21 MB/s, the visual track
+    ~0.37 MB/s, and the muxed result ~0.23 MB/s, with the peak falling during the
+    mux where the last two coexist — about 0.62 MB/s plus ~45 MB of scene JPEGs and
+    narration. 0.8 leaves roughly 30% headroom for a busier image or a longer tail.
+    """
+    return target_duration * 0.8 + 80
+
+
 def long_form_assets_ready(plan: ShortPlan, output_dir: Path) -> bool:
     return all(long_form_image_path(output_dir, index).is_file() for index in range(1, len(plan.scenes) + 1))
 
@@ -5118,6 +5239,31 @@ def render_long_form_from_assets(
     require_tools()
     if not long_form_assets_ready(plan, output_dir):
         raise BotError("Long-form images are incomplete; the one-shot run cannot continue.")
+    free_mb = log_free_disk_space(output_dir, "before long-form render")
+    # Failing here names the problem, instead of letting FFmpeg die three minutes
+    # in with an exit code and a full volume. Reclaim what this job owns first —
+    # the usual cause is debris from a failed run earlier the same day.
+    needed_mb = long_form_render_disk_requirement_mb(target_duration)
+    if 0 < free_mb < needed_mb:
+        free_mb = free_disk_space_for_long_form(output_dir, needed_mb)
+    if 0 < free_mb < needed_mb:
+        raise BotError(
+            f"Không đủ dung lượng để render long-form: còn {free_mb:.0f} MB, "
+            f"cần khoảng {needed_mb:.0f} MB cho {target_duration:.0f}s video. "
+            "Tăng dung lượng Volume trên Railway, hoặc giảm LONG_FORM_MAX_DURATION_SECONDS."
+        )
+    visuals = output_dir / "long_visuals.mp4"
+    concat = output_dir / "long_clips.txt"
+
+    # A finished concat makes all 42 scene clips redundant, so the clip stage is
+    # skipped wholesale rather than re-rendered only to be deleted again below.
+    if long_form_clip_ready(visuals, target_duration):
+        LOG.info("Reusing the concatenated long-form visual track; skipping the scene clips.")
+        discard_files(long_form_scene_clips(output_dir, len(plan.scenes)), "stale long-form scene clip")
+        return mux_long_form_final(
+            plan, output_dir, visuals, narration, narration_seconds, target_duration, settings
+        )
+
     LOG.info("Rendering horizontal long-form video with %d scenes...", len(plan.scenes))
     clips: list[Path] = []
     previous_image: Path | None = None
@@ -5152,7 +5298,10 @@ def render_long_form_from_assets(
             "ffmpeg", "-y", "-loop", "1", "-i", str(image_file),
             "-t", str(scene.duration),
             "-vf", zoom_filter,
-            "-c:v", "libx264", "-preset", "superfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            # veryfast/23 rather than superfast/20. At 42 scenes these clips are the
+            # largest thing on the volume, superfast compresses a slow zoom over flat
+            # cartoon art very poorly, and the track is re-encoded twice more anyway.
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
             str(clip),
         ]
         try:
@@ -5179,9 +5328,7 @@ def render_long_form_from_assets(
         previous_image = image_file
         clips.append(clip)
 
-    concat = output_dir / "long_clips.txt"
     concat.write_text("".join(f"file '{clip.resolve().as_posix()}'\n" for clip in clips), encoding="utf-8")
-    visuals = output_dir / "long_visuals.mp4"
     video_filter = (
         "scale=1920:1080:force_original_aspect_ratio=increase,"
         "crop=1920:1080,fps=30,"
@@ -5192,10 +5339,33 @@ def render_long_form_from_assets(
     render_timeout = long_form_render_timeout_seconds(target_duration)
     LOG.info("Concatenating and normalizing %d long-form scene clips...", len(clips))
     run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", str(visuals)],
+        # CRF 20 rather than 18: this track is re-encoded by the mux below, so
+        # spending bits on quality higher than the source clips only burns disk.
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-an", "-vf", video_filter,
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", str(visuals)],
         timeout_seconds=render_timeout,
     )
+    # The clips are now baked into the visual track. At 42 scenes they are the
+    # single largest thing on the volume, and the mux still has to write a file of
+    # its own, so free them before that write rather than after the run.
+    discard_files(clips + [concat], "long-form scene clip")
+    log_free_disk_space(output_dir, "after concatenating scene clips")
 
+    return mux_long_form_final(
+        plan, output_dir, visuals, narration, narration_seconds, target_duration, settings
+    )
+
+
+def mux_long_form_final(
+    plan: ShortPlan,
+    output_dir: Path,
+    visuals: Path,
+    narration: Path,
+    narration_seconds: float,
+    target_duration: float,
+    settings: Settings,
+) -> Path:
+    """Burn in captions, narration, and the logo, then drop the visual-only track."""
     captions = output_dir / "long_captions_en.ass"
     caption_seconds = min(narration_seconds, target_duration)
     cues = caption_cues_from_text(plan.narration, caption_seconds)
@@ -5210,8 +5380,12 @@ def render_long_form_from_assets(
         target_duration,
         settings,
         long_form=True,
-        timeout_seconds=render_timeout,
+        timeout_seconds=long_form_render_timeout_seconds(target_duration),
     )
+    # long.mp4 supersedes the silent track; keeping both doubles the video's
+    # footprint on the volume for the rest of the run.
+    discard_files([visuals], "long-form intermediate visual track")
+    log_free_disk_space(output_dir, "after muxing the final video")
     return final_video
 
 
@@ -6029,6 +6203,11 @@ def run_long_form_flow(
         narration = output_dir / "long_narration.mp3"
         narration_seconds = duration
         archive.mark(record_id, "rendering")
+        # Runs that failed before publishing never reach the cleanup below, and a
+        # 10-15 minute job leaves hundreds of MB behind each time.
+        free_disk_space_for_long_form(
+            output_dir, long_form_render_disk_requirement_mb(duration)
+        )
     else:
         due, days_since = long_form_is_due(archive, settings)
         if not force_new and not due:
@@ -6041,6 +6220,11 @@ def run_long_form_flow(
         plan, output_dir, duration, record_id = create_long_form_job(llm, archive, theme, settings)
         narration = output_dir / "long_narration.mp3"
         narration_seconds = 0.0
+        # Reclaim earlier failed runs before this one starts writing its own
+        # images and clips, not after the volume is already full.
+        free_disk_space_for_long_form(
+            output_dir, long_form_render_disk_requirement_mb(duration)
+        )
     rendered = False
     try:
         if not resumed:
@@ -6194,6 +6378,9 @@ def run_manual_long_form_flow(
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_dir = DATA_DIR / "generated" / f"long-manual-{datetime.now():%Y%m%d-%H%M%S}-{slug(plan.topic)}"
     output_dir.mkdir(parents=True)
+    free_disk_space_for_long_form(
+        output_dir, long_form_render_disk_requirement_mb(duration)
+    )
     (output_dir / "plan.json").write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     record_id = archive.reserve(plan, output_dir)
     youtube_id: str | None = None

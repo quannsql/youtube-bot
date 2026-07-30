@@ -174,8 +174,12 @@ class Settings:
     text_reasoning_effort: str = "low"
     text_long_form_reasoning_effort: str = "medium"
     text_max_output_tokens: int = 16000
+    # Long-form emits far more than a Short: a 1400-2300 word narration, 42 scene
+    # objects, and a chapter list in one JSON. On the Responses API this ceiling
+    # also has to cover reasoning tokens, so it needs its own much larger budget.
+    text_long_form_max_output_tokens: int = 48000
     text_connect_timeout: int = 30
-    text_read_timeout: int = 300
+    text_read_timeout: int = 600
     text_attempts: int = 3
     text_retry_backoff_seconds: int = 5
     brave_image_search_endpoint: str = "https://api.search.brave.com/res/v1/images/search"
@@ -290,8 +294,11 @@ class Settings:
             text_reasoning_effort=text_reasoning_effort,
             text_long_form_reasoning_effort=text_long_form_reasoning_effort,
             text_max_output_tokens=max(1024, int(os.getenv("OPENAI_TEXT_MAX_OUTPUT_TOKENS", "16000"))),
+            text_long_form_max_output_tokens=max(
+                4096, int(os.getenv("OPENAI_TEXT_LONG_FORM_MAX_OUTPUT_TOKENS", "48000"))
+            ),
             text_connect_timeout=max(1, int(os.getenv("OPENAI_TEXT_CONNECT_TIMEOUT_SECONDS", "30"))),
-            text_read_timeout=max(1, int(os.getenv("OPENAI_TEXT_READ_TIMEOUT_SECONDS", "300"))),
+            text_read_timeout=max(1, int(os.getenv("OPENAI_TEXT_READ_TIMEOUT_SECONDS", "600"))),
             text_attempts=max(1, int(os.getenv("OPENAI_TEXT_ATTEMPTS", "3"))),
             text_retry_backoff_seconds=max(0, int(os.getenv("OPENAI_TEXT_RETRY_BACKOFF_SECONDS", "5"))),
             brave_search_attempts=max(1, int(os.getenv("BRAVE_SEARCH_ATTEMPTS", "3"))),
@@ -1023,9 +1030,14 @@ class Archive:
 class OpenAITextClient:
     """Generate JSON planning content through the official OpenAI Responses API."""
 
+    # Absolute stop for the escalation below, so a pathological run cannot bill an
+    # unbounded number of output tokens.
+    MAX_OUTPUT_TOKEN_CEILING = 128000
+
     def __init__(self, settings: Settings) -> None:
         self.s = settings
         self.long_form_reasoning_effort = settings.text_long_form_reasoning_effort
+        self.long_form_max_output_tokens = settings.text_long_form_max_output_tokens
         self.headers = {
             "Authorization": f"Bearer {settings.openai_api_key}",
             "Content-Type": "application/json",
@@ -1064,6 +1076,7 @@ class OpenAITextClient:
         prompt: str,
         temperature: float = 0.55,
         reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> str:
         # Keep temperature in the public method for compatibility with the planner.
         # GPT-5.4 mini uses reasoning effort; temperature is intentionally omitted.
@@ -1074,7 +1087,7 @@ class OpenAITextClient:
             "instructions": "Return only valid JSON. Do not use Markdown fences or add commentary outside the JSON.",
             "input": prompt,
             "reasoning": {"effort": effort},
-            "max_output_tokens": self.s.text_max_output_tokens,
+            "max_output_tokens": max_output_tokens or self.s.text_max_output_tokens,
         }
         retryable_statuses = {408, 409, 429, 500, 502, 503, 504}
         last_error: Exception | None = None
@@ -1109,6 +1122,29 @@ class OpenAITextClient:
                         if response_payload.get("status") == "incomplete":
                             reason = response_payload.get("incomplete_details", {}).get("reason", "unknown")
                             last_error = BotError(f"OpenAI text response chưa hoàn tất: {reason}")
+                            # Retrying an identical payload after running out of
+                            # output tokens fails identically every time, so raise
+                            # the ceiling instead of burning the remaining attempts.
+                            if reason == "max_output_tokens":
+                                raised = min(
+                                    int(payload["max_output_tokens"] * 1.75),
+                                    self.MAX_OUTPUT_TOKEN_CEILING,
+                                )
+                                if raised > payload["max_output_tokens"]:
+                                    LOG.warning(
+                                        "Response hit the %d output-token ceiling; retrying with %d.",
+                                        payload["max_output_tokens"],
+                                        raised,
+                                    )
+                                    payload["max_output_tokens"] = raised
+                                else:
+                                    LOG.error(
+                                        "Response hit the hard %d output-token ceiling. Shorten the "
+                                        "plan (lower LONG_FORM_AI_IMAGES / LONG_FORM_MAX_DURATION_SECONDS) "
+                                        "or raise OPENAI_TEXT_LONG_FORM_MAX_OUTPUT_TOKENS.",
+                                        self.MAX_OUTPUT_TOKEN_CEILING,
+                                    )
+                                    raise last_error
                         else:
                             text = self._output_text(response_payload)
                             if text:
@@ -2850,6 +2886,17 @@ def ensure_title_names_main_subject(plan: ShortPlan) -> None:
 
 def normalize_scene_count(plan: ShortPlan, target_count: int) -> None:
     """Keep the same timeline while enforcing the visual budget, reusing concepts when needed."""
+    supplied = len(plan.scenes)
+    if supplied < target_count * 0.75:
+        # Splitting fills the slots but shows the same picture twice in a row, so a
+        # large shortfall quietly undoes the point of a bigger image budget.
+        LOG.warning(
+            "Planner returned only %d of %d scenes; %d slot(s) will repeat a neighbouring "
+            "visual. Lower LONG_FORM_AI_IMAGES or check whether the model is truncating.",
+            supplied,
+            target_count,
+            target_count - supplied,
+        )
     while len(plan.scenes) < target_count:
         index = max(range(len(plan.scenes)), key=lambda item: plan.scenes[item].duration)
         scene = plan.scenes[index]
@@ -3002,6 +3049,7 @@ Narration: {json.dumps(plan.narration, ensure_ascii=False)}'''
                 prompt,
                 temperature=0.7,
                 reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+                max_output_tokens=getattr(llm, "long_form_max_output_tokens", None),
             )
         )
     except Exception as exc:
@@ -3086,6 +3134,7 @@ Return exactly:
                 expand_prompt,
                 temperature=0.45,
                 reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+                max_output_tokens=getattr(llm, "long_form_max_output_tokens", None),
             )
         )
         if not isinstance(expanded.get("plan"), dict):
@@ -3172,6 +3221,7 @@ Return raw JSON only using exactly this schema:
                 prompt,
                 temperature=0.55,
                 reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+                max_output_tokens=getattr(llm, "long_form_max_output_tokens", None),
             )
         )
     )
@@ -3206,6 +3256,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
             review_prompt,
             temperature=0.35,
             reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+            max_output_tokens=getattr(llm, "long_form_max_output_tokens", None),
         )
     )
     if not isinstance(reviewed.get("plan"), dict):
@@ -3439,6 +3490,7 @@ Return raw JSON only using exactly this schema:
                 prompt,
                 temperature=0.5,
                 reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+                max_output_tokens=getattr(llm, "long_form_max_output_tokens", None),
             )
         )
     )
@@ -3461,6 +3513,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
                 review_prompt,
                 temperature=0.35,
                 reasoning_effort=getattr(llm, "long_form_reasoning_effort", "medium"),
+                max_output_tokens=getattr(llm, "long_form_max_output_tokens", None),
             )
         )
         plan_dict = reviewed.get("plan") if isinstance(reviewed.get("plan"), dict) else reviewed

@@ -1886,7 +1886,7 @@ def test_plan_long_form_builds_educational_explainer(tmp_path):
                 {"quality_check": {"clarity_score": 9, "engagement_score": 8}, "plan": plan},
             ]
 
-        def chat(self, _prompt, temperature=0.55, reasoning_effort=None):
+        def chat(self, _prompt, temperature=0.55, reasoning_effort=None, max_output_tokens=None):
             return json.dumps(self.responses.pop(0))
 
     result = bot.plan_long_form(
@@ -1933,7 +1933,7 @@ def test_plan_long_form_explainer_meets_word_budget(tmp_path):
                 {"quality_check": {"clarity_score": 9, "engagement_score": 8}, "plan": plan},
             ]
 
-        def chat(self, _prompt, temperature=0.55, reasoning_effort=None):
+        def chat(self, _prompt, temperature=0.55, reasoning_effort=None, max_output_tokens=None):
             return json.dumps(self.responses.pop(0))
 
     result = bot.plan_long_form(
@@ -3737,3 +3737,109 @@ def test_depth_pass_falls_back_to_the_original_when_the_model_fails():
             raise bot.BotError("model unavailable")
 
     assert bot.expand_long_form_plan(BrokenLLM(), plan, 600, 1440, 1560, 5, 7) is plan
+
+
+def _responses_reply(status_code=200, payload=None):
+    class Reply:
+        ok = status_code < 400
+        headers = {}
+
+        def __init__(self):
+            self.status_code = status_code
+
+        def json(self):
+            return payload
+
+    return Reply()
+
+
+def test_long_form_calls_get_their_own_output_token_budget(monkeypatch):
+    settings = bot.Settings(
+        openai_api_key="k", text_max_output_tokens=16000, text_long_form_max_output_tokens=48000
+    )
+    client = bot.OpenAITextClient(settings)
+    seen = []
+
+    def fake_post(_url, headers=None, json=None, timeout=None):
+        seen.append(json["max_output_tokens"])
+        return _responses_reply(payload={"status": "completed", "output_text": "{}"})
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+
+    client.chat("short prompt")
+    client.chat("long prompt", max_output_tokens=client.long_form_max_output_tokens)
+
+    assert seen == [16000, 48000]
+
+
+def test_running_out_of_output_tokens_retries_with_a_higher_ceiling(monkeypatch):
+    settings = bot.Settings(openai_api_key="k", text_max_output_tokens=16000, text_attempts=3)
+    client = bot.OpenAITextClient(settings)
+    seen = []
+
+    def fake_post(_url, headers=None, json=None, timeout=None):
+        seen.append(json["max_output_tokens"])
+        if len(seen) < 3:
+            return _responses_reply(payload={
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            })
+        return _responses_reply(payload={"status": "completed", "output_text": '{"ok":true}'})
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    monkeypatch.setattr(bot.time, "sleep", lambda _seconds: None)
+
+    assert client.chat("prompt") == '{"ok":true}'
+    # Repeating the identical payload could never succeed, so each retry raises the cap.
+    assert seen == [16000, 28000, 49000]
+
+
+def test_hitting_the_hard_output_token_ceiling_fails_fast(monkeypatch):
+    settings = bot.Settings(
+        openai_api_key="k",
+        text_max_output_tokens=bot.OpenAITextClient.MAX_OUTPUT_TOKEN_CEILING,
+        text_attempts=3,
+    )
+    client = bot.OpenAITextClient(settings)
+    calls = []
+
+    def fake_post(_url, headers=None, json=None, timeout=None):
+        calls.append(json["max_output_tokens"])
+        return _responses_reply(payload={
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+        })
+
+    monkeypatch.setattr(bot.requests, "post", fake_post)
+    monkeypatch.setattr(bot.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(bot.BotError):
+        client.chat("prompt")
+    # No room left to escalate, so it stops instead of burning the other attempts.
+    assert len(calls) == 1
+
+
+def test_settings_read_the_long_form_output_token_budget(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.delenv("OPENAI_TEXT_LONG_FORM_MAX_OUTPUT_TOKENS", raising=False)
+
+    settings = bot.Settings.from_env()
+
+    assert settings.text_max_output_tokens == 16000
+    assert settings.text_long_form_max_output_tokens == 48000
+    assert settings.text_read_timeout == 600
+
+    monkeypatch.setenv("OPENAI_TEXT_LONG_FORM_MAX_OUTPUT_TOKENS", "64000")
+    assert bot.Settings.from_env().text_long_form_max_output_tokens == 64000
+
+
+def test_a_large_scene_shortfall_is_logged_rather_than_hidden(caplog):
+    plan = _chaptered_plan("Hook. Body.", [])
+    plan.scenes = [bot.Scene(duration=60, visual_prompt=f"beat {i}") for i in range(4)]
+
+    with caplog.at_level("WARNING"):
+        bot.normalize_scene_count(plan, 42)
+
+    assert len(plan.scenes) == 42
+    assert abs(sum(scene.duration for scene in plan.scenes) - 240) < 0.1
+    assert any("only 4 of 42 scenes" in record.getMessage() for record in caplog.records)

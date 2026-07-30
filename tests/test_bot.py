@@ -3843,3 +3843,69 @@ def test_a_large_scene_shortfall_is_logged_rather_than_hidden(caplog):
     assert len(plan.scenes) == 42
     assert abs(sum(scene.duration for scene in plan.scenes) - 240) < 0.1
     assert any("only 4 of 42 scenes" in record.getMessage() for record in caplog.records)
+
+
+def test_scene_durations_are_snapped_to_target_after_a_rewriting_pass():
+    # Regression: the depth pass re-emits scenes and their durations drift. The
+    # production failure was 667.72s of scenes against a 684s target, which is well
+    # outside the +/-2s nudge inside validate_long_form_plan.
+    plan = _chaptered_plan("Hook. Body.", [])
+    plan.scenes = [bot.Scene(duration=15.9, visual_prompt=f"beat {i}") for i in range(42)]
+    assert abs(sum(s.duration for s in plan.scenes) - 684) > 2
+
+    bot.rescale_scene_durations(plan, 684.0, "Long-form plan")
+
+    assert abs(sum(scene.duration for scene in plan.scenes) - 684) < 0.01
+    # Snapping must not disturb the visual budget.
+    assert len(plan.scenes) == 42
+    bot.validate_long_form_plan(plan, 684, 1, 100000, 42)
+
+
+def test_a_teaser_thumbnail_never_gets_prefixed_onto_a_good_long_form_title():
+    # Regression: packaging set thumbnail_text='No Fuel', and anchoring on it turned
+    # "Stalingrad: How the Sixth Army Got Trapped" into "No Fuel: Stalingrad: ...".
+    plan = _chaptered_plan("Hook. Body.", [])
+    plan.topic = "The Battle of Stalingrad"
+    plan.title = "Stalingrad: How the Sixth Army Got Trapped"
+    plan.thumbnail_text = "No Fuel"
+
+    bot.ensure_title_names_main_subject(plan, anchor=plan.topic)
+
+    assert plan.title == "Stalingrad: How the Sixth Army Got Trapped"
+
+
+def test_a_genuinely_vague_long_form_title_is_still_prefixed_with_its_topic():
+    plan = _chaptered_plan("Hook. Body.", [])
+    plan.topic = "The Battle of Stalingrad"
+    plan.title = "The Turning Point Nobody Expected"
+    plan.thumbnail_text = "No Fuel"
+
+    bot.ensure_title_names_main_subject(plan, anchor=plan.topic)
+
+    assert plan.title == "The Battle of Stalingrad: The Turning Point Nobody Expected"
+
+
+def test_a_sentence_length_topic_is_trimmed_before_it_is_prefixed():
+    plan = _chaptered_plan("Hook. Body.", [])
+    plan.topic = "How the Roman aqueducts carried fresh water into the growing city every day"
+    plan.title = "A Story Of Engineering"
+
+    bot.ensure_title_names_main_subject(plan, anchor=plan.topic)
+
+    assert plan.title.startswith("How the Roman aqueducts carried fresh: ")
+    assert len(plan.title) <= 100
+
+
+def test_shorts_keep_anchoring_on_their_thumbnail_text():
+    # Shorts never run the packaging pass, so thumbnail_text still names the subject.
+    plan = bot.ShortPlan.from_dict({
+        "topic": "The Strait of Hormuz", "angle": "Oil risk", "title": "The Trade Crisis",
+        "thumbnail_text": "Strait of Hormuz", "description": "#News", "tags": ["News"],
+        "hook": "Hook.", "narration": "Hook.", "closing_line": "Hook.",
+        "fact_note": "Note", "source_hints": ["News"],
+        "scenes": [{"duration": 4, "visual_prompt": "A ship"}],
+    })
+
+    bot.ensure_title_names_main_subject(plan)
+
+    assert plan.title == "Strait of Hormuz: The Trade Crisis"

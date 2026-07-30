@@ -2581,8 +2581,8 @@ TITLE_SUBJECT_STOP_WORDS = {
 }
 
 
-def title_mentions_main_subject(plan: ShortPlan) -> bool:
-    anchor = plan.thumbnail_text or plan.topic
+def title_mentions_main_subject(plan: ShortPlan, anchor: str = "") -> bool:
+    anchor = anchor or plan.thumbnail_text or plan.topic
     anchor_terms = {
         term.lower()
         for term in re.findall(r"[A-Za-z0-9]+", anchor)
@@ -2871,11 +2871,19 @@ def synchronize_social_scene_voiceovers(social: SocialPlan, plan: ShortPlan) -> 
     social.narration = _normalized_voiceover(" ".join(segments))
 
 
-def ensure_title_names_main_subject(plan: ShortPlan) -> None:
-    """Prevent a vague headline when the planner omitted its named main subject."""
-    if title_mentions_main_subject(plan):
+def ensure_title_names_main_subject(plan: ShortPlan, anchor: str = "") -> None:
+    """Prevent a vague headline when the planner omitted its named main subject.
+
+    Long-form callers pass ``anchor=plan.topic``. They must not fall back to
+    thumbnail_text: the packaging pass rewrites it into a teaser ("No Fuel"), and
+    using a teaser as the subject anchor prefixes it onto a title that already
+    named the subject perfectly well.
+    """
+    if title_mentions_main_subject(plan, anchor):
         return
-    anchor = re.sub(r"\s+", " ", (plan.thumbnail_text or plan.topic).strip())
+    anchor = re.sub(r"\s+", " ", (anchor or plan.thumbnail_text or plan.topic).strip())
+    # A topic can be a full sentence; only its opening words belong in a title.
+    anchor = " ".join(anchor.split()[:6])
     if not anchor:
         return
     prefix = f"{anchor}: "
@@ -3274,9 +3282,14 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
     # open by prefix, which needs the narration to actually start with it.
     ensure_long_form_hook_and_closing(plan)
     optimize_long_form_packaging(llm, plan)
-    ensure_title_names_main_subject(plan)
+    ensure_title_names_main_subject(plan, anchor=plan.topic)
     ensure_long_form_hook_and_closing(plan)
     normalize_scene_count(plan, scene_count)
+    # Every pass that re-emits the plan lets the scene durations drift a little, and
+    # after the depth pass the drift is large enough to trip the total-duration gate.
+    # These durations are only proportions anyway: the render rescales them again to
+    # the measured narration, so snapping them to the target here loses nothing.
+    rescale_scene_durations(plan, float(duration), "Long-form plan")
     validate_long_form_plan(plan, duration, min_words, max_words, scene_count)
     quality = reviewed.get("quality_check", {})
     LOG.info(
@@ -3532,7 +3545,7 @@ Draft: {json.dumps(draft.to_dict(), ensure_ascii=False)}'''
         plan.topic_category = category.slug
     ensure_long_form_hook_and_closing(plan)
     optimize_long_form_packaging(llm, plan)
-    ensure_title_names_main_subject(plan)
+    ensure_title_names_main_subject(plan, anchor=plan.topic)
     ensure_long_form_hook_and_closing(plan)
     normalize_scene_count(plan, scene_count)
     rescale_scene_durations(plan, float(duration), "Manual long-form plan")

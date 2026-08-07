@@ -167,8 +167,14 @@ def ensure_dejavu_font() -> None:
     # BOT_DATA_DIR=. that stale file *is* DATA_DIR/fonts.conf, so FONTCONFIG_FILE
     # pointed libass at a font directory that does not exist on the server: ffmpeg
     # still exited 0 and every burned-in caption came out completely blank.
+    # Every <dir> here is scanned RECURSIVELY when libass first initializes
+    # fontconfig, which happens inside the caption mux. /nix/store belongs to the
+    # whole Nixpacks image — listing it made that first mux crawl gigabytes of
+    # packages before FFmpeg drew a single frame. Only bounded font directories
+    # belong in this list; the caption face itself is handed to libass directly
+    # through the ass filter's fontsdir option.
     search_dirs: list[str] = []
-    for candidate in (font_dir, ROOT / "fonts", Path("/usr/share/fonts"), Path("/nix/store")):
+    for candidate in (font_dir, ROOT / "fonts", Path("/usr/share/fonts")):
         if candidate.is_dir():
             resolved = candidate.resolve().as_posix()
             if resolved not in search_dirs:
@@ -1293,6 +1299,43 @@ class OpenAIImageClient:
         )
 
 
+def save_normalized_jpeg(image_bytes: bytes, destination: Path, label: str) -> bool:
+    """Decode and re-encode downloaded bytes so FFmpeg never receives a file it cannot read.
+
+    Content-Type alone is not enough to trust a download. "image/svg+xml" passes
+    any startswith("image/") check, and an SVG written straight to a .jpg makes
+    FFmpeg pick its svg_pipe demuxer and abort with "no decoder found for: svg"
+    — the render then falls back to repeating the previous scene. Decoding here
+    rejects anything that is not a real raster image, and flattens WebP, PNG,
+    palette and transparent sources into the plain JPEG the pipeline expects.
+    """
+    if not 10_000 <= len(image_bytes) <= 25_000_000:
+        return False
+    partial = destination.with_name(f"{destination.name}.part")
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(image_bytes)) as image:
+            image.load()
+            if image.width < 160 or image.height < 160:
+                return False
+            if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
+                rgba = image.convert("RGBA")
+                normalized = Image.new("RGB", rgba.size, "white")
+                normalized.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                normalized = image.convert("RGB")
+            normalized.save(partial, format="JPEG", quality=92, optimize=True)
+        partial.replace(destination)
+        return destination.stat().st_size >= 1024
+    except Exception as exc:
+        LOG.debug("Downloaded %s image could not be decoded: %s", label, exc)
+        return False
+    finally:
+        if partial.exists():
+            partial.unlink()
+
+
 WEB_IMAGE_SOURCE_HOSTS = (
     "unsplash.com",
     "pexels.com",
@@ -1473,9 +1516,16 @@ class BraveImageSearch:
                 image_response.raise_for_status()
                 content_type = image_response.headers.get("Content-Type", "").lower()
                 image_bytes = image_response.content
-                if not content_type.startswith("image/") or not 10_000 <= len(image_bytes) <= 25_000_000:
+                if not content_type.startswith("image/"):
                     continue
-                destination.write_bytes(image_bytes)
+                # Vector results are a real hit here: Brave serves plenty of SVG
+                # maps and flags, and "image/svg+xml" passes the check above.
+                if "svg" in content_type or not save_normalized_jpeg(image_bytes, destination, "Brave"):
+                    LOG.debug(
+                        "Discarding Brave result %s for %s: not a usable raster image (%s).",
+                        image_url, destination.name, content_type or "unknown type",
+                    )
+                    continue
             except Exception as exc:
                 LOG.debug("Could not download Brave image result %s: %s", image_url, exc)
                 continue
@@ -1605,31 +1655,7 @@ class WikimediaCommonsImageSearch:
     @staticmethod
     def _save_as_jpeg(image_bytes: bytes, destination: Path) -> bool:
         """Decode and normalize downloaded bytes so FFmpeg never receives a corrupt file."""
-        if not 10_000 <= len(image_bytes) <= 25_000_000:
-            return False
-        partial = destination.with_name(f"{destination.name}.part")
-        try:
-            from PIL import Image
-
-            with Image.open(BytesIO(image_bytes)) as image:
-                image.load()
-                if image.width < 160 or image.height < 160:
-                    return False
-                if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
-                    rgba = image.convert("RGBA")
-                    normalized = Image.new("RGB", rgba.size, "white")
-                    normalized.paste(rgba, mask=rgba.getchannel("A"))
-                else:
-                    normalized = image.convert("RGB")
-                normalized.save(partial, format="JPEG", quality=92, optimize=True)
-            partial.replace(destination)
-            return destination.stat().st_size >= 1024
-        except Exception as exc:
-            LOG.debug("Downloaded Wikimedia image could not be decoded: %s", exc)
-            return False
-        finally:
-            if partial.exists():
-                partial.unlink()
+        return save_normalized_jpeg(image_bytes, destination, "Wikimedia")
 
     def _download_candidate(
         self,

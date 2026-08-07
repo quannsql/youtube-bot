@@ -1542,8 +1542,21 @@ def test_openai_image_does_not_retry_permanent_auth_error(tmp_path, monkeypatch)
     assert calls["count"] == 1
 
 
+def _real_jpeg_bytes(size=(1000, 1500), color=(90, 120, 200)) -> bytes:
+    """A genuinely decodable JPEG, big enough to clear the downloader's size floor."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    # Noise keeps the file above the 10 KB floor that a flat colour would not reach.
+    image = Image.effect_noise(size, 40).convert("RGB")
+    Image.blend(image, Image.new("RGB", size, color), 0.5).save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
 def test_brave_image_search_downloads_trusted_portrait_and_records_source(tmp_path, monkeypatch):
-    image_bytes = b"w" * 20_000
+    image_bytes = _real_jpeg_bytes()
 
     class SearchResponse:
         def raise_for_status(self):
@@ -1577,8 +1590,85 @@ def test_brave_image_search_downloads_trusted_portrait_and_records_source(tmp_pa
     destination = tmp_path / "web.jpg"
 
     assert client.image("historic tower", destination, width=1080, height=1920)
-    assert destination.read_bytes() == image_bytes
     assert client.sources[0]["source_page"].startswith("https://www.pexels.com/")
+    # Downloads are re-encoded rather than written through, so what lands on disk
+    # is always a raster JPEG FFmpeg can open.
+    from PIL import Image
+
+    with Image.open(destination) as saved:
+        assert saved.format == "JPEG"
+        assert saved.size == (1000, 1500)
+
+
+def test_brave_image_search_discards_an_svg_dressed_up_as_a_photo(tmp_path, monkeypatch):
+    """Brave serves SVG maps and flags, and "image/svg+xml" passes a startswith("image/") check.
+
+    Written straight to a .jpg it makes FFmpeg select its svg_pipe demuxer and
+    abort with "no decoder found for: svg", after which the render silently
+    repeats the previous scene instead of showing the photo.
+    """
+    svg_bytes = (
+        b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900">'
+        + b"<rect width='1200' height='900' fill='#284'/>" * 400
+        + b"</svg>"
+    )
+
+    class SearchResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "results": [{
+                    "title": "Territory map",
+                    "url": "https://commons.wikimedia.org/wiki/File:Map.svg",
+                    "properties": {
+                        "url": "https://upload.wikimedia.org/map.svg",
+                        "width": 1200,
+                        "height": 900,
+                    },
+                }]
+            }
+
+    class ImageResponse:
+        headers = {"Content-Type": "image/svg+xml"}
+        content = svg_bytes
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        bot.requests, "get",
+        lambda url, **_kwargs: SearchResponse() if "brave.com" in url else ImageResponse(),
+    )
+    client = bot.BraveImageSearch(bot.Settings(brave_search_api_key="brave"))
+    destination = tmp_path / "long_scene_03.jpg"
+
+    assert client.image("territory map", destination, width=1920, height=1080) is False
+    assert not destination.exists()
+    # A rejected result must not be credited as a used image source either.
+    assert client.sources == []
+
+
+def test_save_normalized_jpeg_flattens_transparency_and_rejects_junk(tmp_path):
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    # Noise, not a flat fill: a flat PNG compresses below the downloader's 10 KB floor.
+    translucent = Image.effect_noise((500, 500), 60).convert("RGB").convert("RGBA")
+    translucent.putalpha(128)
+    translucent.save(buffer, format="PNG")
+
+    destination = tmp_path / "web.jpg"
+    assert bot.save_normalized_jpeg(buffer.getvalue(), destination, "test")
+    with Image.open(destination) as saved:
+        assert saved.format == "JPEG"
+        assert saved.mode == "RGB"
+
+    assert not bot.save_normalized_jpeg(b"not an image" * 2000, tmp_path / "junk.jpg", "test")
+    assert not (tmp_path / "junk.jpg").exists()
 
 
 def test_brave_image_search_spaces_requests_using_rate_limit_headers(tmp_path, monkeypatch):
@@ -3237,6 +3327,24 @@ def test_ensure_dejavu_font_replaces_a_stale_fonts_conf(tmp_path, monkeypatch):
     assert "D:/youtube-bot/fonts" not in rewritten
     assert font_dir.resolve().as_posix() in rewritten
     assert bot.CAPTION_FONTS_DIR == font_dir.resolve()
+
+
+def test_ensure_dejavu_font_never_lists_a_whole_package_store(tmp_path, monkeypatch):
+    """Every <dir> is scanned recursively when libass first initializes fontconfig.
+
+    That happens inside the caption mux, so listing /nix/store made the long-form
+    render crawl the entire Nixpacks image before FFmpeg drew a single frame.
+    Only bounded font directories belong here.
+    """
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    _install_caption_fonts(tmp_path)
+
+    bot.ensure_dejavu_font()
+
+    listed = re.findall(r"<dir>(.*?)</dir>", (tmp_path / "fonts.conf").read_text(encoding="utf-8"))
+    assert listed
+    assert "/nix/store" not in listed
+    assert all(Path(directory).name == "fonts" for directory in listed)
 
 
 def test_ass_video_filter_points_libass_at_the_caption_font_directory(tmp_path, monkeypatch):

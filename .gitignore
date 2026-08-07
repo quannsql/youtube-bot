@@ -8,3 +8,4 @@ generated/
 __pycache__/
 .pytest_cache/
 fpt_tts.html
+fonts.conf

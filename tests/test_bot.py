@@ -738,10 +738,10 @@ def test_settings_accepts_48_second_duration(monkeypatch):
     settings = bot.Settings.from_env()
 
     assert settings.duration == 48
-    # Long-form defaults to 30 AI images; an explicit Brave override replaces the web slots.
-    assert settings.long_form_min_scenes == 35
-    assert settings.long_form_max_scenes == 35
-    assert settings.long_form_openai_images == 30
+    # Long-form defaults to 14 AI images; an explicit Brave override replaces the web slots.
+    assert settings.long_form_min_scenes == 19
+    assert settings.long_form_max_scenes == 19
+    assert settings.long_form_openai_images == 14
     assert settings.brave_web_images_per_long_form == 5
     assert settings.text_model == "gpt-5.4-mini"
     assert settings.text_reasoning_effort == "low"
@@ -757,9 +757,9 @@ def test_settings_reads_long_form_ai_image_count(monkeypatch):
 
     # The scene count is the AI budget plus the default real-photo budget.
     assert settings.long_form_openai_images == 18
-    assert settings.brave_web_images_per_long_form == 12
-    assert settings.long_form_min_scenes == 30
-    assert settings.long_form_max_scenes == 30
+    assert settings.brave_web_images_per_long_form == 28
+    assert settings.long_form_min_scenes == 46
+    assert settings.long_form_max_scenes == 46
 
 
 def test_settings_defaults_long_form_to_a_ten_to_fifteen_minute_video(monkeypatch):
@@ -772,9 +772,13 @@ def test_settings_defaults_long_form_to_a_ten_to_fifteen_minute_video(monkeypatc
 
     assert settings.long_form_min_duration_seconds == 600
     assert settings.long_form_max_duration_seconds == 900
-    # ~42 visuals across 10-15 minutes keeps a new image on screen every ~15-21s.
+    # ~42 visuals across 10-15 minutes keeps a new image on screen every ~15-21s,
+    # and most of them are now real photographs rather than generated art.
     assert settings.long_form_min_scenes == 42
-    assert settings.long_form_ai_thumbnail is True
+    assert settings.brave_web_images_per_long_form == 28
+    assert settings.long_form_openai_images == 14
+    # Thumbnails are built from real photos, so the generated hero is opt-in.
+    assert settings.long_form_ai_thumbnail is False
 
 
 def test_settings_can_turn_off_the_generated_thumbnail_hero_image(monkeypatch):
@@ -994,14 +998,18 @@ def _long_form_plan(**overrides):
     return bot.ShortPlan.from_dict(payload)
 
 
-def test_render_long_form_thumbnail_image_writes_a_valid_youtube_thumbnail(tmp_path):
+@pytest.mark.parametrize("photo_count", [1, 2, 3])
+def test_render_long_form_thumbnail_image_writes_a_valid_youtube_thumbnail(tmp_path, photo_count):
     from PIL import Image
 
-    background = _write_test_jpeg(tmp_path / "hero.jpg")
+    photos = [
+        _write_test_jpeg(tmp_path / f"photo{index}.jpg", color=(40 * index, 90, 160))
+        for index in range(1, photo_count + 1)
+    ]
     destination = tmp_path / "thumbnail.jpg"
 
     bot.render_long_form_thumbnail_image(
-        background=background,
+        photos=photos,
         headline="STRAIT OF HORMUZ",
         kicker="WHAT HAPPENED",
         destination=destination,
@@ -1011,6 +1019,25 @@ def test_render_long_form_thumbnail_image_writes_a_valid_youtube_thumbnail(tmp_p
         assert rendered.size == (bot.THUMBNAIL_WIDTH, bot.THUMBNAIL_HEIGHT)
         assert rendered.format == "JPEG"
     assert 1024 <= destination.stat().st_size <= bot.YOUTUBE_THUMBNAIL_MAX_BYTES
+
+
+def test_every_supported_photo_count_has_a_frame_layout():
+    for count in range(1, bot.THUMBNAIL_MAX_PHOTOS + 1):
+        layout = bot.THUMBNAIL_FRAME_LAYOUTS[count]
+        assert len(layout) == count
+        # Tilted frames are the whole point of the design; a straight one reads as a grid.
+        assert all(abs(angle) >= 3 for *_box, angle in layout)
+
+
+def test_brush_edge_mask_is_opaque_inside_and_irregular_at_the_border():
+    mask = bot._brush_edge_mask(200, 160, seed=7)
+
+    assert mask.size == (200, 160)
+    assert mask.getpixel((100, 80)) == 255
+    # A painted edge varies along its length instead of stopping on a straight line.
+    top_edge = [min((y for y in range(160) if mask.getpixel((x, y)) > 128), default=160)
+                for x in range(20, 180, 10)]
+    assert len(set(top_edge)) > 1
 
 
 def test_thumbnail_headline_is_auto_sized_down_so_long_copy_still_fits(tmp_path):
@@ -1030,15 +1057,22 @@ def test_thumbnail_headline_is_auto_sized_down_so_long_copy_still_fits(tmp_path)
     assert len(long_lines) <= 3
 
 
-def test_create_long_form_thumbnail_generates_a_dedicated_hero_image(tmp_path, monkeypatch):
-    plan = _long_form_plan()
-    image_calls = []
+def test_create_long_form_thumbnail_frames_real_web_photos(tmp_path, monkeypatch):
+    plan = _long_form_plan(scenes=[
+        {"duration": 4, "visual_prompt": "A tanker", "search_query": "oil tanker hormuz"},
+        {"duration": 4, "visual_prompt": "A port", "search_query": "bandar abbas port"},
+        {"duration": 4, "visual_prompt": "A map", "search_query": "hormuz strait map"},
+    ])
+    searches = []
 
     class FakeImages:
+        def web_image(self, query, destination, width, height):
+            searches.append((query, width, height))
+            _write_test_jpeg(destination, color=(40, 90 + 20 * len(searches), 160))
+            return True
+
         def image(self, **kwargs):
-            image_calls.append(kwargs)
-            _write_test_jpeg(kwargs["destination"], color=(180, 60, 30))
-            return "openai"
+            raise AssertionError("the thumbnail must not spend a generated-image credit")
 
     monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
 
@@ -1052,14 +1086,31 @@ def test_create_long_form_thumbnail_generates_a_dedicated_hero_image(tmp_path, m
 
     assert thumbnail == tmp_path / "thumbnail.jpg"
     assert thumbnail.is_file()
-    # Exactly one image credit: the hero is generated once and reused thereafter.
-    assert len(image_calls) == 1
-    assert image_calls[0]["prefer_web"] is False
-    assert image_calls[0]["width"] == 1920 and image_calls[0]["height"] == 1080
-    prompt = image_calls[0]["generation_prompt"]
-    assert "RIGHT side" in prompt
-    assert "LEFT 45 percent" in prompt
-    assert "no words" in prompt
+    assert len(searches) == bot.THUMBNAIL_MAX_PHOTOS
+    # A square target keeps portrait headshots and landscape scenery both eligible.
+    assert {(width, height) for _query, width, height in searches} == {(1200, 1200)}
+    assert all(
+        (tmp_path / f"thumbnail_photo_{slot}.jpg").is_file()
+        for slot in range(1, bot.THUMBNAIL_MAX_PHOTOS + 1)
+    )
+
+
+def test_thumbnail_photo_queries_spread_across_the_video_instead_of_repeating_one_beat():
+    plan = _long_form_plan(
+        thumbnail_subject="a startled harbour pilot gripping the ship wheel at dawn",
+        scenes=[
+            {"duration": 4, "visual_prompt": f"Beat {index}", "search_query": f"subject {index}"}
+            for index in range(1, 13)
+        ],
+    )
+
+    queries = bot.thumbnail_photo_queries(plan)
+
+    assert queries[0].startswith("a startled harbour pilot")
+    assert "Strait of Hormuz" in queries
+    sampled = [query for query in queries if query.startswith("subject ")]
+    assert len(sampled) > 1
+    assert len(sampled) == len(set(sampled))
 
 
 def test_long_form_thumbnail_prompt_uses_the_packaged_hero_subject():
@@ -1068,11 +1119,15 @@ def test_long_form_thumbnail_prompt_uses_the_packaged_hero_subject():
     assert "startled harbour pilot" in bot.long_form_thumbnail_prompt(plan)
 
 
-def test_create_long_form_thumbnail_reuses_a_generated_hero_without_a_second_credit(tmp_path, monkeypatch):
+def test_create_long_form_thumbnail_reuses_downloaded_photos_without_searching_again(tmp_path, monkeypatch):
     plan = _long_form_plan()
-    _write_test_jpeg(tmp_path / "thumbnail_ai_source.jpg")
+    for slot in range(1, bot.THUMBNAIL_MAX_PHOTOS + 1):
+        _write_test_jpeg(tmp_path / f"thumbnail_photo_{slot}.jpg")
 
     class FakeImages:
+        def web_image(self, *_args, **_kwargs):
+            raise AssertionError("must not search for photos a second time")
+
         def image(self, **kwargs):
             raise AssertionError("must not spend another image credit")
 
@@ -1089,47 +1144,82 @@ def test_create_long_form_thumbnail_reuses_a_generated_hero_without_a_second_cre
     assert thumbnail.is_file()
 
 
-def test_create_long_form_thumbnail_falls_back_to_wikimedia_when_generation_is_off(tmp_path, monkeypatch):
+def test_thumbnail_photos_prefer_the_preserved_wikimedia_photo_when_no_search_result_arrives(tmp_path, monkeypatch):
     plan = _long_form_plan()
     wiki_source = _write_test_jpeg(tmp_path / "thumbnail_wikimedia_source.jpg", color=(20, 120, 70))
     _write_test_jpeg(bot.long_form_image_path(tmp_path, 1), color=(120, 20, 70))
 
     class FakeImages:
+        def web_image(self, *_args, **_kwargs):
+            return False
+
         def image(self, **kwargs):
             raise AssertionError("generation is disabled for this run")
 
     monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
     settings = bot.Settings(overlay_logo=tmp_path / "missing-logo.png", long_form_ai_thumbnail=False)
 
-    chosen = bot.long_form_thumbnail_background(plan, tmp_path / "long.mp4", tmp_path, settings, FakeImages())
+    photos = bot.collect_long_form_thumbnail_photos(plan, tmp_path, settings, FakeImages())
 
-    assert chosen == wiki_source
+    assert photos[0] == wiki_source
     assert bot.create_long_form_thumbnail(
         plan, tmp_path / "long.mp4", tmp_path, settings, image_provider=FakeImages()
     ).is_file()
 
 
-def test_long_form_thumbnail_background_falls_back_to_the_opening_scene(tmp_path, monkeypatch):
+def test_thumbnail_photos_fall_back_to_the_saved_scene_visuals_when_searching_fails(tmp_path, monkeypatch):
     plan = _long_form_plan()
     first_scene = _write_test_jpeg(bot.long_form_image_path(tmp_path, 1))
     _write_test_jpeg(bot.long_form_image_path(tmp_path, 2))
 
     class FakeImages:
+        def web_image(self, *_args, **_kwargs):
+            raise RuntimeError("image service is down")
+
         def image(self, **kwargs):
             raise bot.BotError("image service is down")
 
     monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
 
-    chosen = bot.long_form_thumbnail_background(
+    photos = bot.collect_long_form_thumbnail_photos(
         plan,
-        tmp_path / "missing-long.mp4",
         tmp_path,
         bot.Settings(overlay_logo=tmp_path / "missing-logo.png"),
         FakeImages(),
     )
 
-    # Scene 1 is written to show the main subject, so it beats a random later beat.
-    assert chosen == first_scene
+    # A failing search must never leave the thumbnail with nothing to frame.
+    assert photos
+    assert first_scene in photos
+
+
+def test_create_long_form_thumbnail_generates_a_hero_only_when_no_photo_exists_and_it_is_enabled(tmp_path, monkeypatch):
+    plan = _long_form_plan()
+    image_calls = []
+
+    class FakeImages:
+        def web_image(self, *_args, **_kwargs):
+            return False
+
+        def image(self, **kwargs):
+            image_calls.append(kwargs)
+            _write_test_jpeg(kwargs["destination"], color=(180, 60, 30))
+            return "openai"
+
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+
+    thumbnail = bot.create_long_form_thumbnail(
+        plan,
+        tmp_path / "long.mp4",
+        tmp_path,
+        bot.Settings(overlay_logo=tmp_path / "missing-logo.png", long_form_ai_thumbnail=True),
+        image_provider=FakeImages(),
+    )
+
+    assert thumbnail.is_file()
+    assert len(image_calls) == 1
+    assert image_calls[0]["prefer_web"] is False
+    assert image_calls[0]["width"] == 1920 and image_calls[0]["height"] == 1080
 
 
 
@@ -2302,7 +2392,7 @@ def test_long_form_images_preserve_wikimedia_scene_for_thumbnail_priority(tmp_pa
     assert (tmp_path / "thumbnail_wikimedia_source.jpg").read_bytes() == b"w" * 2048
 
 
-def test_long_form_uses_five_brave_slots_and_only_ten_openai_slots(tmp_path):
+def test_long_form_stretches_the_generated_budget_when_the_web_pass_finds_nothing(tmp_path):
     plan = bot.ShortPlan.from_dict({
         "topic": "Topic", "angle": "Angle", "title": "Title",
         "description": "Description #A #B", "tags": ["A", "B"],
@@ -2334,7 +2424,56 @@ def test_long_form_uses_five_brave_slots_and_only_ten_openai_slots(tmp_path):
 
     assert prepared == 15
     assert client.brave_calls == 5
-    assert client.openai_calls == 10
+    # Every web slot came back empty. Generating the shortfall is far better than
+    # filling those beats by repeating the previous visual, so the planned budget
+    # of 10 stretches up to the ceiling rather than capping at 10.
+    assert client.openai_calls == 15
+    assert all((tmp_path / f"long_scene_{index:02d}.jpg").is_file() for index in range(1, 16))
+
+
+def test_long_form_never_generates_past_the_stretch_ceiling(tmp_path, monkeypatch):
+    plan = bot.ShortPlan.from_dict({
+        "topic": "Topic", "angle": "Angle", "title": "Title",
+        "description": "Description #A #B", "tags": ["A", "B"],
+        "hook": "Hook.", "narration": "Hook. Body. Close.", "closing_line": "Close.",
+        "scenes": [
+            {"duration": 20, "visual_prompt": f"Scene {index}"}
+            for index in range(1, 16)
+        ],
+        "fact_note": "Fact note", "source_hints": ["Source"],
+    })
+
+    class FakeImages:
+        s = bot.Settings(
+            brave_web_images_per_long_form=5,
+            long_form_openai_images=6,
+            long_form_openai_images_max=9,
+        )
+
+        def __init__(self):
+            self.openai_calls = 0
+
+        def image(self, search_query, generation_prompt, destination, width, height, prefer_web, web_only=False):
+            if prefer_web:
+                return "missing"
+            self.openai_calls += 1
+            destination.write_bytes(b"o" * 2048)
+            return "openai"
+
+    reused = []
+
+    def fake_fallback(destination, previous, width=1080, height=1920):
+        reused.append(destination)
+        destination.write_bytes(b"f" * 2048)
+
+    monkeypatch.setattr(bot, "create_fallback_scene_image", fake_fallback)
+
+    client = FakeImages()
+    bot.prepare_long_form_images(plan, client, tmp_path)
+
+    assert client.openai_calls == 9
+    # The six beats past the ceiling still get a picture, reusing the preceding visual.
+    assert len(reused) == 6
     assert all((tmp_path / f"long_scene_{index:02d}.jpg").is_file() for index in range(1, 16))
 
 
@@ -3016,6 +3155,55 @@ def test_ensure_dejavu_font_creates_files(tmp_path, monkeypatch):
     assert font_file.stat().st_size > 500000
     assert bold_font_file.stat().st_size > 500000
     assert "FONTCONFIG_FILE" in os.environ
+
+
+def _install_caption_fonts(data_dir):
+    """Put both DejaVu faces in place so ensure_dejavu_font downloads nothing."""
+    import shutil
+
+    font_dir = data_dir / "fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    bundled = bot.ROOT / "fonts" / "DejaVuSans.ttf"
+    for name in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"):
+        shutil.copyfile(bundled, font_dir / name)
+    return font_dir
+
+
+def test_ensure_dejavu_font_replaces_a_stale_fonts_conf(tmp_path, monkeypatch):
+    """The repo used to ship a fonts.conf pointing at a Windows path.
+
+    With the default BOT_DATA_DIR=. that file *is* DATA_DIR/fonts.conf, and the
+    old code only wrote the config when it was absent. FONTCONFIG_FILE then
+    pointed libass at a directory that does not exist on the server, ffmpeg still
+    exited 0, and every burned-in caption came out blank.
+    """
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    font_dir = _install_caption_fonts(tmp_path)
+    config_file = tmp_path / "fonts.conf"
+    config_file.write_text(
+        '<?xml version="1.0"?>\n<fontconfig>\n  <dir>D:/youtube-bot/fonts</dir>\n</fontconfig>\n',
+        encoding="utf-8",
+    )
+
+    bot.ensure_dejavu_font()
+
+    rewritten = config_file.read_text(encoding="utf-8")
+    assert "D:/youtube-bot/fonts" not in rewritten
+    assert font_dir.resolve().as_posix() in rewritten
+    assert bot.CAPTION_FONTS_DIR == font_dir.resolve()
+
+
+def test_ass_video_filter_points_libass_at_the_caption_font_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "DATA_DIR", tmp_path)
+    font_dir = _install_caption_fonts(tmp_path)
+    bot.ensure_dejavu_font()
+
+    video_filter = bot.ass_video_filter(tmp_path / "captions_en.ass")
+
+    assert video_filter.startswith("ass=filename='")
+    assert "captions_en.ass" in video_filter
+    # Without fontsdir a single bad fonts.conf silently blanks every subtitle.
+    assert f"fontsdir='{font_dir.resolve().as_posix()}'" in video_filter
 
 
 # --- Manual idea queue + manual planners ---------------------------------- #

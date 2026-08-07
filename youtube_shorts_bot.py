@@ -128,7 +128,15 @@ def materialize_railway_credentials() -> None:
     )
 
 
+# Directory holding the caption typeface, resolved by ``ensure_dejavu_font``.
+# ``ass_video_filter`` hands it to libass directly so burned-in subtitles never
+# depend on fontconfig finding the face by name.
+CAPTION_FONTS_DIR: Path | None = None
+
+
 def ensure_dejavu_font() -> None:
+    global CAPTION_FONTS_DIR
+
     font_dir = DATA_DIR / "fonts"
     config_file = DATA_DIR / "fonts.conf"
     font_urls = {
@@ -138,7 +146,12 @@ def ensure_dejavu_font() -> None:
     font_dir.mkdir(parents=True, exist_ok=True)
     for filename, url in font_urls.items():
         font_file = font_dir / filename
-        if font_file.is_file():
+        if font_file.is_file() and font_file.stat().st_size >= 10_000:
+            continue
+        bundled = ROOT / "fonts" / filename
+        if bundled.is_file() and bundled.resolve() != font_file.resolve():
+            LOG.info("Copying bundled %s into %s.", filename, font_dir)
+            shutil.copyfile(bundled, font_file)
             continue
         LOG.info("%s not found in %s. Downloading...", filename, font_dir)
         try:
@@ -149,19 +162,32 @@ def ensure_dejavu_font() -> None:
         except Exception as exc:
             raise BotError(f"Could not download {filename}: {exc}") from exc
 
-    if not config_file.is_file():
-        LOG.info("Creating custom fonts.conf in %s...", config_file)
-        config_content = f"""<?xml version="1.0"?>
+    # Always rewrite the config. It used to be written only when absent, and the
+    # repository shipped a fonts.conf pointing at a Windows path. With the default
+    # BOT_DATA_DIR=. that stale file *is* DATA_DIR/fonts.conf, so FONTCONFIG_FILE
+    # pointed libass at a font directory that does not exist on the server: ffmpeg
+    # still exited 0 and every burned-in caption came out completely blank.
+    search_dirs: list[str] = []
+    for candidate in (font_dir, ROOT / "fonts", Path("/usr/share/fonts"), Path("/nix/store")):
+        if candidate.is_dir():
+            resolved = candidate.resolve().as_posix()
+            if resolved not in search_dirs:
+                search_dirs.append(resolved)
+    LOG.info("Writing fontconfig for burned-in captions to %s (dirs: %s).", config_file, ", ".join(search_dirs))
+    directory_elements = "\n".join(f"  <dir>{directory}</dir>" for directory in search_dirs)
+    config_file.write_text(
+        f"""<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
 <fontconfig>
-  <dir>{font_dir.resolve().as_posix()}</dir>
+{directory_elements}
   <cachedir>/tmp/fontcache</cachedir>
   <config></config>
 </fontconfig>
-"""
-        config_file.write_text(config_content, encoding="utf-8")
-
+""",
+        encoding="utf-8",
+    )
     os.environ["FONTCONFIG_FILE"] = str(config_file.resolve())
+    CAPTION_FONTS_DIR = font_dir.resolve()
 
 
 @dataclass(frozen=True)
@@ -190,16 +216,20 @@ class Settings:
     image_read_timeout: int = 180
     image_attempts: int = 3
     image_retry_backoff_seconds: int = 10
-    brave_web_images_per_short: int = 2
-    # Long-form mixes cartoon stick-figure beats with real photos. Web images are
-    # free relative to GPT Image, so a meaningful slice of every video is now
-    # sourced from Brave/Wikimedia — both for cost and because real archive photos
-    # of famous places, artifacts, and figures make an explainer more credible.
-    brave_web_images_per_long_form: int = 12
-    long_form_openai_images: int = 30
-    # Spend one extra GPT Image call per Long on a purpose-built thumbnail hero
-    # image. A frame lifted from the video was never composed to sell the click.
-    long_form_ai_thumbnail: bool = True
+    brave_web_images_per_short: int = 4
+    # Long-form mixes cartoon stick-figure beats with real photos, and the real
+    # photos now carry most of the video: they are free relative to GPT Image, and
+    # archive photographs of famous places, artifacts, and figures make an
+    # explainer far more credible than another illustration of the same thing.
+    brave_web_images_per_long_form: int = 28
+    long_form_openai_images: int = 14
+    # How far the generated-image budget may stretch when the web searches come
+    # back empty, so a bad Brave day never turns into a video of repeated frames.
+    long_form_openai_images_max: int = 30
+    # Thumbnails are composed from real Brave/Wikimedia photos in brush-edged
+    # frames. This is the opt-in last resort for when every search comes back
+    # empty; it costs one extra GPT Image call per Long.
+    long_form_ai_thumbnail: bool = False
     language: str = "en"
     duration: int = 20
     # 10-15 minutes. Long-form retention on YouTube rewards a fully developed
@@ -259,11 +289,17 @@ class Settings:
     @classmethod
     def from_env(cls, duration_override: int | None = None) -> "Settings":
         openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        brave_long_form_images = min(40, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "12"))))
+        brave_long_form_images = min(40, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_LONG_FORM", "28"))))
         # A 10-15 minute explainer needs a new visual every ~15 seconds or the eye
         # gives up long before the story does. The two budgets add up to the scene
         # count, so raise them together when changing the pacing.
-        long_form_ai_images = min(80, max(1, int(os.getenv("LONG_FORM_AI_IMAGES", "30"))))
+        long_form_ai_images = min(80, max(1, int(os.getenv("LONG_FORM_AI_IMAGES", "14"))))
+        # Ceiling used only when the web searches under-deliver. Without it, a bad
+        # Brave day would leave most beats with no image and no budget to generate
+        # one, and the render would fill them by repeating the previous visual.
+        long_form_ai_images_max = min(
+            80, max(long_form_ai_images, int(os.getenv("LONG_FORM_AI_IMAGES_MAX", "30")))
+        )
         overlay_logo = Path(os.getenv("OVERLAY_LOGO_FILE", "overlay-logo.png"))
         if not overlay_logo.is_absolute():
             overlay_logo = ROOT / overlay_logo
@@ -309,14 +345,15 @@ class Settings:
             image_read_timeout=int(os.getenv("IMAGE_READ_TIMEOUT_SECONDS", "180")),
             image_attempts=max(1, int(os.getenv("OPENAI_IMAGE_ATTEMPTS", "3"))),
             image_retry_backoff_seconds=max(0, int(os.getenv("OPENAI_IMAGE_RETRY_BACKOFF_SECONDS", "10"))),
-            brave_web_images_per_short=min(6, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_SHORT", "2")))),
+            brave_web_images_per_short=min(6, max(0, int(os.getenv("BRAVE_WEB_IMAGES_PER_SHORT", "4")))),
             brave_web_images_per_long_form=brave_long_form_images,
             language=os.getenv("SHORT_LANGUAGE", "en"),
             duration=duration,
             long_form_min_duration_seconds=max(60, int(os.getenv("LONG_FORM_MIN_DURATION_SECONDS", "600"))),
             long_form_max_duration_seconds=max(60, int(os.getenv("LONG_FORM_MAX_DURATION_SECONDS", "900"))),
             long_form_openai_images=long_form_ai_images,
-            long_form_ai_thumbnail=env_bool("LONG_FORM_AI_THUMBNAIL", True),
+            long_form_openai_images_max=long_form_ai_images_max,
+            long_form_ai_thumbnail=env_bool("LONG_FORM_AI_THUMBNAIL", False),
             long_form_min_scenes=long_form_ai_images + brave_long_form_images,
             long_form_max_scenes=long_form_ai_images + brave_long_form_images,
             long_form_timezone=os.getenv("LONG_FORM_TIMEZONE", "Asia/Bangkok").strip() or "Asia/Bangkok",
@@ -3789,6 +3826,10 @@ Style: Caption,DejaVu Sans,{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H660000
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    if not cues:
+        # A caption-less upload looks like a rendering bug to viewers, so make the
+        # cause visible in the logs instead of shipping a silent blank track.
+        LOG.warning("No caption cues were produced for %s; the video will have no burned-in text.", destination.name)
     lines = [header]
     for cue in cues:
         lines.append(
@@ -3808,12 +3849,25 @@ YOUTUBE_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 
 THUMBNAIL_WIDTH = 1280
 THUMBNAIL_HEIGHT = 720
-# Text sits in the left column; the AI hero image is prompted to keep its subject
-# on the right so the two never fight for the same pixels.
-THUMBNAIL_TEXT_LEFT = 104
-THUMBNAIL_TEXT_RIGHT = 736
+# Text sits in the left column; the framed real photos are arranged across the
+# right two-thirds so the two never fight for the same pixels.
+THUMBNAIL_TEXT_LEFT = 76
+THUMBNAIL_TEXT_RIGHT = 604
 THUMBNAIL_ACCENT = (240, 46, 46)
 THUMBNAIL_INK = (255, 255, 255)
+# Where each framed photo sits: (centre x, centre y, width, height, tilt degrees).
+# The staggered centres and opposing tilts are what stop a multi-photo thumbnail
+# from reading as a plain grid.
+THUMBNAIL_FRAME_LAYOUTS: dict[int, list[tuple[int, int, int, int, float]]] = {
+    1: [(900, 386, 506, 512, -4.0)],
+    2: [(838, 292, 424, 448, -7.5), (1048, 474, 392, 400, 5.5)],
+    3: [
+        (788, 258, 352, 368, -9.0),
+        (1046, 320, 326, 340, 5.5),
+        (906, 534, 352, 308, -3.5),
+    ],
+}
+THUMBNAIL_MAX_PHOTOS = max(THUMBNAIL_FRAME_LAYOUTS)
 
 
 def thumbnail_headline(plan: ShortPlan) -> str:
@@ -3907,6 +3961,130 @@ def _left_scrim_mask(width: int, height: int, reach: float = 0.66, strength: flo
     return ramp.resize((width, height), Image.BILINEAR)
 
 
+def _brush_edge_mask(width: int, height: int, seed: int, amplitude: int = 6, dabs: int = 24):
+    """An opaque rectangle whose outline wobbles like a painted brush stroke.
+
+    Built by walking the perimeter with per-step jitter perpendicular to each
+    edge, then stamping small dabs across the boundary. Supersampled 2x so the
+    finished edge is soft rather than staircased.
+    """
+    from PIL import Image, ImageDraw, ImageFilter
+
+    rng = random.Random(seed)
+    scale = 2
+    canvas_w, canvas_h = width * scale, height * scale
+    mask = Image.new("L", (canvas_w, canvas_h), 0)
+    draw = ImageDraw.Draw(mask)
+
+    amp = max(1, amplitude * scale)
+    inset = amp + 2
+    left, top = inset, inset
+    right, bottom = canvas_w - inset, canvas_h - inset
+    steps_x = max(10, canvas_w // (16 * scale))
+    steps_y = max(8, canvas_h // (16 * scale))
+
+    points: list[tuple[float, float]] = []
+    for step in range(steps_x + 1):
+        points.append((left + (right - left) * step / steps_x, top + rng.uniform(-amp, amp)))
+    for step in range(1, steps_y + 1):
+        points.append((right + rng.uniform(-amp, amp), top + (bottom - top) * step / steps_y))
+    for step in range(1, steps_x + 1):
+        points.append((right - (right - left) * step / steps_x, bottom + rng.uniform(-amp, amp)))
+    for step in range(1, steps_y):
+        points.append((left + rng.uniform(-amp, amp), bottom - (bottom - top) * step / steps_y))
+    draw.polygon(points, fill=255)
+
+    # Bristle marks straddling the outline: some add paint, a few bite back into
+    # it, which is what reads as a hand-loaded brush rather than a torn edge.
+    for index in range(dabs):
+        edge_x, edge_y = points[rng.randrange(len(points))]
+        radius = rng.uniform(amp * 0.6, amp * 1.6)
+        box = (edge_x - radius, edge_y - radius * 0.7, edge_x + radius, edge_y + radius * 0.7)
+        draw.ellipse(box, fill=255 if index % 5 else 0)
+
+    mask = mask.filter(ImageFilter.GaussianBlur(scale * 0.9))
+    return mask.resize((width, height), Image.LANCZOS)
+
+
+def _paste_layer(canvas, overlay, left: int, top: int):
+    """Alpha-composite ``overlay`` at any position, including partly off-canvas."""
+    from PIL import Image
+
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    layer.paste(overlay, (left, top))
+    return Image.alpha_composite(canvas, layer)
+
+
+def _photo_frame_card(photo: Path, width: int, height: int, angle: float, seed: int):
+    """One tilted photo card: a white brush-edged mat with the real photo inside."""
+    from PIL import Image, ImageDraw, ImageEnhance
+
+    border = max(13, min(width, height) // 15)
+    # A deeper chin under the picture reads as a physical print rather than a
+    # plain white outline.
+    chin = int(border * 1.85)
+    window_w = max(8, width - 2 * border)
+    window_h = max(8, height - border - chin)
+
+    with Image.open(photo) as opened:
+        opened.load()
+        picture = _cover_fit(opened, window_w, window_h)
+    picture = ImageEnhance.Color(picture).enhance(1.16)
+    picture = ImageEnhance.Contrast(picture).enhance(1.10)
+    picture = ImageEnhance.Sharpness(picture).enhance(1.30)
+
+    card = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    card.putalpha(_brush_edge_mask(width, height, seed))
+    card.paste(picture.convert("RGBA"), (border, border), _brush_edge_mask(window_w, window_h, seed + 977, amplitude=3, dabs=14))
+    ImageDraw.Draw(card).rectangle(
+        (border, border, border + window_w - 1, border + window_h - 1),
+        outline=(20, 20, 26, 110),
+        width=2,
+    )
+    return card.rotate(angle, resample=Image.BICUBIC, expand=True)
+
+
+def _thumbnail_backdrop(photos: list[Path], width: int, height: int):
+    """The designed background the photo frames sit on.
+
+    A heavily blurred, darkened copy of the lead photo keeps the thumbnail tied
+    to its own subject's colours, which a flat colour panel cannot do.
+    """
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+
+    base = None
+    for candidate in photos:
+        try:
+            with Image.open(candidate) as opened:
+                opened.load()
+                base = _cover_fit(opened, width, height)
+            break
+        except Exception as exc:
+            LOG.warning("Could not use %s as the thumbnail backdrop: %s", candidate.name, exc)
+    if base is None:
+        base = Image.new("RGB", (width, height), (17, 21, 34))
+    else:
+        base = base.filter(ImageFilter.GaussianBlur(26))
+        base = ImageEnhance.Color(base).enhance(1.30)
+        base = ImageEnhance.Brightness(base).enhance(0.48)
+
+    # Soft accent glow behind the photo cluster, then a vignette to pull the eye in.
+    glow = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(glow).ellipse((width * 0.46, -height * 0.22, width * 1.18, height * 1.08), fill=104)
+    base = Image.composite(
+        Image.blend(base, Image.new("RGB", (width, height), THUMBNAIL_ACCENT), 0.30),
+        base,
+        glow.filter(ImageFilter.GaussianBlur(150)),
+    )
+    vignette = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(vignette).ellipse(
+        (-width * 0.22, -height * 0.34, width * 1.22, height * 1.34), fill=255
+    )
+    return Image.composite(
+        base, Image.new("RGB", (width, height), (5, 7, 14)), vignette.filter(ImageFilter.GaussianBlur(115))
+    )
+
+
 def _wrap_to_width(draw, text: str, font, max_width: int) -> list[str]:
     lines: list[str] = []
     current = ""
@@ -3948,31 +4126,47 @@ def _fit_headline(draw, text: str, max_width: int, max_lines: int = 3):
 
 
 def render_long_form_thumbnail_image(
-    background: Path,
+    photos: list[Path],
     headline: str,
     kicker: str,
     destination: Path,
     logo: Path | None = None,
 ) -> Path:
-    """Compose the finished 1280x720 thumbnail: hero image, scrim, badge, headline.
+    """Compose the finished 1280x720 thumbnail.
 
-    Composed in Pillow rather than with ffmpeg drawtext so the headline can be
-    auto-sized to the copy, stroked heavily enough to survive a busy background,
-    and kept clear of the hero subject.
+    A designed backdrop carries one to three real photos, each mounted in a
+    tilted white mat with a brush-painted edge, with the headline held in the
+    left column. Composed in Pillow rather than with ffmpeg drawtext so the
+    headline can be auto-sized to the copy, stroked heavily enough to survive a
+    busy background, and kept clear of the photo cluster.
     """
-    from PIL import Image, ImageDraw, ImageEnhance
+    from PIL import Image, ImageDraw, ImageFilter
 
-    with Image.open(background) as opened:
-        canvas = _cover_fit(opened, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
-    # Feed-level punch. YouTube renders thumbnails small and slightly washed out,
-    # so a flat image reads as flatter still next to competing videos.
-    canvas = ImageEnhance.Color(canvas).enhance(1.22)
-    canvas = ImageEnhance.Contrast(canvas).enhance(1.12)
-    canvas = ImageEnhance.Sharpness(canvas).enhance(1.35)
+    usable_photos = [photo for photo in photos if photo.is_file()][:THUMBNAIL_MAX_PHOTOS]
+    canvas = _thumbnail_backdrop(usable_photos, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT).convert("RGBA")
+
+    layout = THUMBNAIL_FRAME_LAYOUTS.get(len(usable_photos), [])
+    for index, (photo, (centre_x, centre_y, frame_w, frame_h, angle)) in enumerate(
+        zip(usable_photos, layout, strict=False)
+    ):
+        try:
+            card = _photo_frame_card(photo, frame_w, frame_h, angle, seed=hash((photo.name, index)) & 0xFFFF)
+        except Exception as exc:
+            LOG.warning("Could not build the thumbnail frame for %s: %s", photo.name, exc)
+            continue
+        left, top = centre_x - card.width // 2, centre_y - card.height // 2
+        shadow = Image.new("RGBA", card.size, (0, 0, 0, 0))
+        shadow.putalpha(card.getchannel("A").point(lambda value: int(value * 0.58)))
+        canvas = _paste_layer(canvas, shadow.filter(ImageFilter.GaussianBlur(15)), left + 11, top + 17)
+        canvas = _paste_layer(canvas, card, left, top)
+
+    canvas = canvas.convert("RGB")
     canvas = Image.composite(
         Image.new("RGB", canvas.size, (6, 8, 14)),
         canvas,
-        _left_scrim_mask(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT),
+        # Reaches just past the text column so the headline keeps its contrast
+        # without dulling the framed photos beside it.
+        _left_scrim_mask(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, reach=0.52, strength=0.82),
     )
 
     draw = ImageDraw.Draw(canvas)
@@ -4038,9 +4232,17 @@ def render_long_form_thumbnail_image(
         try:
             with Image.open(logo) as opened_logo:
                 brand = opened_logo.convert("RGBA")
-            scale = 150 / max(1, brand.width)
-            brand = brand.resize((150, max(1, int(brand.height * scale))), Image.LANCZOS)
-            canvas.paste(brand, (THUMBNAIL_WIDTH - brand.width - 40, 36), brand)
+            brand_width = 132
+            brand = brand.resize(
+                (brand_width, max(1, round(brand.height * brand_width / max(1, brand.width)))),
+                Image.LANCZOS,
+            )
+            brand_left, brand_top = THUMBNAIL_WIDTH - brand.width - 34, 30
+            # The mark is white and a frame corner can reach this corner, so it
+            # carries its own shadow instead of relying on what sits behind it.
+            halo = brand.getchannel("A").filter(ImageFilter.GaussianBlur(7))
+            canvas.paste(Image.new("RGB", brand.size, (8, 10, 16)), (brand_left + 2, brand_top + 3), halo)
+            canvas.paste(brand, (brand_left, brand_top), brand)
         except Exception as exc:
             LOG.warning("Could not overlay the logo on the long-form thumbnail: %s", exc)
 
@@ -4066,29 +4268,115 @@ def extract_video_frame(video: Path, destination: Path, at_seconds: float = 3.0)
     return destination if destination.is_file() and destination.stat().st_size >= 1024 else None
 
 
-def long_form_thumbnail_background(
+def thumbnail_photo_queries(plan: ShortPlan) -> list[str]:
+    """Search phrases for the real photos mounted in the thumbnail frames.
+
+    ``thumbnail_subject`` is written as a sentence describing the hero, so only
+    its opening words are a usable image search. Scene searches are sampled
+    across the whole video rather than taken from the front, which is what keeps
+    three frames from showing three photos of the same opening beat.
+    """
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def push(value: str, words: int = 8) -> None:
+        cleaned = " ".join(re.sub(r"\s+", " ", str(value or "")).strip().split()[:words])[:120]
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            seen.add(key)
+            queries.append(cleaned)
+
+    push(plan.thumbnail_subject, words=10)
+    push(plan.topic)
+    tagged = [scene.search_query.strip() for scene in plan.scenes if scene.search_query.strip()]
+    if tagged:
+        for position in sorted(distributed_web_image_indexes(len(tagged), 6)):
+            push(tagged[position - 1])
+    push(plan.title)
+    return queries[:10]
+
+
+def collect_long_form_thumbnail_photos(
+    plan: ShortPlan,
+    output_dir: Path,
+    settings: Settings,
+    image_provider: VisualAssetProvider | None = None,
+    wanted: int = THUMBNAIL_MAX_PHOTOS,
+) -> list[Path]:
+    """Gather real photos (Brave, then Wikimedia Commons) for the thumbnail frames.
+
+    A square target size is requested on purpose: it makes the orientation filter
+    accept both portrait headshots and landscape scenery, and the frame card
+    centre-crops whatever comes back.
+    """
+    def usable(path: Path) -> bool:
+        return path.is_file() and path.stat().st_size >= 1024
+
+    photos: list[Path] = []
+    for slot in range(1, wanted + 1):
+        candidate = output_dir / f"thumbnail_photo_{slot}.jpg"
+        if usable(candidate):
+            photos.append(candidate)
+    if photos:
+        LOG.info("Reusing %d already downloaded thumbnail photo(s).", len(photos))
+    if len(photos) >= wanted:
+        return photos[:wanted]
+
+    provider = image_provider or VisualAssetProvider(settings)
+    for query in thumbnail_photo_queries(plan):
+        if len(photos) >= wanted:
+            break
+        destination = output_dir / f"thumbnail_photo_{len(photos) + 1}.jpg"
+        try:
+            found = provider.web_image(query, destination, 1200, 1200)
+        except Exception as exc:
+            LOG.warning("Thumbnail photo search failed for %r: %s", query, exc)
+            found = False
+        if found and usable(destination):
+            LOG.info("Thumbnail photo %d sourced from the web for %r.", len(photos) + 1, query)
+            photos.append(destination)
+            continue
+        if destination.exists():
+            destination.unlink()
+
+    if photos:
+        return photos
+
+    # No fresh result at all: reuse visuals this run already produced, preferring
+    # the scenes that were themselves filled from a real web photo.
+    salvage = [output_dir / "thumbnail_wikimedia_source.jpg", output_dir / "thumbnail_ai_source.jpg"]
+    web_scene_indexes = long_form_web_scene_indexes(plan, settings.brave_web_images_per_long_form)
+    salvage += [long_form_image_path(output_dir, index) for index in sorted(web_scene_indexes)]
+    salvage += [long_form_image_path(output_dir, index) for index in range(1, len(plan.scenes) + 1)]
+    for candidate in salvage:
+        if len(photos) >= wanted:
+            break
+        if usable(candidate) and candidate not in photos:
+            LOG.info("Using %s as a thumbnail photo; no fresh web result was available.", candidate.name)
+            photos.append(candidate)
+    return photos
+
+
+def create_long_form_thumbnail(
     plan: ShortPlan,
     video: Path,
     output_dir: Path,
     settings: Settings,
     image_provider: VisualAssetProvider | None = None,
-) -> Path | None:
-    """Pick the hero image behind the thumbnail, best option first.
+) -> Path:
+    """Build the Long thumbnail: real photos in tilted brush frames plus a headline."""
+    destination = output_dir / "thumbnail.jpg"
+    if destination.is_file() and 1024 <= destination.stat().st_size <= YOUTUBE_THUMBNAIL_MAX_BYTES:
+        LOG.info("Reusing prepared long-form YouTube thumbnail: %s", destination.name)
+        return destination
 
-    A purpose-built AI hero comes first because it is the only source composed for
-    the job: one big subject, on the right, with space left for the headline. The
-    remaining sources are all salvage, and none of them cost an image credit.
-    """
-    def usable(path: Path) -> bool:
-        return path.is_file() and path.stat().st_size >= 1024
-
-    ai_source = output_dir / "thumbnail_ai_source.jpg"
-    if usable(ai_source):
-        LOG.info("Reusing the already generated long-form thumbnail hero image.")
-        return ai_source
-    if settings.long_form_ai_thumbnail:
+    photos = collect_long_form_thumbnail_photos(plan, output_dir, settings, image_provider)
+    if not photos and settings.long_form_ai_thumbnail:
+        # Opt-in last resort. The thumbnail is meant to show real photographs, so
+        # a generated hero is only reached when every web search came back empty.
+        ai_source = output_dir / "thumbnail_ai_source.jpg"
         provider = image_provider or VisualAssetProvider(settings)
-        LOG.info("Generating a dedicated long-form thumbnail hero image…")
+        LOG.warning("No real photo could be sourced; generating a thumbnail hero image instead.")
         try:
             provider.image(
                 search_query="",
@@ -4100,52 +4388,24 @@ def long_form_thumbnail_background(
             )
         except Exception as exc:
             LOG.warning("Thumbnail hero image generation failed; falling back: %s", exc)
-        if usable(ai_source):
-            return ai_source
-
-    wiki_source = output_dir / "thumbnail_wikimedia_source.jpg"
-    if usable(wiki_source):
-        LOG.info("Using the preserved Wikimedia photo as the long-form thumbnail background.")
-        return wiki_source
-
-    # Scene 1 is written to show the video's main subject, so it beats a random beat.
-    scene_candidates = [
-        long_form_image_path(output_dir, index)
-        for index in range(1, len(plan.scenes) + 1)
-        if usable(long_form_image_path(output_dir, index))
-    ]
-    if scene_candidates:
-        source = scene_candidates[0]
-        LOG.info("Using long-form scene %s as the thumbnail background.", source.name)
-        return source
-
-    if video.is_file():
+        if ai_source.is_file() and ai_source.stat().st_size >= 1024:
+            photos = [ai_source]
+    if not photos and video.is_file():
         LOG.warning("No thumbnail image source was available; extracting a frame from %s.", video.name)
-        return extract_video_frame(video, output_dir / "thumbnail_frame_source.jpg")
-    return None
-
-
-def create_long_form_thumbnail(
-    plan: ShortPlan,
-    video: Path,
-    output_dir: Path,
-    settings: Settings,
-    image_provider: VisualAssetProvider | None = None,
-) -> Path:
-    """Build the Long thumbnail: a dedicated AI hero image plus a composed headline."""
-    destination = output_dir / "thumbnail.jpg"
-    if destination.is_file() and 1024 <= destination.stat().st_size <= YOUTUBE_THUMBNAIL_MAX_BYTES:
-        LOG.info("Reusing prepared long-form YouTube thumbnail: %s", destination.name)
-        return destination
-
-    source = long_form_thumbnail_background(plan, video, output_dir, settings, image_provider)
-    if source is None or not source.is_file():
+        frame = extract_video_frame(video, output_dir / "thumbnail_frame_source.jpg")
+        if frame is not None:
+            photos = [frame]
+    if not photos:
         raise BotError("Không tìm thấy visual để tạo thumbnail long-form.")
 
     logo = settings.overlay_logo
-    LOG.info("Composing the 16:9 long-form YouTube thumbnail from %s…", source.name)
+    LOG.info(
+        "Composing the 16:9 long-form YouTube thumbnail from %d framed photo(s): %s",
+        len(photos),
+        ", ".join(photo.name for photo in photos),
+    )
     render_long_form_thumbnail_image(
-        background=source,
+        photos=photos,
         headline=thumbnail_headline(plan),
         kicker=thumbnail_kicker(plan),
         destination=destination,
@@ -4189,7 +4449,13 @@ def prepare_long_form_thumbnail_for_upload(
 
 
 def ass_video_filter(captions: Path) -> str:
-    return f"ass='{ffmpeg_filter_path(captions)}',format=yuv420p"
+    # fontsdir points libass straight at the DejaVu files. Without it the caption
+    # style resolves through fontconfig alone, and a single bad fonts.conf makes
+    # every subtitle render as nothing at all while ffmpeg still reports success.
+    options = [f"filename='{ffmpeg_filter_path(captions)}'"]
+    if CAPTION_FONTS_DIR is not None and CAPTION_FONTS_DIR.is_dir():
+        options.append(f"fontsdir='{ffmpeg_filter_path(CAPTION_FONTS_DIR)}'")
+    return f"ass={':'.join(options)},format=yuv420p"
 
 
 def mux_video_audio_with_captions(
@@ -4554,15 +4820,29 @@ def apply_long_form_chapters_to_description(plan: ShortPlan, narration_seconds: 
 
 
 def append_web_source_credits(plan: ShortPlan, sources: list[dict[str, str]]) -> None:
+    """Credit every web image used, safely on repeat calls.
+
+    Thumbnail photos are fetched after the render has already credited the scene
+    images, so this has to extend the existing block instead of starting a second
+    one — Wikimedia attribution has to survive that second pass.
+    """
+    header = "\n\nLicensed visual source pages:\n"
     source_pages: list[str] = []
     for source in sources:
         page = source.get("source_page", "").strip()
-        if page.startswith(("https://", "http://")) and page not in source_pages:
+        if (
+            page.startswith(("https://", "http://"))
+            and page not in source_pages
+            and page not in plan.description
+        ):
             source_pages.append(page)
     if not source_pages:
         return
-    credit = "\n\nLicensed visual source pages:\n" + "\n".join(f"- {url}" for url in source_pages)
-    plan.description = (plan.description + credit)[:5000]
+    listing = "\n".join(f"- {url}" for url in source_pages)
+    if header in plan.description:
+        plan.description = f"{plan.description.rstrip()}\n{listing}"[:5000]
+    else:
+        plan.description = f"{plan.description}{header}{listing}"[:5000]
 
 
 def web_source_is_wikimedia(source: dict[str, str]) -> bool:
@@ -5176,6 +5456,18 @@ def prepare_long_form_images(plan: ShortPlan, client: VisualAssetProvider, outpu
         if not image_ready(long_form_image_path(output_dir, index))
     ]
     openai_budget = max(0, client.s.long_form_openai_images)
+    if len(missing) > openai_budget:
+        # The web pass under-delivered. Stretching the generated-image budget is
+        # much better than the alternative below, which fills the gap by repeating
+        # the previous visual.
+        stretched = min(len(missing), max(openai_budget, client.s.long_form_openai_images_max))
+        if stretched > openai_budget:
+            LOG.info(
+                "Web images covered fewer beats than planned; raising the generated-image budget from %d to %d.",
+                openai_budget,
+                stretched,
+            )
+            openai_budget = stretched
     if len(missing) <= openai_budget:
         openai_indexes = set(missing)
     else:
@@ -5370,6 +5662,7 @@ def mux_long_form_final(
     caption_seconds = min(narration_seconds, target_duration)
     cues = caption_cues_from_text(plan.narration, caption_seconds)
     write_ass_captions(cues, captions, play_res_x=1920, play_res_y=1080, font_size=58, margin_v=92)
+    LOG.info("Generated %d English caption cues synced to %.2fs narration.", len(cues), caption_seconds)
     final_video = output_dir / "long.mp4"
     LOG.info("Muxing horizontal long-form video...")
     mux_video_audio_with_captions(
@@ -6178,6 +6471,10 @@ def publish_long_form_video(
         settings,
         image_provider=image_provider,
     )
+    if image_provider is not None:
+        # The thumbnail frames are real photos fetched just now, so their licence
+        # pages have to reach the description before it is uploaded.
+        append_web_source_credits(plan, image_provider.web_sources)
     youtube_id = upload_to_youtube(video, plan, settings, privacy, thumbnail=thumbnail)
     # Long-form is YouTube-only. Facebook/TikTok Vietnamese publishing applies
     # to the separate Short workflow only.

@@ -1054,7 +1054,53 @@ def test_thumbnail_headline_is_auto_sized_down_so_long_copy_still_fits(tmp_path)
     assert short_lines == ["ROME"]
     # Longer copy must shrink rather than overflow the text column.
     assert long_size < short_size
-    assert len(long_lines) <= 3
+    assert len(long_lines) <= 4
+
+
+def test_thumbnail_headline_prefers_the_title_over_a_cryptic_teaser():
+    plan = _long_form_plan(
+        topic="Fall of the Roman Empire",
+        title="Why Rome Really Fell: The Collapse Explained",
+    )
+
+    # Two-word teaser fragments ("No Fuel", "One Road?") read as a riddle.
+    assert bot.thumbnail_headline(_long_form_plan(
+        topic=plan.topic, title=plan.title, thumbnail_text="No Fuel",
+    )) == "WHY ROME REALLY FELL: THE COLLAPSE EXPLAINED"
+    # So does a phrase that names nothing the video is about.
+    assert bot.thumbnail_headline(_long_form_plan(
+        topic=plan.topic, title=plan.title, thumbnail_text="The Real Story",
+    )) == "WHY ROME REALLY FELL: THE COLLAPSE EXPLAINED"
+    # A packaged phrase that stands on its own is kept.
+    assert bot.thumbnail_headline(_long_form_plan(
+        topic=plan.topic, title=plan.title, thumbnail_text="Why Rome Actually Collapsed",
+    )) == "WHY ROME ACTUALLY COLLAPSED"
+
+
+def test_thumbnail_headline_strips_channel_suffixes_and_never_comes_back_empty():
+    assert bot.thumbnail_headline(_long_form_plan(
+        topic="Coffee", title="How Coffee Took Over The World | WorldZone", thumbnail_text="",
+    )) == "HOW COFFEE TOOK OVER THE WORLD"
+    assert bot.thumbnail_headline(_long_form_plan(
+        topic="", title="", thumbnail_text="",
+    )) == "EXPLAINED"
+
+
+def test_thumbnail_emphasis_lands_on_the_subject_and_never_on_filler():
+    plan = _long_form_plan(topic="The Great Wall of China", title="Why The Great Wall Was Built")
+
+    emphasis = bot.thumbnail_emphasis_words("THE REAL REASON THE GREAT WALL OF CHINA WAS BUILT", plan)
+
+    assert "CHINA" in emphasis
+    assert len(emphasis) == 2
+    assert not emphasis & {"THE", "OF", "WAS", "REAL"}
+
+
+def test_thumbnail_emphasis_falls_back_to_the_strongest_word_without_a_plan():
+    emphasis = bot.thumbnail_emphasis_words("WHO REALLY BUILT THE PYRAMIDS", limit=1)
+
+    # "REALLY" and "THE" are filler; the concrete noun is what earns the accent.
+    assert emphasis == {"PYRAMIDS"}
 
 
 def test_create_long_form_thumbnail_frames_real_web_photos(tmp_path, monkeypatch):

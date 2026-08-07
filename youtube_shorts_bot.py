@@ -2288,7 +2288,7 @@ LONG_FORM_PLAN_SCHEMA = '''{
   "topic":"specific subject/event/process to explain, not related to Vietnam",
   "angle":"specific explanatory angle with broad viewer appeal",
   "title":"<=70 chars, English, curiosity-driven but factual, names the main subject in the first 40 characters",
-  "thumbnail_text":"2-4 punchy words, <=22 characters total, names the same main subject in words big enough to read on a phone",
+  "thumbnail_text":"3-6 words, <=34 characters: a plain-English phrase a stranger understands at a glance. Name the main subject AND what the video explains about it. Never a cryptic teaser fragment",
   "thumbnail_subject":"what the thumbnail IMAGE should show: one recognizable hero character or object doing one clear action, described visually (no words or letters in the image)",
   "description":"English YouTube description with exactly 2 hashtags and a brief AI-assisted disclosure",
   "tags":["exactly 2 tags"],
@@ -3039,7 +3039,7 @@ def replace_long_form_hook(plan: ShortPlan, new_hook: str) -> None:
 LONG_FORM_PACKAGING_SCHEMA = '''{
   "title_options":["five distinct candidate titles, each <=70 characters"],
   "title":"the single strongest option, <=70 characters",
-  "thumbnail_text":"2-4 words, <=22 characters total",
+  "thumbnail_text":"3-6 words, <=34 characters, plain English, names the subject and what is explained about it",
   "thumbnail_subject":"what the thumbnail image shows: one hero character or object, close up, mid-action, no words or letters",
   "hook":"the rewritten cold open, 2-3 spoken sentences, <=55 words",
   "packaging_note":"one sentence on why this title and thumbnail pair earns the click"
@@ -3069,7 +3069,7 @@ TITLE rules:
 - Write five genuinely different candidates — vary the angle (the question, the surprising fact, the stakes, the person, the reversal) rather than rewording one idea — then pick the strongest as title.
 
 THUMBNAIL rules:
-- thumbnail_text is read at the size of a postage stamp: 2-4 words, at most 22 characters. It must ADD to the title, not repeat it word for word.
+- thumbnail_text is the only sentence most viewers read: 3-6 words, at most 34 characters, plain English. A stranger who knows nothing about the subject must understand roughly what the video is about from it alone, so it has to NAME the subject and say what is explained about it. Never a cryptic teaser fragment ("No Fuel", "One Road?") and never a riddle that only makes sense after watching. It may share words with the title.
 - thumbnail_subject describes the picture, not the words: ONE hero character or object, framed close, caught mid-action, with a clear emotion or a dramatic moment, instantly recognizable as this subject. Name what it is doing and what is around it. No text, letters, logos, or watermarks in the image.
 
 HOOK rules:
@@ -3250,7 +3250,7 @@ Hard rules:
 - CLARITY: write plain, vivid spoken English for a general viewer with no background. One clear idea per sentence, define any name or term the moment it first appears, and use concrete cause-and-effect and everyday comparisons instead of jargon. A distracted viewer must be able to follow it on the first listen.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
 - TITLE (this decides the click): at most 70 characters so it does not truncate on a phone. Name the concrete subject inside the first 40 characters, then add ONE curiosity gap — the surprising outcome, the unanswered question, or the thing that does not add up. It must be literally true and deliverable by the script; no bait the video does not pay off. No ALL-CAPS words, no clickbait punctuation spam.
-- THUMBNAIL: thumbnail_text is 2-4 words and at most 22 characters — it is read on a phone at thumbnail size, so long phrases are wasted. thumbnail_subject describes the IMAGE: ONE hero character or object, close up, mid-action, instantly recognizable as this subject, with a clear emotion or dramatic moment. No words or letters in the image.
+- THUMBNAIL: thumbnail_text is 3-6 words and at most 34 characters, plain English that names the subject and says what is explained about it, understandable to someone who has never heard of it. No cryptic teaser fragments. thumbnail_subject describes the IMAGE: ONE hero character or object, close up, mid-action, instantly recognizable as this subject, with a clear emotion or dramatic moment. No words or letters in the image.
 - Use a save/share test: the viewer should finish able to explain the subject to a friend in a sentence or two.
 - WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words and treat {target_max_words} as a hard ceiling — the timeline follows the narration audio, so every extra 100 words adds about 40 seconds to the video. Never pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
@@ -3284,7 +3284,7 @@ Rules:
 - CHAPTERS: keep {min_chapters}-{max_chapters} chapters. Each must raise one concrete question, answer it with specifics, and hand off to the next. Every chapter's opening_sentence must be the exact verbatim first sentence of that chapter in narration — fix any that no longer match after your edits, because they become YouTube chapter timestamps.
 - MILESTONES AND DEPTH: keep the concrete turning points, the obstacle that had to be solved, the surprise, and the consequence. Cut abstract summary sentences in favour of specific, picturable detail. Never let a chapter end flat — it should open the next question.
 - TITLE: at most 70 characters, subject named inside the first 40, exactly one curiosity gap, literally true and paid off by the script. No ALL-CAPS words, no punctuation spam.
-- THUMBNAIL: thumbnail_text is 2-4 words and at most 22 characters. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
+- THUMBNAIL: thumbnail_text is 3-6 words and at most 34 characters, plain English naming the subject and what is explained about it, never a cryptic teaser. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
 - Rewrite any sentence a general viewer could not follow on first listen: prefer plain spoken English, one idea per sentence, defined terms, and concrete comparisons over jargon.
 - The narration must begin with hook and end with closing_line.
 - The scenes must total exactly {duration} seconds and be stick-figure explainer visual prompts. Roughly one scene in three should carry a real-photo search_query for a famous place, landmark, building, map, artifact, artwork, document, or historical photograph, spread evenly rather than clustered; add search_query values where the draft missed an obvious one.
@@ -3525,7 +3525,7 @@ Rules:
 - DEPTH: this is a {duration // 60}-minute video, so go past the summary — the concrete detail of how it was actually done, the obstacle, the surprise, the consequence. Every 60-90 seconds, tease something you have not explained yet.
 - Do NOT invent statistics, dates, quotations, casualty numbers, market data, scores, or source names. Build from general knowledge and stay qualitative when a precise figure is unknown; never fabricate precise facts or citations.
 - TITLE: at most 70 characters, naming the central person, place, event, company, route, or work of the idea inside the first 40 characters, plus exactly one curiosity gap the script actually pays off. No ALL-CAPS words, no punctuation spam.
-- THUMBNAIL: thumbnail_text is 2-4 words and at most 22 characters naming that same subject. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
+- THUMBNAIL: thumbnail_text is 3-6 words and at most 34 characters, plain English naming that same subject and what is explained about it, never a cryptic teaser. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
 - WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words. The timeline follows the narration audio, so do not pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
 - Visuals: {manual_visual_rules}
@@ -3870,14 +3870,81 @@ THUMBNAIL_FRAME_LAYOUTS: dict[int, list[tuple[int, int, int, int, float]]] = {
 THUMBNAIL_MAX_PHOTOS = max(THUMBNAIL_FRAME_LAYOUTS)
 
 
+# Never highlighted, and never enough on their own to make a headline mean
+# something. A painted red box around "THE" reads as a rendering mistake.
+THUMBNAIL_FILLER_WORDS = frozenset({
+    "THE", "A", "AN", "OF", "IN", "ON", "AT", "TO", "FOR", "AND", "OR", "BUT", "IS", "ARE",
+    "WAS", "WERE", "IT", "ITS", "THIS", "THAT", "THESE", "THOSE", "WITH", "FROM", "BY", "AS",
+    "INTO", "OVER", "AFTER", "BEFORE", "WHY", "HOW", "WHAT", "WHEN", "WHERE", "WHO", "DID",
+    "DO", "DOES", "HAS", "HAVE", "HAD", "REALLY", "ACTUALLY", "EXPLAINED", "STORY", "ABOUT",
+    "YOU", "YOUR", "WE", "THEY", "HIS", "HER", "THEIR", "ONE", "TWO", "NOT", "NO",
+})
+
+
+def _headline_word_key(word: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", word.upper())
+
+
 def thumbnail_headline(plan: ShortPlan) -> str:
-    """Return a concise, concrete subject label for a YouTube thumbnail."""
-    raw = plan.thumbnail_text or plan.topic or plan.title
-    clean = re.sub(r"\s+", " ", raw).strip()
-    words = clean.split()
-    # The writer normally returns 2-4 words. The fallback keeps old plans and
-    # malformed model output readable without hiding the named subject.
-    return " ".join(words[:6]).upper() or "DOCUMENTARY"
+    """A headline a stranger can read once and know what the video is about.
+
+    The packaging pass compresses thumbnail_text hard, and it used to come back
+    as a teaser fragment ("No Fuel", "One Road?") that reads as a riddle on the
+    thumbnail. A packaged candidate is therefore only accepted when it is long
+    enough to stand on its own and actually names something the video is about;
+    otherwise the title wins, because the planner is already required to name
+    the main subject there.
+    """
+    def clean(value: str) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip().strip("\"'“”")
+        # Titles often carry a channel suffix or a trailing bracketed note.
+        text = re.split(r"\s+[|–—]\s+", text)[0]
+        return re.sub(r"[\[(].*?[\])]", "", text).strip(" -–—:;,")
+
+    subject_keys = {
+        key
+        for source in (plan.topic, plan.title)
+        for key in (_headline_word_key(word) for word in str(source or "").split())
+        if len(key) >= 4 and key not in THUMBNAIL_FILLER_WORDS
+    }
+
+    for index, candidate in enumerate((plan.thumbnail_text, plan.title, plan.topic)):
+        words = clean(candidate).split()
+        if not words:
+            continue
+        names_subject = not subject_keys or bool(
+            {_headline_word_key(word) for word in words} & subject_keys
+        )
+        # Index 0 is the packaged teaser, and it has to earn its place.
+        if index > 0 or (len(words) >= 3 and names_subject):
+            return " ".join(words[:8]).upper()[:64]
+    return "EXPLAINED"
+
+
+def thumbnail_emphasis_words(headline: str, plan: ShortPlan | None = None, limit: int = 2) -> set[str]:
+    """Which headline words get the painted accent panel behind them.
+
+    Subject words win: putting the accent on the thing the video is about is
+    what makes a thumbnail scannable at feed size. Longer content words break
+    the tie, and filler is never highlighted.
+    """
+    subject_keys: set[str] = set()
+    if plan is not None:
+        subject_keys = {
+            key
+            for source in (plan.topic, plan.thumbnail_subject)
+            for key in (_headline_word_key(word) for word in str(source or "").split())
+            if len(key) >= 4
+        }
+    scored = sorted(
+        {
+            (1 if key in subject_keys else 0, len(key), key)
+            for key in (_headline_word_key(word) for word in headline.split())
+            if len(key) >= 3 and key not in THUMBNAIL_FILLER_WORDS
+        },
+        reverse=True,
+    )
+    return {key for _is_subject, _length, key in scored[: max(1, limit)]}
 
 
 def thumbnail_kicker(plan: ShortPlan) -> str:
@@ -4085,44 +4152,73 @@ def _thumbnail_backdrop(photos: list[Path], width: int, height: int):
     )
 
 
+def _line_width(draw, words: list[str], font) -> float:
+    """Width of ``words`` laid out word by word, the way the headline is drawn."""
+    if not words:
+        return 0.0
+    space = draw.textlength(" ", font=font)
+    return sum(draw.textlength(word, font=font) for word in words) + space * (len(words) - 1)
+
+
+def _highlight_padding(size: int) -> tuple[int, int]:
+    """How far the painted accent panel sits proud of the word it covers.
+
+    Generous on both axes: the brush edge eats into the panel by design, and a
+    tight panel would let that bite reach the letters it is meant to sit behind.
+    """
+    return max(9, round(size * 0.17)), max(7, round(size * 0.17))
+
+
 def _wrap_to_width(draw, text: str, font, max_width: int) -> list[str]:
     lines: list[str] = []
-    current = ""
+    current: list[str] = []
     for word in text.split():
-        candidate = f"{current} {word}".strip()
-        if current and draw.textlength(candidate, font=font) > max_width:
-            lines.append(current)
-            current = word
+        if current and _line_width(draw, [*current, word], font) > max_width:
+            lines.append(" ".join(current))
+            current = [word]
         else:
-            current = candidate
+            current.append(word)
     if current:
-        lines.append(current)
+        lines.append(" ".join(current))
     return lines
 
 
-def _headline_stroke_width(size: int) -> int:
-    return max(5, size // 9)
-
-
-def _fit_headline(draw, text: str, max_width: int, max_lines: int = 3):
+def _fit_headline(draw, text: str, max_width: int, max_lines: int = 4):
     """Pick the largest font size at which the headline still fits the text column.
 
     Both conditions matter. Checking only the line count lets a single long word
-    such as "CONSTANTINOPLE" sit on its own line and run straight across the hero
-    subject, because the greedy wrapper never splits a word.
+    such as "CONSTANTINOPLE" sit on its own line and run straight across the
+    photo frames, because the greedy wrapper never splits a word. The budget
+    leaves room for the accent panel, which is painted wider than its word.
     """
-    for size in range(112, 31, -4):
+    for size in range(104, 25, -4):
         font = _thumbnail_font(size)
-        lines = _wrap_to_width(draw, text, font, max_width)
-        budget = max_width - 2 * _headline_stroke_width(size)
+        budget = max_width - 2 * _highlight_padding(size)[0]
+        lines = _wrap_to_width(draw, text, font, budget)
         if len(lines) <= max_lines and all(
-            draw.textlength(line, font=font) <= budget for line in lines
+            _line_width(draw, line.split(), font) <= budget for line in lines
         ):
             return font, lines, size
     # Nothing fits: keep the smallest size and let the copy be clipped to the
-    # line budget rather than let it spill over the picture.
-    font = _thumbnail_font(32)
-    return font, _wrap_to_width(draw, text, font, max_width)[:max_lines], 32
+    # line budget rather than let it spill over the pictures.
+    font = _thumbnail_font(26)
+    budget = max_width - 2 * _highlight_padding(26)[0]
+    return font, _wrap_to_width(draw, text, font, budget)[:max_lines], 26
+
+
+def _paint_brush_panel(canvas, left: int, top: int, width: int, height: int, seed: int, angle: float = 0.0):
+    """Stamp a brush-painted accent block, the way a marker highlights a word."""
+    from PIL import Image
+
+    width, height = max(4, width), max(4, height)
+    panel = Image.new("RGBA", (width, height), THUMBNAIL_ACCENT + (255,))
+    panel.putalpha(_brush_edge_mask(width, height, seed, amplitude=max(3, min(9, height // 14)), dabs=18))
+    if angle:
+        panel = panel.rotate(angle, resample=Image.BICUBIC, expand=True)
+        left -= (panel.width - width) // 2
+        top -= (panel.height - height) // 2
+    canvas.paste(panel.convert("RGB"), (left, top), panel.getchannel("A"))
+    return canvas
 
 
 def render_long_form_thumbnail_image(
@@ -4131,14 +4227,16 @@ def render_long_form_thumbnail_image(
     kicker: str,
     destination: Path,
     logo: Path | None = None,
+    emphasis: set[str] | None = None,
 ) -> Path:
     """Compose the finished 1280x720 thumbnail.
 
     A designed backdrop carries one to three real photos, each mounted in a
     tilted white mat with a brush-painted edge, with the headline held in the
-    left column. Composed in Pillow rather than with ffmpeg drawtext so the
-    headline can be auto-sized to the copy, stroked heavily enough to survive a
-    busy background, and kept clear of the photo cluster.
+    left column. The headline is plain white with no outline; the words worth
+    stopping for get a brush-painted accent panel behind them instead, matching
+    the kicker badge above. Composed in Pillow rather than with ffmpeg drawtext
+    so the copy can be auto-sized and kept clear of the photo cluster.
     """
     from PIL import Image, ImageDraw, ImageFilter
 
@@ -4164,9 +4262,9 @@ def render_long_form_thumbnail_image(
     canvas = Image.composite(
         Image.new("RGB", canvas.size, (6, 8, 14)),
         canvas,
-        # Reaches just past the text column so the headline keeps its contrast
-        # without dulling the framed photos beside it.
-        _left_scrim_mask(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, reach=0.52, strength=0.82),
+        # The headline no longer carries an outline, so the scrim is what holds
+        # its contrast. It still stops short of the framed photos beside it.
+        _left_scrim_mask(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, reach=0.58, strength=0.90),
     )
 
     draw = ImageDraw.Draw(canvas)
@@ -4174,22 +4272,20 @@ def render_long_form_thumbnail_image(
     font, lines, size = _fit_headline(draw, headline, column_width)
     if not lines:
         lines = ["EXPLAINED"]
-    line_height = int(size * 1.12)
+    highlighted = thumbnail_emphasis_words(headline) if emphasis is None else set(emphasis)
+    line_height = round(size * 1.20)
     kicker_font = _thumbnail_font(34)
     kicker_text = kicker.strip().upper()[:20]
-    kicker_height = 58 if kicker_text else 0
+    kicker_height = 66 if kicker_text else 0
     block_height = kicker_height + len(lines) * line_height
-    top = max(48, (THUMBNAIL_HEIGHT - block_height) // 2)
+    top = max(44, (THUMBNAIL_HEIGHT - block_height) // 2)
 
     if kicker_text:
-        badge_width = int(draw.textlength(kicker_text, font=kicker_font)) + 44
-        draw.rounded_rectangle(
-            (THUMBNAIL_TEXT_LEFT, top, THUMBNAIL_TEXT_LEFT + badge_width, top + 46),
-            radius=10,
-            fill=THUMBNAIL_ACCENT,
-        )
+        badge_width = round(draw.textlength(kicker_text, font=kicker_font)) + 46
+        canvas = _paint_brush_panel(canvas, THUMBNAIL_TEXT_LEFT, top, badge_width, 50, seed=4231, angle=-1.5)
+        draw = ImageDraw.Draw(canvas)
         draw.text(
-            (THUMBNAIL_TEXT_LEFT + 22, top + 23),
+            (THUMBNAIL_TEXT_LEFT + 23, top + 25),
             kicker_text,
             font=kicker_font,
             fill=THUMBNAIL_INK,
@@ -4197,36 +4293,35 @@ def render_long_form_thumbnail_image(
         )
 
     headline_top = top + kicker_height
-    # Accent bar down the left edge of the headline, the channel's visual signature.
-    draw.rounded_rectangle(
-        (
-            THUMBNAIL_TEXT_LEFT - 30,
-            headline_top + 6,
-            THUMBNAIL_TEXT_LEFT - 16,
-            headline_top + len(lines) * line_height - 6,
-        ),
-        radius=7,
-        fill=THUMBNAIL_ACCENT,
-    )
-    stroke = _headline_stroke_width(size)
+    pad_x, pad_y = _highlight_padding(size)
+    space_width = draw.textlength(" ", font=font)
     for index, line in enumerate(lines):
         y = headline_top + index * line_height
-        draw.text(
-            (THUMBNAIL_TEXT_LEFT + 5, y + 6),
-            line,
-            font=font,
-            fill=(0, 0, 0),
-            stroke_width=stroke,
-            stroke_fill=(0, 0, 0),
-        )
-        draw.text(
-            (THUMBNAIL_TEXT_LEFT, y),
-            line,
-            font=font,
-            fill=THUMBNAIL_INK,
-            stroke_width=stroke,
-            stroke_fill=(10, 10, 14),
-        )
+        words = line.split()
+        # One vertical extent for the whole line, so panels on neighbouring words
+        # line up instead of stepping with each word's own glyph bounds.
+        _, ink_top, _, ink_bottom = draw.textbbox((0, 0), line, font=font)
+        cursor = float(THUMBNAIL_TEXT_LEFT)
+        # Paint every panel for the line before any of its words, so a later
+        # panel can never land on top of a word already drawn.
+        for word in words:
+            word_width = draw.textlength(word, font=font)
+            if _headline_word_key(word) in highlighted:
+                canvas = _paint_brush_panel(
+                    canvas,
+                    round(cursor - pad_x),
+                    round(y + ink_top - pad_y),
+                    round(word_width + 2 * pad_x),
+                    round(ink_bottom - ink_top + 2 * pad_y),
+                    seed=hash((word, index)) & 0xFFFF,
+                    angle=-1.7 if index % 2 == 0 else 1.5,
+                )
+            cursor += word_width + space_width
+        draw = ImageDraw.Draw(canvas)
+        cursor = float(THUMBNAIL_TEXT_LEFT)
+        for word in words:
+            draw.text((cursor, y), word, font=font, fill=THUMBNAIL_INK)
+            cursor += draw.textlength(word, font=font) + space_width
 
     if logo is not None and logo.is_file():
         try:
@@ -4404,12 +4499,16 @@ def create_long_form_thumbnail(
         len(photos),
         ", ".join(photo.name for photo in photos),
     )
+    headline = thumbnail_headline(plan)
     render_long_form_thumbnail_image(
         photos=photos,
-        headline=thumbnail_headline(plan),
+        headline=headline,
         kicker=thumbnail_kicker(plan),
         destination=destination,
         logo=logo if logo.is_file() else None,
+        # Computed from the plan so the accent lands on the subject the video is
+        # about, which the headline text alone cannot always identify.
+        emphasis=thumbnail_emphasis_words(headline, plan),
     )
     if not destination.is_file() or destination.stat().st_size < 1024:
         raise BotError("Thumbnail long-form không tạo được ảnh JPEG hợp lệ.")

@@ -46,6 +46,10 @@ BOT_SCRIPT = ROOT / "youtube_shorts_bot.py"
 ACCESS_TOKEN = os.getenv("WEB_ACCESS_TOKEN", "").strip()
 DEFAULT_PRIVACY = os.getenv("YOUTUBE_PRIVACY_STATUS", "private").strip() or "private"
 WORKER_POLL_SECONDS = float(os.getenv("WEB_WORKER_POLL_SECONDS", "3"))
+# The worker renders one video at a time, so a child that never exits blocks
+# every idea queued behind it — the queue only recovers on a redeploy. A long
+# video legitimately takes ~30 minutes, so the ceiling is generous.
+JOB_TIMEOUT_SECONDS = float(os.getenv("WEB_JOB_TIMEOUT_SECONDS", "5400"))
 PRIVACY_CHOICES = ("private", "unlisted", "public")
 
 app = Flask(__name__)
@@ -188,6 +192,25 @@ def api_jobs():
     return jsonify(jobs)
 
 
+@app.route("/cancel/<int:idea_id>", methods=["POST"])
+@login_required
+def cancel(idea_id: int):
+    """Drop a queued or stuck job so the next idea can start straight away."""
+    archive = get_archive()
+    row = archive.get_idea(idea_id)
+    if not row:
+        return jsonify({"ok": False, "error": "Không tìm thấy job."}), 404
+    status = str(row.get("status") or "")
+    if status not in ("pending", "processing"):
+        return jsonify({"ok": False, "error": f"Job đang ở trạng thái '{status}', không cần huỷ."}), 400
+    # Mark it first: process_one only overwrites a row that is still
+    # 'processing', so this is what stops the worker relabelling it on exit.
+    archive.update_idea(idea_id, "failed", error="Đã huỷ từ dashboard.")
+    stopped = stop_running_job(idea_id)
+    LOG.info("Đã huỷ idea id=%s (tiến trình đang chạy: %s).", idea_id, stopped)
+    return jsonify({"ok": True, "stopped": stopped})
+
+
 @app.route("/healthz")
 def healthz():
     return "ok", 200
@@ -196,7 +219,30 @@ def healthz():
 # --------------------------------------------------------------------------- #
 # Worker: nhặt ý tưởng pending -> chạy bot subprocess (render tuần tự 1 luồng)
 # --------------------------------------------------------------------------- #
+# Handle on the render currently running, so a timeout or the dashboard's cancel
+# button can actually stop it instead of waiting for the next redeploy.
+_current_job_lock = threading.Lock()
+_current_job: tuple[int, subprocess.Popen] | None = None
+
+
+def stop_running_job(idea_id: int) -> bool:
+    """Kill the child process if it is the one rendering ``idea_id``."""
+    with _current_job_lock:
+        running = _current_job
+    if not running or running[0] != idea_id:
+        return False
+    process = running[1]
+    process.terminate()
+    try:
+        process.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    return True
+
+
 def process_one(archive: Archive) -> bool:
+    global _current_job
+
     row = archive.claim_next_idea()
     if not row:
         return False
@@ -204,17 +250,36 @@ def process_one(archive: Archive) -> bool:
     LOG.info("Worker bắt đầu idea id=%s (mode=%s)", idea_id, row.get("mode"))
     cmd = [sys.executable, "-u", str(BOT_SCRIPT), "--idea-id", str(idea_id)]
     try:
-        proc = subprocess.run(cmd, cwd=str(ROOT))
-        returncode = proc.returncode
+        process = subprocess.Popen(cmd, cwd=str(ROOT))
     except Exception as exc:  # không thể spawn được tiến trình
         LOG.exception("Không chạy được bot cho idea id=%s: %s", idea_id, exc)
         archive.update_idea(idea_id, "failed", error=f"spawn error: {exc}"[:2000])
         return True
+    with _current_job_lock:
+        _current_job = (idea_id, process)
+    timed_out = False
+    try:
+        returncode = process.wait(timeout=JOB_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        LOG.error(
+            "Idea id=%s chạy quá %.0fs; dừng tiến trình để giải phóng hàng đợi.",
+            idea_id, JOB_TIMEOUT_SECONDS,
+        )
+        process.kill()
+        returncode = process.wait()
+    finally:
+        with _current_job_lock:
+            _current_job = None
     # Bot tự set done/failed. Nếu thoát lỗi mà row vẫn 'processing' -> đánh dấu failed.
+    # Job đã huỷ từ dashboard không còn 'processing' nên không bị ghi đè ở đây.
     fresh = archive.get_idea(idea_id)
     if fresh and fresh.get("status") == "processing":
-        status = "failed" if returncode != 0 else "done"
-        archive.update_idea(idea_id, status, error=(f"exit code {returncode}" if returncode != 0 else None))
+        if timed_out:
+            archive.update_idea(idea_id, "failed", error=f"timeout sau {JOB_TIMEOUT_SECONDS:.0f}s")
+        else:
+            status = "failed" if returncode != 0 else "done"
+            archive.update_idea(idea_id, status, error=(f"exit code {returncode}" if returncode != 0 else None))
     LOG.info("Worker xong idea id=%s (exit=%s)", idea_id, returncode)
     return True
 
@@ -372,6 +437,11 @@ tbody tr:hover{background:rgba(255,255,255,.022)}
 .c-id{font-family:var(--mono);font-size:11px;color:var(--faint);width:52px}
 .c-type{width:96px}
 .c-status{width:132px}
+.c-act{width:64px;text-align:right}
+.xbtn{background:transparent;border:1px solid #6b2532;color:#e2687c;border-radius:7px;
+  padding:3px 10px;font-size:11px;font-family:var(--mono);cursor:pointer}
+.xbtn:hover{background:#6b2532;color:#fff}
+.xbtn:disabled{opacity:.5;cursor:default}
 .c-res{width:150px}
 .c-time{width:104px;font-family:var(--mono);font-size:11px;color:var(--faint);white-space:nowrap}
 .type{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;
@@ -560,10 +630,10 @@ INDEX_HTML = """<!doctype html><html lang=vi><head><meta charset=utf-8>
       <table>
         <thead><tr>
           <th class="c-id">#</th><th class="c-type">Loại</th><th>Nội dung</th>
-          <th class="c-status">Trạng thái</th><th class="c-res">Kết quả</th><th class="c-time">Lúc</th>
+          <th class="c-status">Trạng thái</th><th class="c-res">Kết quả</th><th class="c-time">Lúc</th><th class="c-act"></th>
         </tr></thead>
         <tbody id="jobs">
-          <tr><td colspan="6" style="padding:0"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></td></tr>
+          <tr><td colspan="7" style="padding:0"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></td></tr>
         </tbody>
       </table>
     </div>
@@ -595,7 +665,7 @@ function renderJobs(jobs){
   $('#hdStat').textContent = busy ? 'rendering' : (c.pending ? 'queued' : 'idle');
 
   if(!jobs.length){
-    box.innerHTML = '<tr><td colspan="6"><div class="empty">chưa có job nào — nhập ý tưởng để bắt đầu</div></td></tr>';
+    box.innerHTML = '<tr><td colspan="7"><div class="empty">chưa có job nào — nhập ý tưởng để bắt đầu</div></td></tr>';
     return;
   }
   box.innerHTML = jobs.map(j => {
@@ -609,6 +679,7 @@ function renderJobs(jobs){
     else if(j.status === 'processing') res = '<span class="muted">đang xử lý…</span>';
     const title = j.output_title ? '<div class="jt">'+esc(j.output_title)+'</div>' : '';
     const dot = j.status === 'processing' ? '<span class="livedot"></span>' : '';
+    const canCancel = j.status === 'pending' || j.status === 'processing';
     return '<tr>'
       + '<td class="c-id">'+esc(j.id)+'</td>'
       + '<td class="c-type">'+type+'</td>'
@@ -616,9 +687,27 @@ function renderJobs(jobs){
       + '<td class="c-status"><span class="pill p-'+b[0]+'">'+dot+esc(b[1])+'</span></td>'
       + '<td class="c-res">'+res+'</td>'
       + '<td class="c-time">'+fmt(j.created_at)+'</td>'
+      + '<td class="c-act">'+(canCancel ? '<button class="xbtn" data-cancel="'+esc(j.id)+'" title="Huỷ job này">Huỷ</button>' : '')+'</td>'
       + '</tr>';
   }).join('');
 }
+
+async function cancelJob(id, button){
+  if(!confirm('Huỷ job #'+id+'? Job đang chạy sẽ bị dừng ngay.')) return;
+  button.disabled = true;
+  button.textContent = '…';
+  try{
+    const r = await fetch('/cancel/'+id, {method:'POST'});
+    const data = await r.json().catch(() => ({}));
+    if(!r.ok || !data.ok) alert(data.error || 'Không huỷ được job.');
+  }catch(e){ alert('Không huỷ được job: ' + e); }
+  poll();
+}
+
+document.addEventListener('click', ev => {
+  const button = ev.target.closest('[data-cancel]');
+  if(button) cancelJob(button.getAttribute('data-cancel'), button);
+});
 
 async function poll(){ try{ const r = await fetch('/api/jobs',{cache:'no-store'}); if(r.ok) renderJobs(await r.json()); }catch(e){} }
 

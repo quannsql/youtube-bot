@@ -1299,6 +1299,31 @@ class OpenAIImageClient:
         )
 
 
+# Tokens that mark a search result as artwork-for-interfaces rather than a
+# photograph of the thing itself.
+NON_PHOTO_IMAGE_TOKENS = frozenset({
+    "logo", "logos", "icon", "icons", "clipart", "vector", "vectors", "emblem",
+    "favicon", "symbol", "symbols", "pictogram", "wordmark", "sprite", "svg",
+    "placeholder", "noimage", "watermark",
+})
+
+
+def looks_like_non_photo(*texts: str) -> bool:
+    """True when a result is a logo, icon or vector graphic rather than a photograph.
+
+    One of these undermines the whole frame: a search naming a place returns the
+    Google Maps pin, and the thumbnail ends up showing an app icon beside real
+    archive photography. Rasterized SVG is rejected with them, because on
+    Wikimedia that is almost always a modern diagram, flag or interface glyph
+    rather than a scan of a real document or a photograph.
+    """
+    for text in texts:
+        for token in re.split(r"[^a-z0-9]+", str(text or "").lower()):
+            if token in NON_PHOTO_IMAGE_TOKENS:
+                return True
+    return False
+
+
 def save_normalized_jpeg(image_bytes: bytes, destination: Path, label: str) -> bool:
     """Decode and re-encode downloaded bytes so FFmpeg never receives a file it cannot read.
 
@@ -1505,6 +1530,9 @@ class BraveImageSearch:
                 continue
             if not self._allowed_url(image_url) or not self._allowed_url(source_page):
                 continue
+            if looks_like_non_photo(image_url, str(result.get("title") or "")):
+                LOG.debug("Skipping Brave result %s: looks like a logo or icon, not a photo.", image_url)
+                continue
             if not self._matches_orientation(properties, width, height):
                 continue
             try:
@@ -1680,6 +1708,9 @@ class WikimediaCommonsImageSearch:
         ):
             return False
         if not self._safe_https_host(image_url, "wikimedia.org"):
+            return False
+        if looks_like_non_photo(str(page.get("title") or ""), image_url):
+            LOG.debug("Skipping Wikimedia result %s: looks like a logo or icon, not a photo.", image_url)
             return False
         if not BraveImageSearch._matches_orientation(
             {"width": candidate_width, "height": candidate_height},
@@ -1982,7 +2013,7 @@ LONG_FORM_VISUAL_STYLE_RULES = (
     "mammoth beside a cave', 'a cartoon stick figure gathering berries into a woven basket', 'a cartoon stick-figure king handing a scroll to "
     "a kneeling stick figure'). Vary the composition and the number of figures between scenes and keep each image easy to read at a glance. "
     "In visual_prompt avoid readable text, logos, and the names of real people; show roles and actions instead (a king, a soldier, an early human, a scientist). "
-    "REAL PHOTOS ARE ENCOURAGED: set search_query whenever the beat names something a viewer would want to actually SEE — a famous place, "
+    "REAL PHOTOS ARE ENCOURAGED, AND PEOPLE COME FIRST: whenever the narration NAMES a real person, set search_query to that person's name plus 'portrait' or 'photograph'. Otherwise set it whenever the beat names something a viewer would want to actually SEE — a famous place, "
     "landmark, building, city skyline, ruin, monument, historical map, museum artifact, artwork, manuscript or document, famous vehicle or "
     "machine, or a widely published historical photograph or portrait of a well-known figure (e.g. 'Great Pyramid of Giza', 'Western Wall "
     "Jerusalem', 'Rosetta Stone British Museum', 'Trans-Siberian Railway train'). Write search_query as the plain 2-5 word name a picture "
@@ -2314,7 +2345,7 @@ LONG_FORM_PLAN_SCHEMA = '''{
   "topic":"specific subject/event/process to explain, not related to Vietnam",
   "angle":"specific explanatory angle with broad viewer appeal",
   "title":"<=70 chars, English, curiosity-driven but factual, names the main subject in the first 40 characters",
-  "thumbnail_text":"3-6 words, <=34 characters: a plain-English phrase a stranger understands at a glance. Name the main subject AND what the video explains about it. Never a cryptic teaser fragment",
+  "thumbnail_text":"3-6 words, <=34 characters. Name the subject AND give one reason to click: write it as a direct QUESTION, or lead with one concrete surprising specific the script pays off (a person's name, a year, a number, a place). It must be understandable to someone who has never heard of the subject. BANNED: bare filing labels such as 'X Explained', 'X History', 'The Story of X', and cryptic teaser fragments",
   "thumbnail_subject":"what the thumbnail IMAGE should show: one recognizable hero character or object doing one clear action, described visually (no words or letters in the image)",
   "description":"English YouTube description with exactly 2 hashtags and a brief AI-assisted disclosure",
   "tags":["exactly 2 tags"],
@@ -2322,7 +2353,7 @@ LONG_FORM_PLAN_SCHEMA = '''{
   "chapters":[{"title":"<=60 chars milestone label for the YouTube chapter list","question":"the concrete question a viewer has at this point","opening_sentence":"the exact verbatim first sentence of this chapter, copied character for character from narration"}],
   "narration":"English narration that begins with hook and ends with closing_line",
   "closing_line":"last spoken sentence, <=18 words",
-  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 cartoon stick-figure illustration prompt that literally acts out this beat (specific cartoon stick-figure people, actions, props, and setting)","search_query":"leave empty for cartoon stick-figure beats; set to a 2-5 word photo search when a real photograph would genuinely help (famous place, landmark, building, map, artifact, artwork, document, or historical photograph), e.g. 'Great Pyramid of Giza'"}],
+  "scenes":[{"duration":18.0,"visual_prompt":"horizontal 16:9 cartoon stick-figure illustration prompt that literally acts out this beat (specific cartoon stick-figure people, actions, props, and setting)","search_query":"leave empty for cartoon stick-figure beats; otherwise the 2-5 word NAME of ONE specific real thing a camera could photograph — a named person, place, building, artifact, document, vehicle, or a named historical event or photograph, e.g. 'Chiang Kai-shek portrait', 'Treaty of Shimonoseki signing', 'Fort Zeelandia Tainan'. NEVER a generic noun ('map', 'flag', 'soldiers', 'meeting', 'conflict'), never a logo or icon, never an abstract concept"}],
   "fact_note":"what uncertainty was preserved or avoided",
   "source_hints":["credible general-knowledge lead for later verification"]
 }'''
@@ -3065,7 +3096,7 @@ def replace_long_form_hook(plan: ShortPlan, new_hook: str) -> None:
 LONG_FORM_PACKAGING_SCHEMA = '''{
   "title_options":["five distinct candidate titles, each <=70 characters"],
   "title":"the single strongest option, <=70 characters",
-  "thumbnail_text":"3-6 words, <=34 characters, plain English, names the subject and what is explained about it",
+  "thumbnail_text":"3-6 words, <=34 characters. Name the subject AND give one reason to click: write it as a direct QUESTION, or lead with one concrete surprising specific the script pays off (a person's name, a year, a number, a place). It must be understandable to someone who has never heard of the subject. BANNED: bare filing labels such as 'X Explained', 'X History', 'The Story of X', and cryptic teaser fragments",
   "thumbnail_subject":"what the thumbnail image shows: one hero character or object, close up, mid-action, no words or letters",
   "hook":"the rewritten cold open, 2-3 spoken sentences, <=55 words",
   "packaging_note":"one sentence on why this title and thumbnail pair earns the click"
@@ -3095,7 +3126,7 @@ TITLE rules:
 - Write five genuinely different candidates — vary the angle (the question, the surprising fact, the stakes, the person, the reversal) rather than rewording one idea — then pick the strongest as title.
 
 THUMBNAIL rules:
-- thumbnail_text is the only sentence most viewers read: 3-6 words, at most 34 characters, plain English. A stranger who knows nothing about the subject must understand roughly what the video is about from it alone, so it has to NAME the subject and say what is explained about it. Never a cryptic teaser fragment ("No Fuel", "One Road?") and never a riddle that only makes sense after watching. It may share words with the title.
+- thumbnail_text is the only sentence most viewers read, and it has to do two jobs at once: a stranger must understand what the video is about, AND be given a reason to click. Write it as a direct QUESTION, or lead with one concrete surprising specific the script pays off (a person's name, a year, a number, a place). 3-6 words, at most 34 characters. BANNED: bare filing labels ("Taiwan's Conflict Explained", "Rome History", "The Story of Coffee") — they repeat the topic and earn no click; and cryptic teaser fragments ("No Fuel", "One Road?") that only make sense after watching. It may share words with the title.
 - thumbnail_subject describes the picture, not the words: ONE hero character or object, framed close, caught mid-action, with a clear emotion or a dramatic moment, instantly recognizable as this subject. Name what it is doing and what is around it. No text, letters, logos, or watermarks in the image.
 
 HOOK rules:
@@ -3276,7 +3307,7 @@ Hard rules:
 - CLARITY: write plain, vivid spoken English for a general viewer with no background. One clear idea per sentence, define any name or term the moment it first appears, and use concrete cause-and-effect and everyday comparisons instead of jargon. A distracted viewer must be able to follow it on the first listen.
 - Narration must be coherent spoken English, not bullet points, and must begin with hook and end with closing_line.
 - TITLE (this decides the click): at most 70 characters so it does not truncate on a phone. Name the concrete subject inside the first 40 characters, then add ONE curiosity gap — the surprising outcome, the unanswered question, or the thing that does not add up. It must be literally true and deliverable by the script; no bait the video does not pay off. No ALL-CAPS words, no clickbait punctuation spam.
-- THUMBNAIL: thumbnail_text is 3-6 words and at most 34 characters, plain English that names the subject and says what is explained about it, understandable to someone who has never heard of it. No cryptic teaser fragments. thumbnail_subject describes the IMAGE: ONE hero character or object, close up, mid-action, instantly recognizable as this subject, with a clear emotion or dramatic moment. No words or letters in the image.
+- THUMBNAIL: thumbnail_text is 3-6 words, <=34 characters. Name the subject AND give one reason to click: write it as a direct QUESTION, or lead with one concrete surprising specific the script pays off (a person's name, a year, a number, a place). It must be understandable to someone who has never heard of the subject. BANNED: bare filing labels such as 'X Explained', 'X History', 'The Story of X', and cryptic teaser fragments. thumbnail_subject describes the IMAGE: ONE hero character or object, close up, mid-action, instantly recognizable as this subject, with a clear emotion or dramatic moment. No words or letters in the image.
 - Use a save/share test: the viewer should finish able to explain the subject to a friend in a sentence or two.
 - WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words and treat {target_max_words} as a hard ceiling — the timeline follows the narration audio, so every extra 100 words adds about 40 seconds to the video. Never pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
@@ -3308,9 +3339,9 @@ Rules:
 - Treat sensitive peoples, cultures, and religions with respect and neutrality; explain, never judge or push a viewpoint.
 - HOOK: the cold open must be 2-3 sentences and at most 55 words — a specific, scroll-stopping fact, then the exact question the video answers, then the promise of the payoff. Rewrite any vague throat-clearing, any greeting, and any "in this video".
 - CHAPTERS: keep {min_chapters}-{max_chapters} chapters. Each must raise one concrete question, answer it with specifics, and hand off to the next. Every chapter's opening_sentence must be the exact verbatim first sentence of that chapter in narration — fix any that no longer match after your edits, because they become YouTube chapter timestamps.
-- MILESTONES AND DEPTH: keep the concrete turning points, the obstacle that had to be solved, the surprise, and the consequence. Cut abstract summary sentences in favour of specific, picturable detail. Never let a chapter end flat — it should open the next question.
+- MILESTONES AND DEPTH: keep the concrete turning points, the obstacle that had to be solved, the surprise, and the consequence. Keep every NAMED person, place, date, treaty, battle and document — those are what a viewer remembers, so never smooth them back into abstractions. Cut abstract summary sentences in favour of specific, picturable detail. Never let a chapter end flat — it should open the next question.
 - TITLE: at most 70 characters, subject named inside the first 40, exactly one curiosity gap, literally true and paid off by the script. No ALL-CAPS words, no punctuation spam.
-- THUMBNAIL: thumbnail_text is 3-6 words and at most 34 characters, plain English naming the subject and what is explained about it, never a cryptic teaser. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
+- THUMBNAIL: thumbnail_text is 3-6 words, <=34 characters. Name the subject AND give one reason to click: write it as a direct QUESTION, or lead with one concrete surprising specific the script pays off (a person's name, a year, a number, a place). It must be understandable to someone who has never heard of the subject. BANNED: bare filing labels such as 'X Explained', 'X History', 'The Story of X', and cryptic teaser fragments. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
 - Rewrite any sentence a general viewer could not follow on first listen: prefer plain spoken English, one idea per sentence, defined terms, and concrete comparisons over jargon.
 - The narration must begin with hook and end with closing_line.
 - The scenes must total exactly {duration} seconds and be stick-figure explainer visual prompts. Roughly one scene in three should carry a real-photo search_query for a famous place, landmark, building, map, artifact, artwork, document, or historical photograph, spread evenly rather than clustered; add search_query values where the draft missed an obvious one.
@@ -3544,14 +3575,17 @@ Fresh related news headlines from public RSS (use as factual leads when they fit
 
 Rules:
 - Treat the user's idea as the mandatory subject and thesis. Interpret it faithfully even if it is written in another language; the finished narration is in English.
+- REQUIREMENTS: read the user's idea as a checklist, not a theme. Every element it names explicitly — origins, a conflict, milestones, events, influential figures, a period — is a requirement, and each one must get real screen time with NAMED specifics, not a passing mention. Before writing, list the requirements to yourself and give each at least one chapter. A general overview that never names the people, the dates and the events the user asked for is a failed script.
 - Prefer concrete, current facts drawn from the related news above when they fit the idea, but do not copy unrelated stories and do not fabricate details beyond what the leads support.
 - Structure: write {min_chapters}-{max_chapters} chapters and list them in the chapters field in spoken order. Every chapter raises ONE concrete question, answers it with specifics, and hands off to the next question. Anchor the story on concrete milestones and turning points. The narration must begin verbatim with hook and end verbatim with closing_line.
 - Each chapter's opening_sentence must be the EXACT verbatim first sentence of that chapter as it appears in narration; the first one is the first sentence of hook. These become YouTube chapter timestamps, so an inexact copy breaks the video.
 - HOOK: 2-3 sentences, at most 55 words — the single most surprising concrete fact, then the exact question the video answers, then the promise of the payoff. No greeting, no "in this video", no vague throat-clearing.
 - DEPTH: this is a {duration // 60}-minute video, so go past the summary — the concrete detail of how it was actually done, the obstacle, the surprise, the consequence. Every 60-90 seconds, tease something you have not explained yet.
+- NAME THINGS: a viewer remembers people and moments, not abstractions. Name the real people who decided and acted, the real places, the treaties, laws, battles, ships, buildings and documents, and say roughly when each happened. Prefer 'in 1895 the Qing court signed the Treaty of Shimonoseki, handing the island to Japan' over 'the island changed hands'. Stay qualitative only where you genuinely do not know the figure — never invent one.
+- CURIOSITY: open each chapter with the question it answers, answer it with a specific, then raise the next question. Point out what is surprising or counter-intuitive and explain WHY it happened, not just that it did.
 - Do NOT invent statistics, dates, quotations, casualty numbers, market data, scores, or source names. Build from general knowledge and stay qualitative when a precise figure is unknown; never fabricate precise facts or citations.
 - TITLE: at most 70 characters, naming the central person, place, event, company, route, or work of the idea inside the first 40 characters, plus exactly one curiosity gap the script actually pays off. No ALL-CAPS words, no punctuation spam.
-- THUMBNAIL: thumbnail_text is 3-6 words and at most 34 characters, plain English naming that same subject and what is explained about it, never a cryptic teaser. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
+- THUMBNAIL: thumbnail_text is 3-6 words, <=34 characters. Name the subject AND give one reason to click: write it as a direct QUESTION, or lead with one concrete surprising specific the script pays off (a person's name, a year, a number, a place). It must be understandable to someone who has never heard of the subject. BANNED: bare filing labels such as 'X Explained', 'X History', 'The Story of X', and cryptic teaser fragments. thumbnail_subject describes ONE recognizable hero character or object, close up and mid-action, with no words or letters in the image.
 - WORD BUDGET: write roughly {target_min_words}-{target_max_words} spoken English words. The timeline follows the narration audio, so do not pad with filler.
 - Make {scene_count} scenes totaling exactly {duration} seconds. Most scenes should be about {target_scene_duration} seconds.
 - Visuals: {manual_visual_rules}
@@ -3907,6 +3941,15 @@ THUMBNAIL_FILLER_WORDS = frozenset({
 })
 
 
+# A headline ending on one of these is a filing label, not a reason to click:
+# "Taiwan's Conflict Explained" tells a viewer nothing they did not already
+# guess from the topic. The title carries the curiosity gap, so it wins instead.
+THUMBNAIL_LABEL_ENDINGS = frozenset({
+    "EXPLAINED", "HISTORY", "OVERVIEW", "SUMMARY", "TIMELINE", "GUIDE", "BASICS",
+    "INTRO", "INTRODUCTION", "EXPLAINER", "RECAP", "BREAKDOWN", "ORIGINS", "STORY",
+})
+
+
 def _headline_word_key(word: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", word.upper())
 
@@ -3941,9 +3984,17 @@ def thumbnail_headline(plan: ShortPlan) -> str:
         names_subject = not subject_keys or bool(
             {_headline_word_key(word) for word in words} & subject_keys
         )
+        # A bare filing label ("... Explained", "... History") is no more use to a
+        # viewer than the topic itself, so it loses to the title as well.
+        is_label = _headline_word_key(words[-1]) in THUMBNAIL_LABEL_ENDINGS
         # Index 0 is the packaged teaser, and it has to earn its place.
-        if index > 0 or (len(words) >= 3 and names_subject):
-            return " ".join(words[:8]).upper()[:64]
+        if index > 0 or (len(words) >= 3 and names_subject and not is_label):
+            kept = words[:8]
+            # Trimming a long title to the word cap can leave it hanging on a
+            # preposition ("... Disagree Over One"), so drop those back off.
+            while len(kept) > 3 and _headline_word_key(kept[-1]) in THUMBNAIL_FILLER_WORDS:
+                kept.pop()
+            return " ".join(kept).upper()[:64]
     return "EXPLAINED"
 
 
@@ -4407,12 +4458,18 @@ def thumbnail_photo_queries(plan: ShortPlan) -> list[str]:
             seen.add(key)
             queries.append(cleaned)
 
-    push(plan.thumbnail_subject, words=10)
-    push(plan.topic)
+    # The planner's own scene tags come first and carry the whole load. They name
+    # the real people, places and documents the script actually talks about,
+    # which is exactly what belongs in the frames. topic and title are sentences
+    # about the video rather than names of things, so a search on them returns
+    # maps, flags and stock imagery — they are last-resort only.
+    # thumbnail_subject is deliberately unused: it describes a picture to draw
+    # ("a startled harbour pilot gripping a ship wheel"), not a thing to find.
     tagged = [scene.search_query.strip() for scene in plan.scenes if scene.search_query.strip()]
     if tagged:
-        for position in sorted(distributed_web_image_indexes(len(tagged), 6)):
+        for position in sorted(distributed_web_image_indexes(len(tagged), 8)):
             push(tagged[position - 1])
+    push(plan.topic)
     push(plan.title)
     return queries[:10]
 

@@ -1066,11 +1066,11 @@ def test_thumbnail_headline_prefers_the_title_over_a_cryptic_teaser():
     # Two-word teaser fragments ("No Fuel", "One Road?") read as a riddle.
     assert bot.thumbnail_headline(_long_form_plan(
         topic=plan.topic, title=plan.title, thumbnail_text="No Fuel",
-    )) == "WHY ROME REALLY FELL: THE COLLAPSE EXPLAINED"
+    )) == "WHY ROME REALLY FELL: THE COLLAPSE"
     # So does a phrase that names nothing the video is about.
     assert bot.thumbnail_headline(_long_form_plan(
         topic=plan.topic, title=plan.title, thumbnail_text="The Real Story",
-    )) == "WHY ROME REALLY FELL: THE COLLAPSE EXPLAINED"
+    )) == "WHY ROME REALLY FELL: THE COLLAPSE"
     # A packaged phrase that stands on its own is kept.
     assert bot.thumbnail_headline(_long_form_plan(
         topic=plan.topic, title=plan.title, thumbnail_text="Why Rome Actually Collapsed",
@@ -1152,11 +1152,44 @@ def test_thumbnail_photo_queries_spread_across_the_video_instead_of_repeating_on
 
     queries = bot.thumbnail_photo_queries(plan)
 
-    assert queries[0].startswith("a startled harbour pilot")
-    assert "Strait of Hormuz" in queries
+    # The planner's scene tags name real people and places, so they lead.
     sampled = [query for query in queries if query.startswith("subject ")]
+    assert queries[0].startswith("subject ")
     assert len(sampled) > 1
     assert len(sampled) == len(set(sampled))
+    # thumbnail_subject describes a picture to draw, not a thing to search for.
+    assert not any(query.startswith("a startled harbour pilot") for query in queries)
+    # The topic is a last-resort fallback, kept for plans with no tagged beats.
+    assert "Strait of Hormuz" in queries
+
+
+def test_thumbnail_photo_queries_fall_back_to_the_topic_when_no_beat_is_tagged():
+    plan = _long_form_plan(topic="Strait of Hormuz")
+
+    assert bot.thumbnail_photo_queries(plan)[0] == "Strait of Hormuz"
+
+
+def test_logo_and_icon_results_are_rejected_but_real_photographs_are_kept():
+    # The Google Maps pin reached a finished thumbnail through exactly this path.
+    assert bot.looks_like_non_photo("Google Maps icon (2020).svg", "https://upload.wikimedia.org/x.svg.png")
+    assert bot.looks_like_non_photo("", "https://images.example.com/brand-logo.png")
+    assert bot.looks_like_non_photo("Coat of arms emblem", "")
+    assert not bot.looks_like_non_photo(
+        "Chiang Kai-shek in 1943", "https://upload.wikimedia.org/wikipedia/commons/thumb/a/chiang.jpg"
+    )
+    assert not bot.looks_like_non_photo("Fort Zeelandia, Tainan", "https://images.pexels.com/photos/9/fort.jpg")
+
+
+def test_thumbnail_headline_rejects_a_bare_filing_label():
+    plan = _long_form_plan(
+        topic="Taiwan",
+        title="Why Taiwan and China Still Disagree Over One Island",
+        thumbnail_text="Taiwan's Conflict Explained",
+    )
+
+    # "... Explained" repeats the topic and gives a viewer no reason to click, so
+    # the title wins — trimmed to the word cap without hanging on a preposition.
+    assert bot.thumbnail_headline(plan) == "WHY TAIWAN AND CHINA STILL DISAGREE"
 
 
 def test_long_form_thumbnail_prompt_uses_the_packaged_hero_subject():

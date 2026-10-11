@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import youtube_shorts_bot as legacy
-from .core import digest, job_lock, read_json, write_json
+from .core import digest, job_lock, read_json, validate_span, write_json
 from .media import probe
 from .provider import GeminiVideoClient, SYSTEM
 
@@ -89,8 +89,11 @@ class GeminiLiveVideoClient(GeminiVideoClient):
         if remote is None:
             return {"frames": [], "audio": b"", "start": 0, "seconds": 0, "fps": 1}
         start, end = span or (0, remote["duration"])
-        if not 0 <= start < end <= remote["duration"]:
-            raise legacy.BotError("Khoảng video Live không hợp lệ.")
+        # Existing job/chunk plans may round endpoints to milliseconds. Admit
+        # only that rounding error, keeping the actual stream inside the source.
+        # Entirely out-of-source intervals and substantive overruns still fail.
+        start, end = validate_span(start, end, 0, remote["duration"], .0005 + 1e-9,
+                                   f"Khoảng video Live không hợp lệ (duration={remote['duration']:.9f}s)")
         if end - start > min(60, self.cfg.live_chunk_seconds) + 2.01:
             raise legacy.BotError("Lượt Live quá dài; cần chia đoạn trước khi gửi media.")
         fps = min(1., float(fps))

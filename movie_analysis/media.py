@@ -68,7 +68,10 @@ def build_scenes(seconds: float, cuts: list[float], max_seconds: float, max_scen
     scenes = []
     for i, (start, end) in enumerate(zip(bounds, bounds[1:])):
         shots = [t for t in cuts if start < t < end]
-        scenes.append({"id": f"s{i + 1:03d}", "start": round(start, 3), "end": round(end, 3),
+        # Keep the exact source endpoint. Rounding it up to milliseconds can
+        # make the final Live session extend beyond the supplied MP4.
+        scenes.append({"id": f"s{i + 1:03d}", "start": round(start, 3),
+                       "end": seconds if i == len(bounds) - 2 else round(end, 3),
                        "shot_cuts": shots, "fast_action": len(shots) >= 3})
     return scenes
 

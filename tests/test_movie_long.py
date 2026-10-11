@@ -45,6 +45,79 @@ def test_lower_tpm_shortens_sessions_and_impossible_quota_stops():
         session_seconds(config(live_tpm=20000))
 
 
+@pytest.mark.parametrize("seconds", [256.664667, 256.664333, 59.999667])
+def test_fractional_source_endpoint_is_exact_and_contiguous(seconds):
+    scenes = build_scenes(seconds, [], 20, 30)
+    assert scenes[-1]["end"] == seconds
+    assert all(0 <= s["start"] < s["end"] <= seconds for s in scenes)
+    assert all(a["end"] == b["start"] for a, b in zip(scenes, scenes[1:]))
+
+
+def test_real_fractional_live_media_handles_old_rounded_endpoint(tmp_path):
+    from types import SimpleNamespace
+    enable_local_tools()
+    source = tmp_path / "fractional.mp4"
+    legacy.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=red:s=160x90:r=30",
+                "-frames:v", "47", "-c:v", "libx264", str(source)], timeout_seconds=30)
+    client = GeminiLiveVideoClient("test-key", config(), tmp_path, sdk_client=SimpleNamespace())
+    remote = client.file(source, "fractional-fixture")
+    end = remote["duration"]
+    assert 0 < round(end, 3) - end < .0005
+    media = client._prepare(remote, (0, round(end, 3)), 1)
+    assert media["seconds"] == end and media["frames"]
+    assert all(p.read_bytes().startswith(b"\xff\xd8") for p in media["frames"])
+    assert client.usage["calls"] == []  # real FFmpeg, no model/API calls
+
+
+@pytest.mark.parametrize("span", [(240, 256.666), (256.664667, 256.665), (-.001, 20),
+                                   (20, 20), (float("nan"), 20), (0, float("inf"))])
+def test_live_still_rejects_invalid_intervals_before_media_or_api(tmp_path, monkeypatch, span):
+    from types import SimpleNamespace
+    client = GeminiLiveVideoClient("test-key", config(), tmp_path, sdk_client=SimpleNamespace())
+    monkeypatch.setattr("movie_analysis.live_provider.subprocess.run", lambda *a, **k: pytest.fail("No extraction"))
+    with pytest.raises(legacy.BotError):
+        client._prepare({"duration": 256.664667}, span, 1)
+    assert client.usage["calls"] == []
+
+
+def test_fractional_final_scene_resume_preserves_completed_analysis(tmp_path, monkeypatch):
+    seconds = 256.664667
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fractional-source fixture; media is mocked")
+    monkeypatch.setattr(legacy, "require_tools", lambda: None)
+    monkeypatch.setattr("movie_analysis.pipeline.inspect_source", lambda *_: {"duration": seconds, "has_audio": True})
+    monkeypatch.setattr("movie_analysis.pipeline.detect_scenes", lambda *_: build_scenes(seconds, [], 20, 30))
+    def old_scenes(*args):
+        scenes = build_scenes(*args)
+        scenes[-1]["end"] = round(seconds, 3)
+        return scenes
+    class StrictSourceAI(FakeVideoAI):
+        def generate(self, stage, prompt, **kwargs):
+            start, end = kwargs["span"]
+            if not 0 <= start < end <= seconds:
+                raise legacy.BotError("Khoảng video Live không hợp lệ.")
+            self.calls.append((stage, kwargs))
+            if stage.startswith("global:"):
+                return {"summary": "Synthetic source", "events": [{"start": start, "end": end}]}
+            sid = stage.split(":")[1]
+            if stage.startswith("deep:"):
+                return {"claims": [{**claim(sid + "_c1"), "start": start, "end": min(start + 2, end)}]}
+            return {"verdicts": [{"id": sid + "_c1", "status": "supported", "confidence": .99, "reason": "Synthetic"}]}
+    job = tmp_path / "job"
+    monkeypatch.setattr("movie_analysis.pipeline.build_scenes", old_scenes)
+    with pytest.raises(legacy.BotError, match="Khoảng video Live"):
+        run_movie(source, job, config(), provider=StrictSourceAI(), analyze_only=True)
+    saved = (job / "s012_verify.json").read_bytes()
+    global_saved = (job / "global.json").read_bytes()
+    monkeypatch.setattr("movie_analysis.pipeline.build_scenes", build_scenes)
+    resumed = StrictSourceAI()
+    assert run_movie(source, job, config(), provider=resumed, analyze_only=True).is_file()
+    assert [stage for stage, _ in resumed.calls] == ["deep:s013", "verify:s013"]
+    assert resumed.calls[0][1]["span"][1] == seconds
+    assert (job / "s012_verify.json").read_bytes() == saved
+    assert (job / "global.json").read_bytes() == global_saved
+
+
 def test_global_chunks_validate_absolute_scope_and_resume_after_interruption(tmp_path):
     calls = []
     fail = [True]

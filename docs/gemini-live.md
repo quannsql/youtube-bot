@@ -8,6 +8,8 @@ Live sử dụng SDK `google-genai` và WebSocket; không upload qua Files API, 
 
 Nếu phân tích chi tiết trả timestamp ngoài cảnh, bot đọc lại chính cảnh đó kèm lỗi kiểm tra, tối đa `MOVIE_ATTEMPTS` lượt trả lời (mặc định 3, tính cả câu trả lời đầu). Không tự kéo timestamp về biên hoặc coi chi tiết ngoài cảnh là bằng chứng. Các lượt sửa vẫn tính vào giới hạn request/token và TPM. Câu trả lời lỗi và từng lượt sửa được lưu; tiếp tục job cũ sẽ giữ global/các cảnh đã hoàn tất, dùng lại câu trả lời đã nhận, chỉ gọi API cho lượt sửa còn thiếu. Nếu cả ba lượt vẫn sai, job dừng trước khi viết thoại/TTS.
 
+Phần chia cảnh giữ thời lượng MP4 chính xác ở mốc cuối. Khi đọc kế hoạch cũ đã làm tròn mili giây, Live chỉ dung sai tối đa 0,5 ms ở biên media và gửi đúng phần còn trong nguồn; không áp dụng dung sai này để duyệt bằng chứng AI. Lỗi `Khoảng video Live không hợp lệ` ở cảnh cuối do làm tròn có thể tiếp tục sau cập nhật mà giữ global/các cảnh đã kiểm chứng.
+
 ## Cấu hình local và Railway
 
 ```dotenv

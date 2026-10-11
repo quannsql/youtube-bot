@@ -6,6 +6,8 @@ Writer chỉ nhận bằng chứng đã duyệt và bối cảnh có nguồn; kh
 
 Live sử dụng SDK `google-genai` và WebSocket; không upload qua Files API, không tự chuyển sang Gemini Flash khi lỗi. Kết quả phân tích được nhận qua hàm `submit_analysis(json_text)` và phải qua các bộ kiểm tra timestamp, claim và nhận diện hiện có. Nếu model chỉ nói, bot nhắc gọi hàm một lần trong cùng phiên; vẫn không có kết quả hợp lệ thì dừng, giữ cache. Lời nói của model không được tự coi là bằng chứng đã duyệt.
 
+Nếu phân tích chi tiết trả timestamp ngoài cảnh, bot đọc lại chính cảnh đó kèm lỗi kiểm tra, tối đa `MOVIE_ATTEMPTS` lượt trả lời (mặc định 3, tính cả câu trả lời đầu). Không tự kéo timestamp về biên hoặc coi chi tiết ngoài cảnh là bằng chứng. Các lượt sửa vẫn tính vào giới hạn request/token và TPM. Câu trả lời lỗi và từng lượt sửa được lưu; tiếp tục job cũ sẽ giữ global/các cảnh đã hoàn tất, dùng lại câu trả lời đã nhận, chỉ gọi API cho lượt sửa còn thiếu. Nếu cả ba lượt vẫn sai, job dừng trước khi viết thoại/TTS.
+
 ## Cấu hình local và Railway
 
 ```dotenv

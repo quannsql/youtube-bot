@@ -190,9 +190,7 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                 scene_context["dialogue"] = [d for d in global_data.get("dialogue", [])
                                              if d["start"] < scene["end"] + 1 and d["end"] > scene["start"] - 1]
                 fps = config.recheck_fps if scene["fast_action"] else config.scene_fps
-                deep = cache.stage(
-                    sid + "_deep", [global_dependencies, config.model, scene, fps, scene_context],
-                    lambda: ask("deep:" + sid,
+                deep_prompt = (
                         f"Analyze every meaningful event and audio in {scene['start']}–{scene['end']}s. "
                         "Track distinct characters, action order, spatial advantages, camera/editing and dialogue. "
                         "Global context is a hypothesis to challenge, not truth: " + payload(scene_context) + "\n"
@@ -202,8 +200,23 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                         'JSON: {claims:[{id:string,kind:"observed"|"inference"|"external",modality:"visual"|"audio"|"both",'
                         'start:number,end:number,text:string,evidence:string,confidence:number}], '
                         'dialogue:[{start:number,end:number,speaker:string,text:string,uncertain:boolean}], uncertainties:[string]}. '
-                        f"IDs must start {sid}_; timestamps ABSOLUTE original-video seconds.", scene, fps),
+                        f"IDs must start {sid}_; timestamps ABSOLUTE original-video seconds. "
+                        f"Only source seconds {scene['start']:.6f}–{scene['end']:.6f} are supplied. "
+                        "Every claim and dialogue interval must satisfy scene_start <= start < end <= scene_end. "
+                        "Do not describe events outside this interval, even if global context mentions them.")
+
+                def repair_deep(previous, error):
+                    LOG.warning("Scene %s validation failed; re-analyzing the same interval: %s", sid, error)
+                    return ask("deep:" + sid, deep_prompt + "\nPrevious analysis failed validation: "
+                               + payload(error) + "\nRewatch the supplied interval and return a complete corrected analysis. "
+                               "Re-establish timestamps from the media. Omit events not present in this interval. "
+                               "Do not simply clamp/rescale timestamps or invent supporting evidence.", scene, fps)
+
+                deep = cache.stage(
+                    sid + "_deep", [global_dependencies, config.model, scene, fps, scene_context],
+                    lambda: ask("deep:" + sid, deep_prompt, scene, fps),
                     lambda data: validate_scene(data, scene, min(0.5, 0.5 / fps)),
+                    repair=repair_deep, attempts=config.attempts,
                 )
                 scene_claims = deep["claims"]
                 if not scene_claims:

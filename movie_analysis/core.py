@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -160,12 +161,12 @@ class Cache:
     def __init__(self, directory: Path):
         self.directory = directory
 
-    def stage(self, name: str, dependencies: Any, produce, validate=lambda x: x):
+    def stage(self, name: str, dependencies: Any, produce, validate=lambda x: x, *, repair=None, attempts=1):
         key = digest({"version": VERSION, "dependencies": dependencies})
         path = self.directory / (name + ".json")
         cached = read_json(path)
         if cached and cached.get("key") == key:
-            return validate(cached["data"])
+            return validate(deepcopy(cached["data"]))
         response_path = self.directory / (name + ".response.json")
         response = read_json(response_path)
         if not response or response.get("key") != key:
@@ -173,12 +174,24 @@ class Cache:
             # Preserve received AI content before validation. This is diagnostic
             # input, not accepted evidence, and allows fixes/resume without rebilling.
             write_json(response_path, response)
-        try:
-            data = validate(response["data"])
-        except BotError as exc:
-            write_json(self.directory / (name + ".validation_error.json"),
-                       {"key": key, "error": str(exc), "response_file": response_path.name})
-            raise
+        for attempt in range(max(1, attempts)):
+            try:
+                # Validators normalize timestamps in place. Preserve the raw
+                # response, so retries/resume use stable dependencies and evidence.
+                data = validate(deepcopy(response["data"]))
+                break
+            except BotError as exc:
+                error = str(exc)
+                write_json(self.directory / (name + ".validation_error.json"),
+                           {"key": key, "error": error, "response_file": response_path.name})
+                if repair is None or attempt + 1 == max(1, attempts):
+                    raise
+                previous = response["data"]
+                repair_name = f"{name}_repair_{attempt + 1}"
+                corrected = self.stage(repair_name, [key, previous, error],
+                                       lambda: repair(deepcopy(previous), error))
+                response = {"data": corrected}
+                response_path = self.directory / (repair_name + ".response.json")
         write_json(path, {"key": key, "data": data})
         (self.directory / (name + ".validation_error.json")).unlink(missing_ok=True)
         return data

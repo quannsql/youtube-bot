@@ -5,6 +5,7 @@ The smoke provider and TTS are synthetic test doubles, never a claimed AI evalua
 import copy
 import io
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -156,6 +157,63 @@ def test_global_rounding_and_explicit_time_formats_are_normalized():
     assert result["dialogue"][0]["end"] == 145.821315
 
 
+@pytest.mark.parametrize("corrected", [True, False])
+def test_scene_repair_resumes_saved_invalid_response_and_is_bounded(tmp_path, corrected):
+    cache = Cache(tmp_path)
+    scene = {"id": "s001", "start": 0, "end": 20}
+    raw = {"claims": [{**claim(), "end": 20.2}, {**claim("s001_07"), "start": 20, "end": 22}]}
+    validate = lambda data: validate_scene(data, scene, .5)
+    produces, repairs = [], []
+    def produce():
+        produces.append(1)
+        return copy.deepcopy(raw)
+    with pytest.raises(legacy.BotError, match="20–22"):
+        cache.stage("s001_deep", ["source"], produce, validate)
+    def repair(previous, error):
+        repairs.append(1)
+        assert previous == raw  # earlier normalization must not mutate raw evidence
+        assert "20–22" in error
+        return {"claims": [claim()]} if corrected else copy.deepcopy(raw)
+    def resume():
+        return cache.stage("s001_deep", ["source"], produce, validate, repair=repair, attempts=3)
+    if corrected:
+        assert resume()["claims"][0]["end"] == 2
+        assert resume()["claims"][0]["end"] == 2
+        assert repairs == [1]
+        assert not (tmp_path / "s001_deep.validation_error.json").exists()
+    else:
+        for _ in range(2):
+            with pytest.raises(legacy.BotError, match="20–22"):
+                resume()
+        assert repairs == [1, 1]  # restarting must not repeat rejected repair calls
+        assert not (tmp_path / "s001_deep.json").exists()
+    assert produces == [1]
+    assert read_json(tmp_path / "s001_deep.response.json")["data"] == raw
+
+
+def test_scene_repair_resumes_after_transport_failure(tmp_path):
+    cache = Cache(tmp_path)
+    scene = {"id": "s001", "start": 0, "end": 20}
+    produces, repairs = [], []
+    def produce():
+        produces.append(1)
+        return {"claims": [{**claim("s001_07"), "start": 20, "end": 22}]}
+    def repair(previous, error):
+        repairs.append(1)
+        if len(repairs) == 1:
+            raise legacy.BotError("Simulated transport failure")
+        return {"claims": [claim()]}
+    def resume():
+        return cache.stage("s001_deep", ["source"], produce, lambda d: validate_scene(d, scene),
+                           repair=repair, attempts=3)
+    with pytest.raises(legacy.BotError, match="transport"):
+        resume()
+    assert resume()["claims"][0]["id"] == "s001_c1"
+    assert produces == [1] and repairs == [1, 1]
+    assert resume()["claims"][0]["id"] == "s001_c1"
+    assert repairs == [1, 1]
+
+
 @pytest.mark.parametrize("start,end", [(0, 150), (146, 147), (10, 5), (-2, 1), (0, "02:99"), (0, float("nan"))])
 def test_global_does_not_silently_rescale_substantively_wrong_timeline(start, end):
     with pytest.raises(legacy.BotError):
@@ -185,6 +243,42 @@ def test_invalid_global_is_reanalyzed_and_fixed_then_cached(synthetic_clip, tmp_
     resumed = FakeVideoAI()
     run_movie(synthetic_clip, directory, MovieConfig(), analyze_only=True, provider=resumed)
     assert resumed.calls == []
+
+
+@pytest.mark.parametrize("video_provider", ["gemini", "gemini_live"])
+def test_pipeline_resumes_failed_scene_without_repeating_global(synthetic_clip, tmp_path, video_provider):
+    class InvalidSceneAI(FakeVideoAI):
+        def generate(self, stage, prompt, **kwargs):
+            data = super().generate("global" if stage.startswith("global:") else stage, prompt, **kwargs)
+            if stage.startswith("deep:"):
+                data["claims"][0].update(start=4, end=6)
+            return data
+    directory = tmp_path / "failed-scene"
+    cfg = MovieConfig(attempts=1)
+    if video_provider == "gemini_live":
+        cfg = replace(cfg, video_provider=video_provider, model="gemini-3.8-live", verifier_model="gemini-3.8-live",
+                      scene_fps=1, recheck_fps=1)
+    with pytest.raises(legacy.BotError, match="4–6"):
+        run_movie(synthetic_clip, directory, cfg, analyze_only=True, provider=InvalidSceneAI())
+    class CorrectedSceneAI(FakeVideoAI):
+        def __init__(self):
+            super().__init__()
+            self.prompts = []
+        def generate(self, stage, prompt, **kwargs):
+            self.prompts.append((stage, prompt))
+            return super().generate("global" if stage.startswith("global:") else stage, prompt, **kwargs)
+    resumed = CorrectedSceneAI()
+    assert run_movie(synthetic_clip, directory, replace(cfg, attempts=3), analyze_only=True, provider=resumed).is_file()
+    assert sum(stage == "deep:s001" for stage, _ in resumed.calls) == 1
+    assert not any(stage == "global" for stage, _ in resumed.calls)
+    assert read_json(directory / "s001_deep.response.json")["data"]["claims"][0]["end"] == 6
+    assert read_json(directory / "s001_deep.json")["data"]["claims"][0]["end"] == 2
+    prompts = [prompt for stage, prompt in resumed.prompts if stage == "deep:s001"]
+    assert "Previous analysis failed validation" in prompts[0]
+    assert "0.000000–4.000000" in prompts[0]
+    done = FakeVideoAI()
+    run_movie(synthetic_clip, directory, replace(cfg, attempts=3), analyze_only=True, provider=done)
+    assert done.calls == []
 
 
 class Response:

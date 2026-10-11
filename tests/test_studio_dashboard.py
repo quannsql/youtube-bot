@@ -159,7 +159,25 @@ def test_retry_frontend_submits_missing_error_element_and_handles_timeout():
     result = subprocess.run([node, str(Path(__file__).with_name("test_studio_frontend.js"))],
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
-    assert "4 dashboard retry behaviours passed" in result.stdout
+    assert "9 dashboard retry behaviours passed" in result.stdout
+
+
+def test_retry_legacy_redirect_lands_on_new_review_without_enqueuing_twice(studio):
+    response = upload(studio)
+    client, csrf, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    web_app.get_archive().update_idea(job_id, "failed")
+    # Browsers following the legacy redirect receive HTML, not a JSON ack.
+    resumed = client.post(response.location + "/retry", data={"csrf": csrf, "action": "resume"},
+                          follow_redirects=True)
+    assert resumed.status_code == 200 and resumed.mimetype == "text/html"
+    assert len(resumed.history) == 1 and resumed.history[0].status_code == 302
+    new_path = resumed.history[0].location
+    assert resumed.request.path == new_path and new_path != response.location
+    new_id = int(new_path.rsplit("/", 1)[1])
+    assert web_app.get_archive().get_idea(new_id)["status"] == "pending"
+    assert len(web_app.get_archive().recent_ideas()) == 2
+    assert "studio.js?v=retry-response-2" in resumed.get_data(as_text=True)
 
 
 def test_retry_json_acknowledges_committed_job_before_loading_review(studio, caplog):

@@ -9,6 +9,7 @@ async function submitRetry(mode, upload = false) {
   let handler, error, timer;
   const button = {disabled: false, textContent: 'Tiếp tục từ bước đã lưu'};
   const destinations = [], requests = [], delays = [];
+  let jsonReads = 0;
   const form = {
     action: 'https://studio.example/movies/18/retry',
     querySelector(selector) {
@@ -36,8 +37,19 @@ async function submitRetry(mode, upload = false) {
       if (mode === 'timeout') return new Promise((resolve, reject) => {
         options.signal.addEventListener('abort', () => reject(Object.assign(new Error('Aborted'), {name: 'AbortError'})));
       });
-      return {url, redirected: false, ok: mode === 'success', json: async () => mode === 'success'
-        ? {ok: true, job_id: 19, redirect_url: '/movies/19'} : {error: 'Không còn video gốc'}};
+      const redirect = mode === 'redirect' || mode === 'login' || mode === 'review-error';
+      const html = redirect || mode === 'html-error' || mode === 'unexpected-html';
+      return {
+        url: redirect ? `https://studio.example/${mode === 'login' ? 'login' : 'movies/19'}` : url,
+        redirected: redirect,
+        ok: ['success', 'redirect', 'login', 'unexpected-html'].includes(mode),
+        status: mode === 'html-error' || mode === 'review-error' ? 502 : mode === 'error' ? 409 : 200,
+        json: async () => {
+          jsonReads++;
+          if (html) throw new SyntaxError('Unexpected token <');
+          return mode === 'success' ? {ok: true, job_id: 19, redirect_url: '/movies/19'} : {error: 'Không còn video gốc'};
+        },
+      };
     },
   };
   vm.runInNewContext(source, context, {filename: 'studio.js'});
@@ -55,10 +67,17 @@ async function submitRetry(mode, upload = false) {
   if (mode === 'success') {
     assert.deepEqual(destinations, ['/movies/19']);
     assert.equal(error.hidden, true);
+  } else if (mode === 'redirect' || mode === 'login') {
+    assert.deepEqual(destinations, [`https://studio.example/${mode === 'login' ? 'login' : 'movies/19'}`]);
+    assert.equal(error.hidden, true);
+    assert.equal(jsonReads, 0); // successful review/login pages contain HTML
   } else {
     assert.deepEqual(destinations, []);
     assert.equal(error.hidden, false);
-    assert.ok(error.textContent.includes(mode === 'timeout' ? 'kiểm tra có job mới' : 'Không còn video gốc'));
+    const expected = mode === 'timeout' ? 'kiểm tra có job mới'
+      : mode === 'html-error' || mode === 'review-error' ? 'HTTP 502'
+      : mode === 'unexpected-html' ? 'kiểm tra có job mới' : 'Không còn video gốc';
+    assert.ok(error.textContent.includes(expected), error.textContent);
   }
   assert.equal(requests.length, 1); // no automatic retry after an uncertain response
 }
@@ -68,5 +87,10 @@ async function submitRetry(mode, upload = false) {
   await submitRetry('error');
   await submitRetry('timeout');
   await submitRetry('success', true);
-  process.stdout.write('4 dashboard retry behaviours passed\n');
+  await submitRetry('redirect');
+  await submitRetry('login');
+  await submitRetry('html-error');
+  await submitRetry('unexpected-html');
+  await submitRetry('review-error');
+  process.stdout.write('9 dashboard retry behaviours passed\n');
 })().catch(error => {process.stderr.write(String(error.stack)); process.exitCode = 1;});

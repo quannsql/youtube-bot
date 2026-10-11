@@ -4,7 +4,16 @@ const labels = {pending: 'Đang chờ', processing: 'Đang xử lý', done: 'Ho�
 const modes = {movie: 'Review phim', short: 'Short so sánh', long: 'Video giải thích'};
 function toast(message) {const el = $('#toast'); if (!el) return; el.textContent = message; el.hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => el.hidden = true, 6000);}
 function formError(form, message) {let el = $('.form-error', form); if (!el) {el = document.createElement('p'); el.className = 'form-error'; el.setAttribute('role', 'alert'); form.appendChild(el);} el.textContent = message || ''; el.hidden = !message;}
-async function responseJSON(response) {if (response.redirected && new URL(response.url).pathname === '/login') {location.assign('/login'); throw Error('Phiên đăng nhập đã hết hạn.');} let data; try {data = await response.json();} catch {throw Error('Máy chủ chưa trả kết quả. Tải lại trang hoặc kiểm tra kết nối.');} if (!response.ok) throw Error(data.error || 'Không thực hiện được thao tác.'); return data;}
+async function responseJSON(response) {
+  if (response.redirected && new URL(response.url).pathname === '/login') {location.assign('/login'); throw Error('Phiên đăng nhập đã hết hạn.');}
+  let data;
+  try {data = await response.json();} catch {
+    if (!response.ok) throw Error(`Máy chủ báo lỗi HTTP ${response.status}. Mở lịch sử kiểm tra có job mới chưa trước khi bấm lại; nếu vẫn lỗi, kiểm tra log server.`);
+    throw Error('Máy chủ trả về trang web thay vì kết quả thao tác. Mở lịch sử kiểm tra có job mới chưa trước khi bấm lại.');
+  }
+  if (!response.ok) throw Error(data.error || `Không thực hiện được thao tác (HTTP ${response.status}).`);
+  return data;
+}
 function element(tag, text, className) {const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node;}
 async function cancelJob(id, button) {button.disabled = true; try {const body = new FormData(); body.set('csrf', document.body.dataset.csrf); await responseJSON(await fetch(`/cancel/${id}`, {method: 'POST', body})); toast(`Đã huỷ job #${id}.`); if ($('#review-snapshot')) location.reload(); else await pollJobs();} catch (e) {toast(e.message);} finally {button.disabled = false;}}
 document.querySelectorAll('.cancel-job').forEach(button => button.addEventListener('click', () => cancelJob(button.dataset.id, button)));
@@ -42,6 +51,9 @@ document.querySelectorAll('.movie-retry-form').forEach(form => form.addEventList
     const response = await fetch(form.action, {method: 'POST', body: new FormData(form), headers: {'Accept': 'application/json'}, signal: controller.signal});
     const destination = new URL(response.url);
     if (response.redirected && destination.pathname === '/login') {location.assign(destination.href); return;}
+    // Older deployments acknowledge a queued retry by redirecting to its HTML
+    // review page. Fetch follows that redirect; it must not be parsed as JSON.
+    if (response.ok && response.redirected && /^\/movies\/\d+$/.test(destination.pathname)) {location.assign(destination.href); return;}
     const data = await responseJSON(response);
     if (data.ok && data.redirect_url && /^\/movies\/\d+$/.test(data.redirect_url)) {button.textContent = 'Đã vào hàng đợi'; location.assign(data.redirect_url); return;}
     throw new Error('Không tiếp tục được job. Hãy tải lại trang.');

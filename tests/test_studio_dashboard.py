@@ -1,6 +1,8 @@
 """Authenticated upload, review boundaries and legacy queue controls."""
 import io
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -148,6 +150,44 @@ def test_retry_preserves_source_identity_and_paid_cache_revision(studio):
     state = read_json(directory / "job.json")
     assert state["stage"] == "queued" and state["error"] is None
     assert state["source_sha256"] == "stable-hash" and state["script_revision"] == 3
+
+
+def test_retry_frontend_submits_missing_error_element_and_handles_timeout():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to execute the dashboard JavaScript")
+    result = subprocess.run([node, str(Path(__file__).with_name("test_studio_frontend.js"))],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "4 dashboard retry behaviours passed" in result.stdout
+
+
+def test_retry_json_acknowledges_committed_job_before_loading_review(studio, caplog):
+    response = upload(studio)
+    client, csrf, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    web_app.get_archive().update_idea(job_id, "failed")
+    with caplog.at_level("INFO", logger="movie.web"):
+        resumed = client.post(response.location + "/retry", data={"csrf": csrf, "action": "resume"},
+                              headers={"Accept": "application/json"})
+    assert resumed.status_code == 200 and resumed.json["ok"] is True
+    new_id = resumed.json["job_id"]
+    assert resumed.json["redirect_url"] == f"/movies/{new_id}"
+    assert web_app.get_archive().get_idea(new_id)["status"] == "pending"
+    assert f"queued new_id={new_id}" in caplog.text
+    assert len(web_app.get_archive().recent_ideas()) == 2
+
+
+def test_retry_server_error_returns_json_without_leaking_connection_details(studio, monkeypatch, caplog):
+    client, csrf, _ = studio
+    def broken():
+        raise RuntimeError("secret-database-connection-information")
+    monkeypatch.setattr(web_app, "Archive", broken)
+    web_app.reset_archive()
+    response = client.post("/movies/18/retry", data={"csrf": csrf, "action": "resume"},
+                           headers={"Accept": "application/json"})
+    assert response.status_code == 503 and response.json["ok"] is False
+    assert "secret-database" not in response.get_data(as_text=True) + caplog.text
 
 
 @pytest.mark.parametrize("mounted", [False, True])

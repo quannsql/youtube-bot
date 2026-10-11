@@ -1,0 +1,72 @@
+// Execute the real dashboard handlers with DOM/network doubles: no APIs.
+'use strict';
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const source = fs.readFileSync(require('node:path').join(__dirname, '../static/studio.js'), 'utf8');
+
+async function submitRetry(mode, upload = false) {
+  let handler, error, timer;
+  const button = {disabled: false, textContent: 'Tiếp tục từ bước đã lưu'};
+  const destinations = [], requests = [], delays = [];
+  const form = {
+    action: 'https://studio.example/movies/18/retry',
+    querySelector(selector) {
+      if (selector === 'button') return button;
+      if (selector === '.form-error') return error || null;
+      if (selector === 'input[type=file]') return upload ? {files: [{}]} : null;
+      return null;
+    },
+    appendChild(node) {error = node;},
+    addEventListener(name, callback) {assert.equal(name, 'submit'); handler = callback;},
+  };
+  const context = {
+    URL, AbortController,
+    FormData: class {constructor(value) {assert.equal(value, form);}},
+    document: {
+      querySelector: () => null,
+      querySelectorAll: selector => selector === '.movie-retry-form' ? [form] : [],
+      createElement: () => ({setAttribute(name, value) {this[name] = value;}}),
+    },
+    location: {assign: value => destinations.push(value)},
+    setTimeout(callback, ms) {timer = callback; delays.push(ms); return 1;},
+    clearTimeout() {},
+    async fetch(url, options) {
+      requests.push({url, options});
+      if (mode === 'timeout') return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(Object.assign(new Error('Aborted'), {name: 'AbortError'})));
+      });
+      return {url, redirected: false, ok: mode === 'success', json: async () => mode === 'success'
+        ? {ok: true, job_id: 19, redirect_url: '/movies/19'} : {error: 'Không còn video gốc'}};
+    },
+  };
+  vm.runInNewContext(source, context, {filename: 'studio.js'});
+  const pending = handler({preventDefault() {}});
+  // The previous bug threw here before reaching fetch: this form has no error element.
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.headers.Accept, 'application/json');
+  assert.equal(error.role, 'alert');
+  assert.equal(button.disabled, true);
+  if (mode === 'timeout') timer();
+  await pending;
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Tiếp tục từ bước đã lưu');
+  assert.equal(delays[0], upload ? 600000 : 45000);
+  if (mode === 'success') {
+    assert.deepEqual(destinations, ['/movies/19']);
+    assert.equal(error.hidden, true);
+  } else {
+    assert.deepEqual(destinations, []);
+    assert.equal(error.hidden, false);
+    assert.ok(error.textContent.includes(mode === 'timeout' ? 'kiểm tra có job mới' : 'Không còn video gốc'));
+  }
+  assert.equal(requests.length, 1); // no automatic retry after an uncertain response
+}
+
+(async () => {
+  await submitRetry('success');
+  await submitRetry('error');
+  await submitRetry('timeout');
+  await submitRetry('success', true);
+  process.stdout.write('4 dashboard retry behaviours passed\n');
+})().catch(error => {process.stderr.write(String(error.stack)); process.exitCode = 1;});

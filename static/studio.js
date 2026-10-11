@@ -3,7 +3,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const labels = {pending: 'Đang chờ', processing: 'Đang xử lý', done: 'Hoàn tất', failed: 'Cần kiểm tra'};
 const modes = {movie: 'Review phim', short: 'Short so sánh', long: 'Video giải thích'};
 function toast(message) {const el = $('#toast'); if (!el) return; el.textContent = message; el.hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => el.hidden = true, 6000);}
-function formError(form, message) {const el = $('.form-error', form); el.textContent = message || ''; el.hidden = !message;}
+function formError(form, message) {let el = $('.form-error', form); if (!el) {el = document.createElement('p'); el.className = 'form-error'; el.setAttribute('role', 'alert'); form.appendChild(el);} el.textContent = message || ''; el.hidden = !message;}
 async function responseJSON(response) {if (response.redirected && new URL(response.url).pathname === '/login') {location.assign('/login'); throw Error('Phiên đăng nhập đã hết hạn.');} let data; try {data = await response.json();} catch {throw Error('Máy chủ chưa trả kết quả. Tải lại trang hoặc kiểm tra kết nối.');} if (!response.ok) throw Error(data.error || 'Không thực hiện được thao tác.'); return data;}
 function element(tag, text, className) {const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node;}
 async function cancelJob(id, button) {button.disabled = true; try {const body = new FormData(); body.set('csrf', document.body.dataset.csrf); await responseJSON(await fetch(`/cancel/${id}`, {method: 'POST', body})); toast(`Đã huỷ job #${id}.`); if ($('#review-snapshot')) location.reload(); else await pollJobs();} catch (e) {toast(e.message);} finally {button.disabled = false;}}
@@ -33,7 +33,22 @@ if (movieForm) {const input = $('#video-file'), drop = $('#drop-zone'), preview 
     xhr.onload = () => {const destination = xhr.responseURL && new URL(xhr.responseURL); if (destination && destination.pathname === '/login') {location.assign('/login'); return;} if (xhr.status >= 200 && xhr.status < 300 && destination && /^\/movies\/\d+$/.test(destination.pathname)) {location.assign(destination.href); return;} let message = 'Không tạo được job. Kiểm tra file hoặc tải lại trang.'; try {message = JSON.parse(xhr.responseText).error || message;} catch {} fail(message);}; xhr.onerror = () => fail('Kết nối bị gián đoạn. Kiểm tra lịch sử trước khi upload lại để tránh tạo trùng job.'); xhr.onabort = () => fail('Upload đã bị ngắt.'); xhr.send(new FormData(movieForm));
   }); window.addEventListener('pagehide', () => {if (objectURL) URL.revokeObjectURL(objectURL);});
 }
-document.querySelectorAll('.movie-retry-form').forEach(form => form.addEventListener('submit', async event => {event.preventDefault(); const button = $('button', form), old = button.textContent; button.disabled = true; button.textContent = 'Đang kiểm tra…'; formError(form, ''); try {const response = await fetch(form.action, {method: 'POST', body: new FormData(form)}); const destination = new URL(response.url); if (response.redirected && (destination.pathname === '/login' || /^\/movies\/\d+$/.test(destination.pathname))) {location.assign(destination.href); return;} await responseJSON(response); throw new Error('Không tiếp tục được job. Hãy tải lại trang.');} catch (e) {formError(form, e.message);} finally {button.disabled = false; button.textContent = old;}}));
+document.querySelectorAll('.movie-retry-form').forEach(form => form.addEventListener('submit', async event => {
+  event.preventDefault(); const button = $('button', form), old = button.textContent;
+  const controller = new AbortController(), upload = $('input[type=file]', form);
+  const timeout = setTimeout(() => controller.abort(), upload && upload.files.length ? 600000 : 45000);
+  button.disabled = true; button.textContent = 'Đang kiểm tra…'; formError(form, '');
+  try {
+    const response = await fetch(form.action, {method: 'POST', body: new FormData(form), headers: {'Accept': 'application/json'}, signal: controller.signal});
+    const destination = new URL(response.url);
+    if (response.redirected && destination.pathname === '/login') {location.assign(destination.href); return;}
+    const data = await responseJSON(response);
+    if (data.ok && data.redirect_url && /^\/movies\/\d+$/.test(data.redirect_url)) {button.textContent = 'Đã vào hàng đợi'; location.assign(data.redirect_url); return;}
+    throw new Error('Không tiếp tục được job. Hãy tải lại trang.');
+  } catch (e) {
+    formError(form, e.name === 'AbortError' ? 'Server chưa phản hồi. Mở lịch sử kiểm tra có job mới chưa trước khi bấm lại để tránh tạo trùng.' : e.message);
+  } finally {clearTimeout(timeout); button.disabled = false; button.textContent = old;}
+}));
 if ($('#review-snapshot')) {const initial = JSON.parse($('#review-snapshot').textContent), config = JSON.parse($('#review-config').textContent); const stages = ['Phân tích nội dung','Kiểm chứng chi tiết','Nhận diện nhân vật','Viết lời bình','Duyệt kịch bản','Giọng đọc & dựng video','Hoàn tất']; let busy = false;
   async function pollReview() {if (document.hidden || busy || !['pending','processing'].includes(initial.status)) return; busy = true; try {const state = await responseJSON(await fetch(config.url, {cache:'no-store'})); if (state.status !== initial.status || state.revision !== initial.revision) {location.reload(); return;} $('#stage-text').textContent = state.stage === 'queued' ? 'Đang chờ trong hàng đợi' : stages[state.step] || state.stage; document.querySelectorAll('[data-step]').forEach(item => {const index = Number(item.dataset.step); item.classList.toggle('finished', state.step > index); item.classList.toggle('current', state.step === index && state.status === 'processing');});} catch (e) {$('#stage-text').textContent = `Chưa cập nhật: ${e.message}`;} finally {busy = false;}} pollReview(); setInterval(pollReview, 5000);
 }

@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
+import time
 import uuid
 from pathlib import Path
 
 from flask import abort, jsonify, redirect, render_template, request, send_file, session, url_for
+from werkzeug.exceptions import HTTPException
 
 import youtube_shorts_bot as legacy
 from .core import MovieConfig, RIGHTS_STATES, file_digest, read_json, rights_manifest, write_json
@@ -17,6 +20,7 @@ from .narration import DEFAULT_STYLE, validate_context
 
 
 STEPS = ["Phân tích nội dung", "Kiểm chứng chi tiết", "Nhận diện nhân vật", "Viết lời bình", "Duyệt kịch bản", "Giọng đọc & dựng video"]
+LOG = logging.getLogger("movie.web")
 
 MISSING_SOURCE = "Không còn video gốc tại đường dẫn đã lưu. Kiểm tra Volume của service dashboard và BOT_DATA_DIR; tải lại đúng video vào job nếu dữ liệu đối chiếu còn, hoặc tạo job mới."
 
@@ -216,7 +220,23 @@ def register_movie_routes(app, login_required, get_archive):
     @app.route("/movies/<int:idea_id>/retry", methods=["POST"])
     @login_required
     def movie_retry(idea_id):
+        began = time.monotonic()
+        LOG.info("Movie retry id=%s: received request", idea_id)
+        try:
+            return perform_movie_retry(idea_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # Database diagnostics may contain connection details. Log only the
+            # exception type; the preceding checkpoint identifies the operation.
+            LOG.error("Movie retry id=%s failed (%s)", idea_id, type(exc).__name__)
+            return jsonify(ok=False, error="Không xác nhận được job đã vào hàng đợi. Kiểm tra lịch sử job và log server trước khi bấm lại."), 503
+        finally:
+            LOG.info("Movie retry id=%s: request finished after %.1fs", idea_id, time.monotonic() - began)
+
+    def perform_movie_retry(idea_id):
         check_csrf()
+        LOG.info("Movie retry id=%s: loading archived job", idea_id)
         row, data, directory = job_directory(idea_id)
         action = request.form.get("action", "resume")
         if row["status"] not in {"done", "failed"} or action not in {"resume", "script", "voice"}:
@@ -232,6 +252,7 @@ def register_movie_routes(app, login_required, get_archive):
         # Atomic OS lock also rules out a CLI rendering this same directory.
         from .core import job_lock
         try:
+            LOG.info("Movie retry id=%s: checking saved job", idea_id)
             with job_lock(directory):
                 jobs = get_archive().recent_ideas(limit=1000)
                 if any(j["mode"] == "movie" and j["status"] in {"pending", "processing"}
@@ -267,11 +288,15 @@ def register_movie_routes(app, login_required, get_archive):
                     finally:
                         temporary.unlink(missing_ok=True)
                 data["regenerate"] = action
+                LOG.info("Movie retry id=%s: enqueueing action=%s", idea_id, action)
                 new_id = get_archive().enqueue_idea("movie", json.dumps(data, ensure_ascii=False),
                                                    data["target_seconds"], False, "private")
+                LOG.info("Movie retry id=%s: queued new_id=%s", idea_id, new_id)
                 state = read_json(directory / "job.json", {})
                 state.update(status="pending", stage="queued", error=None)
                 write_json(directory / "job.json", state)
         except (legacy.BotError, ValueError) as exc:
             return jsonify(ok=False, error=str(exc)), 409
+        if request.accept_mimetypes.best == "application/json":
+            return jsonify(ok=True, job_id=new_id, redirect_url=url_for("movie_review", idea_id=new_id))
         return redirect(url_for("movie_review", idea_id=new_id))

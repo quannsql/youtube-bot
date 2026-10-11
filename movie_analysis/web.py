@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import secrets
 import uuid
 from pathlib import Path
@@ -9,12 +11,40 @@ from pathlib import Path
 from flask import abort, jsonify, redirect, render_template, request, send_file, session, url_for
 
 import youtube_shorts_bot as legacy
-from .core import MovieConfig, RIGHTS_STATES, read_json, rights_manifest, write_json
+from .core import MovieConfig, RIGHTS_STATES, file_digest, read_json, rights_manifest, write_json
 from .media import enable_local_tools, inspect_source
 from .narration import DEFAULT_STYLE, validate_context
 
 
 STEPS = ["Phân tích nội dung", "Kiểm chứng chi tiết", "Nhận diện nhân vật", "Viết lời bình", "Duyệt kịch bản", "Giọng đọc & dựng video"]
+
+MISSING_SOURCE = "Không còn video gốc tại đường dẫn đã lưu. Kiểm tra Volume của service dashboard và BOT_DATA_DIR; tải lại đúng video vào job nếu dữ liệu đối chiếu còn, hoặc tạo job mới."
+
+
+def storage_warning():
+    if not any(os.getenv(key) for key in ("RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_ENVIRONMENT_ID")):
+        return None
+    mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if not mount:
+        return "Service dashboard chưa có Volume được Railway khai báo. Gắn Volume tại /data và đặt BOT_DATA_DIR=/data trước khi upload để giữ video/cache qua redeploy."
+    if not legacy.DATA_DIR.resolve().is_relative_to(Path(mount).resolve()):
+        return "BOT_DATA_DIR đang nằm ngoài Volume của service dashboard. Đặt BOT_DATA_DIR trùng Mount Path của Volume để giữ video/cache qua redeploy."
+    return None
+
+
+def source_recovery_hash(data, directory):
+    value = data.get("source_sha256") or read_json(directory / "job.json", {}).get("source_sha256", "")
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+
+def save_upload(video, destination, max_mb):
+    total = 0
+    with destination.open("wb") as output:
+        for chunk in iter(lambda: video.stream.read(1024 * 1024), b""):
+            total += len(chunk)
+            if total > max_mb * 1024 * 1024:
+                raise legacy.BotError("MP4 quá giới hạn dung lượng.")
+            output.write(chunk)
 
 
 def stage_index(stage):
@@ -69,12 +99,15 @@ def register_movie_routes(app, login_required, get_archive):
                                       max_mb=cfg.max_input_mb, default_style=DEFAULT_STYLE,
                                       max_seconds=min(cfg.max_input_seconds, cfg.live_max_seconds)
                                       if cfg.video_provider == "gemini_live" else cfg.max_input_seconds,
-                                      default_visual_mode=cfg.visual_mode)
+                                      default_visual_mode=cfg.visual_mode, storage_warning=storage_warning())
 
     @app.route("/movies/submit", methods=["POST"])
     @login_required
     def movie_submit():
         check_csrf()
+        warning = storage_warning()
+        if warning:
+            return jsonify(ok=False, error=warning), 409
         video = request.files.get("video")
         if not video or not video.filename or Path(video.filename).suffix.lower() != ".mp4":
             return jsonify(ok=False, error="Cần chọn file MP4."), 400
@@ -111,14 +144,8 @@ def register_movie_routes(app, login_required, get_archive):
         directory.mkdir(parents=True)
         source = directory / "source.mp4"
         # Stream to disk with a second limit for chunked uploads; don't read MP4 into RAM.
-        total = 0
         try:
-            with source.open("wb") as output:
-                for chunk in iter(lambda: video.stream.read(1024 * 1024), b""):
-                    total += len(chunk)
-                    if total > cfg.max_input_mb * 1024 * 1024:
-                        raise legacy.BotError("MP4 quá giới hạn dung lượng.")
-                    output.write(chunk)
+            save_upload(video, source, cfg.max_input_mb)
             enable_local_tools()
             legacy.require_tools()
             source_info = inspect_source(source, cfg)
@@ -128,6 +155,7 @@ def register_movie_routes(app, login_required, get_archive):
             source.unlink(missing_ok=True)
             return jsonify(ok=False, error=str(exc)), 400
         data = {"source": str(source.resolve()), "directory": str(directory.resolve()), "filename": video.filename,
+                "source_sha256": file_digest(source), "uploaded_context": context,
                 "target_seconds": cfg.target_seconds, "visual_mode": visual_mode, "rights_status": status, "rights_basis": basis,
                 "movie_title": context["title"],
                 "context_file": str((directory / "upload_context.json").resolve()),
@@ -155,7 +183,11 @@ def register_movie_routes(app, login_required, get_archive):
             steps=STEPS, current_step=stage_index(read_json(directory / "job.json", {}).get("stage")),
             stage_label=stage_label(read_json(directory / "job.json", {}).get("stage")),
             snapshot=snapshot(row, directory),
-            ready=row["status"] == "done" and (directory / "movie_review.mp4").is_file())
+            ready=row["status"] == "done" and (directory / "movie_review.mp4").is_file(),
+            source_available=Path(data["source"]).is_file(),
+            can_restore_source=bool(source_recovery_hash(data, directory)) and
+                (Path(data["context_file"]).is_file() or bool(data.get("uploaded_context"))),
+            storage_warning=storage_warning())
 
     def snapshot(row, directory):
         state = read_json(directory / "job.json", {})
@@ -189,6 +221,9 @@ def register_movie_routes(app, login_required, get_archive):
         action = request.form.get("action", "resume")
         if row["status"] not in {"done", "failed"} or action not in {"resume", "script", "voice"}:
             return jsonify(ok=False, error="Job đang chạy hoặc thao tác không hợp lệ."), 409
+        warning = storage_warning()
+        if warning:
+            return jsonify(ok=False, error=warning), 409
         if action == "script" and "narration_style" in request.form:
             style = request.form["narration_style"].strip()
             if len(style) > 1000:
@@ -202,12 +237,41 @@ def register_movie_routes(app, login_required, get_archive):
                 if any(j["mode"] == "movie" and j["status"] in {"pending", "processing"}
                        and json.loads(j["idea"]).get("directory") == data["directory"] for j in jobs):
                     return jsonify(ok=False, error="Job đã được đưa vào hàng đợi."), 409
+                source = Path(data["source"]).resolve()
+                if source != directory / "source.mp4":
+                    return jsonify(ok=False, error="Đường dẫn video của job không hợp lệ."), 409
+                if not source.is_file():
+                    expected = source_recovery_hash(data, directory)
+                    video = request.files.get("video")
+                    if not expected:
+                        return jsonify(ok=False, error="Không còn mã đối chiếu video cũ. Hãy tạo job mới; không thể dùng cache cho video chưa xác định."), 409
+                    if not video or not video.filename or Path(video.filename).suffix.lower() != ".mp4":
+                        return jsonify(ok=False, error=MISSING_SOURCE), 409
+                    cfg = MovieConfig.from_env(int(data.get("target_seconds", 60)))
+                    temporary = directory / ("restore-" + uuid.uuid4().hex + ".mp4")
+                    try:
+                        save_upload(video, temporary, cfg.max_input_mb)
+                        if file_digest(temporary) != expected:
+                            return jsonify(ok=False, error="Video tải lại khác file gốc. Chọn đúng file chưa cắt/chỉnh sửa, hoặc tạo job mới."), 400
+                        enable_local_tools()
+                        legacy.require_tools()
+                        inspect_source(temporary, cfg)
+                        context_path = directory / "upload_context.json"
+                        if not context_path.is_file():
+                            if not data.get("uploaded_context"):
+                                return jsonify(ok=False, error="Hồ sơ phim của job đã mất. Hãy tạo job mới với đúng bối cảnh."), 409
+                            write_json(context_path, validate_context(data["uploaded_context"]))
+                        data["context_file"] = str(context_path)
+                        data["source_sha256"] = expected
+                        os.replace(temporary, source)
+                    finally:
+                        temporary.unlink(missing_ok=True)
                 data["regenerate"] = action
                 new_id = get_archive().enqueue_idea("movie", json.dumps(data, ensure_ascii=False),
                                                    data["target_seconds"], False, "private")
                 state = read_json(directory / "job.json", {})
                 state.update(status="pending", stage="queued", error=None)
                 write_json(directory / "job.json", state)
-        except legacy.BotError as exc:
+        except (legacy.BotError, ValueError) as exc:
             return jsonify(ok=False, error=str(exc)), 409
         return redirect(url_for("movie_review", idea_id=new_id))

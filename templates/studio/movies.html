@@ -1,5 +1,6 @@
 {% extends 'studio/base.html' %}{% block title %}Tạo review phim · Video Studio{% endblock %}{% block breadcrumb %}Review phim{% endblock %}
 {% block content %}<div class="page-heading"><div><div class="eyebrow">FROM FOOTAGE TO STORY</div><h1>Câu chuyện bắt đầu ở đây.</h1><p>Thêm đoạn phim và bối cảnh để bot viết đúng điều bạn muốn kể.</p></div><span class="pill mint">TIẾNG VIỆT · 9:16</span></div>
+{% if storage_warning %}<div class="error-banner" role="alert"><strong>Cần cấu hình nơi lưu video</strong><p>{{storage_warning}}</p></div>{% endif %}
 <form id="movie-form" action="{{url_for('movie_submit')}}" method="post" enctype="multipart/form-data" data-max-mb="{{max_mb}}"><input type="hidden" name="csrf" value="{{csrf}}">
 <div class="upload-layout"><div class="upload-main"><section class="panel"><div class="section-heading"><h2><span class="step-number">01</span> Đoạn phim của bạn</h2><span class="muted">MP4 · tối đa {{max_mb}} MB</span></div>
 <div id="drop-zone" class="drop-zone"><input id="video-file" type="file" name="video" accept="video/mp4,.mp4" required aria-label="Chọn đoạn phim MP4"><div class="upload-glyph">↥</div><h3>Kéo thả video vào đây</h3><p>hoặc <span class="link-text">chọn file từ máy tính</span></p><small>Tối đa {{max_seconds|int}} giây. Video dài được phân tích từng đoạn và lưu tiến độ để tiếp tục khi gián đoạn.</small></div>

@@ -378,6 +378,8 @@ def run_queued_movie(archive: legacy.Archive, row: dict) -> int:
     try:
         data = json.loads(row["idea"])
         directory = Path(data["directory"])
+        if not Path(data["source"]).is_file():
+            raise legacy.BotError("Không còn video gốc tại đường dẫn đã lưu. Kiểm tra Volume của service dashboard và BOT_DATA_DIR; tải lại đúng video vào job nếu dữ liệu đối chiếu còn, hoặc tạo job mới.")
         cfg = MovieConfig.from_env(int(data.get("target_seconds", 60)))
         visual_mode = data.get("visual_mode", cfg.visual_mode)
         if visual_mode not in {"continuous", "evidence"}:

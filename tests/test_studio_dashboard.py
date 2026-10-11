@@ -7,7 +7,7 @@ import pytest
 
 import web_app
 import youtube_shorts_bot as legacy
-from movie_analysis.core import read_json, write_json
+from movie_analysis.core import file_digest, read_json, write_json
 
 
 @pytest.fixture
@@ -148,6 +148,97 @@ def test_retry_preserves_source_identity_and_paid_cache_revision(studio):
     state = read_json(directory / "job.json")
     assert state["stage"] == "queued" and state["error"] is None
     assert state["source_sha256"] == "stable-hash" and state["script_revision"] == 3
+
+
+@pytest.mark.parametrize("mounted", [False, True])
+def test_railway_rejects_uploads_without_storage_on_its_volume(studio, monkeypatch, tmp_path, mounted):
+    monkeypatch.setenv("RAILWAY_SERVICE_ID", "dashboard-test")
+    if mounted:
+        monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", str(tmp_path / "other-volume"))
+    else:
+        monkeypatch.delenv("RAILWAY_VOLUME_MOUNT_PATH", raising=False)
+    response = upload(studio)
+    assert response.status_code == 409 and "Volume" in response.json["error"]
+    assert web_app.get_archive().recent_ideas() == []
+    page = studio[0].get("/movies").get_data(as_text=True)
+    assert "Cần cấu hình nơi lưu video" in page
+
+
+def test_railway_upload_uses_mounted_volume_and_records_recovery_data(studio, monkeypatch):
+    monkeypatch.setenv("RAILWAY_SERVICE_ID", "dashboard-test")
+    monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", str(legacy.DATA_DIR))
+    response = upload(studio, context_preset="avengers-doomsday")
+    assert response.status_code == 302
+    row = web_app.get_archive().get_idea(int(response.location.rsplit("/", 1)[1]))
+    data = json.loads(row["idea"])
+    assert data["source_sha256"] == file_digest(Path(data["source"]))
+    assert data["uploaded_context"] == read_json(Path(data["context_file"]))
+
+
+def test_missing_source_blocks_retry_until_matching_file_restores_saved_job(studio):
+    response = upload(studio, context_preset="avengers-doomsday")
+    client, csrf, _ = studio
+    archive = web_app.get_archive()
+    job_id = int(response.location.rsplit("/", 1)[1])
+    data = json.loads(archive.get_idea(job_id)["idea"])
+    directory = Path(data["directory"])
+    source = Path(data["source"])
+    source.unlink()
+    Path(data["context_file"]).unlink()
+    write_json(directory / "global.json", {"preserved": True})
+    write_json(directory / "job.json", {"source_sha256": data["source_sha256"], "script_revision": 2})
+    archive.update_idea(job_id, "failed")
+    page = client.get(response.location).get_data(as_text=True)
+    assert "Khôi phục video và tiếp tục" in page and "Tiếp tục từ bước đã lưu" not in page
+    post = {"csrf": csrf, "action": "resume"}
+    assert client.post(response.location + "/retry", data=post).status_code == 409
+    wrong = client.post(response.location + "/retry", data={**post, "video": (io.BytesIO(b"different-file"), "clip.mp4")})
+    assert wrong.status_code == 400 and "khác file gốc" in wrong.json["error"]
+    assert not source.exists() and not list(directory.glob("restore-*.mp4"))
+    assert len(web_app.get_archive().recent_ideas()) == 1
+    restored = client.post(response.location + "/retry", data={**post, "video": (io.BytesIO(b"test-video"), "clip.mp4")})
+    assert restored.status_code == 302 and source.read_bytes() == b"test-video"
+    assert read_json(directory / "global.json") == {"preserved": True}
+    assert read_json(directory / "job.json")["script_revision"] == 2
+    assert read_json(Path(data["context_file"])) == data["uploaded_context"]
+    fresh = json.loads(web_app.get_archive().get_idea(int(restored.location.rsplit("/", 1)[1]))["idea"])
+    assert fresh["source_sha256"] == data["source_sha256"] and fresh["directory"] == data["directory"]
+
+
+def test_old_job_without_source_or_identity_requires_fresh_upload(studio):
+    response = upload(studio)
+    client, csrf, _ = studio
+    archive = web_app.get_archive()
+    first_id = int(response.location.rsplit("/", 1)[1])
+    data = json.loads(archive.get_idea(first_id)["idea"])
+    del data["source_sha256"]
+    del data["uploaded_context"]
+    Path(data["source"]).unlink()
+    archive.update_idea(first_id, "failed")
+    old_id = archive.enqueue_idea("movie", json.dumps(data), 60, False, "private")
+    archive.update_idea(old_id, "failed")
+    page = client.get(f"/movies/{old_id}").get_data(as_text=True)
+    assert "Upload video và tạo job mới" in page and "Khôi phục video và tiếp tục" not in page
+    retried = client.post(f"/movies/{old_id}/retry", data={"csrf": csrf, "action": "resume",
+                          "video": (io.BytesIO(b"test-video"), "clip.mp4")})
+    assert retried.status_code == 409 and "mã đối chiếu" in retried.json["error"]
+    assert len(web_app.get_archive().recent_ideas()) == 2
+
+
+def test_worker_missing_source_fails_before_any_ai_or_tts(studio, monkeypatch):
+    from movie_analysis.pipeline import run_queued_movie
+    response = upload(studio)
+    job_id = int(response.location.rsplit("/", 1)[1])
+    archive = web_app.get_archive()
+    data = json.loads(archive.get_idea(job_id)["idea"])
+    Path(data["source"]).unlink()
+    archive.update_idea(job_id, "processing")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("No AI/TTS may run with a missing source")
+    monkeypatch.setattr("movie_analysis.pipeline.run_movie", forbidden)
+    with pytest.raises(legacy.BotError, match="Không còn video gốc"):
+        run_queued_movie(archive, archive.get_idea(job_id))
+    assert archive.get_idea(job_id)["status"] == "failed"
 
 
 def test_script_retry_can_change_tone_without_changing_input_or_render_mode(studio, monkeypatch):

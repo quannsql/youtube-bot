@@ -51,7 +51,7 @@ WORKER_POLL_SECONDS = float(os.getenv("WEB_WORKER_POLL_SECONDS", "3"))
 # The worker renders one video at a time, so a child that never exits blocks
 # every idea queued behind it — the queue only recovers on a redeploy. A long
 # video legitimately takes ~30 minutes, so the ceiling is generous.
-JOB_TIMEOUT_SECONDS = float(os.getenv("WEB_JOB_TIMEOUT_SECONDS", "5400"))
+JOB_TIMEOUT_SECONDS = float(os.getenv("WEB_JOB_TIMEOUT_SECONDS", "7200"))
 PRIVACY_CHOICES = ("private", "unlisted", "public")
 
 app = Flask(__name__)

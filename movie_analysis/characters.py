@@ -6,7 +6,8 @@ import json
 import os
 
 from youtube_shorts_bot import BotError
-from .core import number, validate_verdicts, write_json
+from .core import Cache, number, read_json, validate_verdicts, write_json
+from .chunks import CHUNK_VERSION, compact_claims
 
 IDENTITY_VERSION = "identity-v6"
 CUES = {"face", "voice", "explicit_name", "distinctive_costume", "setting", "relationship"}
@@ -106,7 +107,7 @@ def recognize_characters(cache, directory, source_hash, config, evidence, contex
         '"face"|"voice"|"explicit_name"|"distinctive_costume"|"setting"|"relationship"],reason:string}]}. '
         + "\nROSTER: " + json.dumps(roster, ensure_ascii=False)
         + "\nCONTEXT: " + json.dumps(context["facts"], ensure_ascii=False)
-        + "\nOBSERVATIONS: " + json.dumps(evidence["accepted"], ensure_ascii=False)
+        + "\nOBSERVATIONS: " + json.dumps(compact_claims(evidence["accepted"]), ensure_ascii=False)
     )
     if config.identity_provider == "openai":
         prompt += "\nYou receive sampled timestamped still images, not video/audio. Do not use voice cues. Inspect visible identity and mark uncertainty where samples are insufficient."
@@ -125,7 +126,7 @@ def recognize_characters(cache, directory, source_hash, config, evidence, contex
             "whose voiceover is speaking. Verdict id must equal character_id. "
             'JSON: {verdicts:[{id:string,status:"supported"|"uncertain"|"contradicted",confidence:number,reason:string}]}. '
             + "\nROSTER: " + json.dumps(roster, ensure_ascii=False)
-            + "\nOBSERVATIONS: " + json.dumps(evidence["accepted"], ensure_ascii=False)
+            + "\nOBSERVATIONS: " + json.dumps(compact_claims(evidence["accepted"]), ensure_ascii=False)
             + "\nCANDIDATES: " + json.dumps(matches, ensure_ascii=False)
         )
         if config.identity_provider == "openai":
@@ -159,4 +160,57 @@ def recognize_characters(cache, directory, source_hash, config, evidence, contex
     write_json(directory / "characters.json", {"accepted": accepted, "rejected": rejected,
                                                "provider": config.identity_provider, "model": identity_model,
                                                "limitation": "AI identity estimates; independent agreement does not guarantee correctness"})
+    return result
+
+
+def recognize_character_chunks(directory, source_hash, config, evidence, context, windows, ask, checkpoint):
+    """Independently verify names per media window; never extend a name to unseen claims."""
+    result = copy.deepcopy(context)
+    result["recognized_characters"] = []
+    recognized, facts, accepted, rejected = {}, {}, [], []
+    if not context["characters"]:
+        return result
+    for window in windows:
+        scoped = {"accepted": [c for c in evidence["accepted"]
+                  if c["start"] >= window["start"] and c["end"] <= window["end"]]}
+        if not scoped["accepted"]:
+            continue
+        checkpoint("characters:" + window["id"])
+        child = directory / "identity_chunks" / window["id"]
+        child.mkdir(parents=True, exist_ok=True)
+
+        def bounded_ask(stage, prompt, **kwargs):
+            return ask(stage, prompt + f"\nOnly source {window['start']}–{window['end']}s is supplied. "
+                       "Do not claim other windows prove this identity.", window,
+                       model_override=config.identity_model or None, **kwargs)
+
+        local = recognize_characters(Cache(child), child,
+            f"{source_hash}:{CHUNK_VERSION}:{window['start']}:{window['end']}", config, scoped, context, bounded_ask)
+        receipt = read_json(child / "characters.json", {})
+        accepted.extend(receipt.get("accepted", []))
+        rejected.extend(receipt.get("rejected", []))
+        for character in local["recognized_characters"]:
+            cid = character["id"]
+            if cid not in recognized:
+                recognized[cid] = character
+            else:
+                recognized[cid]["claim_ids"] = sorted(set(recognized[cid]["claim_ids"] + character["claim_ids"]))
+        for fact in local["facts"]:
+            if fact.get("source") != "video_identity_verified":
+                continue
+            if fact["id"] not in facts:
+                facts[fact["id"]] = fact
+            else:
+                saved = facts[fact["id"]]
+                saved["claim_ids"] = sorted(set(saved["claim_ids"] + fact["claim_ids"]))
+    result["recognized_characters"] = list(recognized.values())
+    for character in result["recognized_characters"]:
+        fact = facts[character["identity_claim_id"]]
+        fact["text"] = (f"Nhân vật trong các bằng chứng {', '.join(fact['claim_ids'])} được nhận diện "
+                        f"là {character['name']} ({character['spoken_name']}). "
+                        "Tên chỉ áp dụng cho những bằng chứng đã xác minh này; không suy ra danh tính ở cảnh khác.")
+        result["facts"].append(fact)
+    write_json(directory / "characters.json", {"accepted": accepted, "rejected": rejected,
+        "provider": config.identity_provider, "model": config.identity_model or config.model,
+        "chunks": windows, "limitation": "Names verified per window; AI agreement is not a guarantee"})
     return result

@@ -98,10 +98,10 @@ class MovieConfig:
     scene_fps: float = 4
     recheck_fps: float = 8
     max_scene_seconds: float = 20
-    max_scenes: int = 20
+    max_scenes: int = 30
     max_input_seconds: float = 300
     max_input_mb: int = 500
-    max_calls: int = 60
+    max_calls: int = 100
     max_tokens: int = 2_000_000
     max_output_tokens: int = 8192
     attempts: int = 3
@@ -110,7 +110,8 @@ class MovieConfig:
     target_seconds: int = 60
     visual_mode: str = "continuous"
     live_tpm: int = 65000
-    live_max_seconds: float = 90
+    live_max_seconds: float = 300
+    live_chunk_seconds: float = 45
 
     @classmethod
     def from_env(cls, target_seconds: int = 60):
@@ -221,7 +222,7 @@ def validate_span(start_value, end_value, lower: float, upper: float, tolerance:
     return max(lower, start), min(upper, end)
 
 
-def validate_global(data: dict, duration: float, timestamp_tolerance: float = 0.5) -> dict:
+def validate_global(data: dict, duration: float, timestamp_tolerance: float = 0.5, start: float = 0) -> dict:
     if not isinstance(data, dict) or not isinstance(data.get("summary"), str) or not data["summary"].strip():
         raise BotError("Global analysis thiếu summary.")
     events = data.get("events")
@@ -231,7 +232,7 @@ def validate_global(data: dict, duration: float, timestamp_tolerance: float = 0.
         if not isinstance(event, dict):
             raise BotError(f"Global event {index + 1} phải là object.")
         event["start"], event["end"] = validate_span(event.get("start"), event.get("end"),
-                                                    0, duration, timestamp_tolerance,
+                                                    start, duration, timestamp_tolerance,
                                                     f"Timeline global event {index + 1}")
     # Dialogue timestamps are also used as verifier context; don't leave out-of-
     # range or string-valued timestamps hidden in an otherwise valid global pass.
@@ -242,7 +243,7 @@ def validate_global(data: dict, duration: float, timestamp_tolerance: float = 0.
         if not isinstance(line, dict):
             raise BotError(f"Global dialogue {index + 1} phải là object.")
         line["start"], line["end"] = validate_span(line.get("start"), line.get("end"),
-                                                  0, duration, timestamp_tolerance,
+                                                  start, duration, timestamp_tolerance,
                                                   f"Global dialogue {index + 1}")
     if not isinstance(data.get("characters", []), list):
         raise BotError("Characters phải là danh sách.")

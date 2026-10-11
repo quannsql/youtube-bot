@@ -58,7 +58,7 @@ def build_scenes(seconds: float, cuts: list[float], max_seconds: float, max_scen
     cuts = sorted({float(t) for t in cuts if math.isfinite(float(t)) and 0 < float(t) < seconds})
     bounds, cursor = [0.0], 0.0
     while seconds - cursor > max_seconds:
-        candidates = [c for c in cuts if cursor + max_seconds * 0.4 <= c <= cursor + max_seconds]
+        candidates = [c for c in cuts if cursor + max_seconds * 0.8 <= c <= cursor + max_seconds]
         cursor = max(candidates) if candidates else cursor + max_seconds
         bounds.append(cursor)
     bounds.append(seconds)
@@ -76,7 +76,7 @@ def detect_scenes(source: Path, info: dict, config: MovieConfig) -> list[dict]:
     result = subprocess.run(
         ["ffmpeg", "-hide_banner", "-i", str(source), "-an", "-vf",
          "scale=320:-2,select='gt(scene,0.32)',showinfo", "-f", "null", "-"],
-        capture_output=True, text=True, timeout=300,
+        capture_output=True, text=True, timeout=max(300, info["duration"] * 2),
     )
     if result.returncode:
         raise legacy.BotError("FFmpeg không phân tích được shot cuts.")
@@ -149,7 +149,7 @@ def continuous_media(source: Path, directory: Path, narration: Path, seconds: fl
                f"tpad=stop_mode=clone:stop_duration={hold}")
     legacy.run(["ffmpeg", "-y", "-i", str(source), "-map", "0:v:0", "-an", "-vf", filters,
                 "-t", str(seconds), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-pix_fmt", "yuv420p", str(visuals)], timeout_seconds=600)
+                "-pix_fmt", "yuv420p", str(visuals)], timeout_seconds=max(600, seconds * 10))
     mixed = directory / "review_audio.m4a"
     has_audio = any(s["codec_type"] == "audio" for s in probe(source)["streams"])
     command = ["ffmpeg", "-y", "-i", str(narration)]
@@ -161,7 +161,7 @@ def continuous_media(source: Path, directory: Path, narration: Path, seconds: fl
                     "-map", "[a]"]
     else:
         command += ["-map", "0:a:0", "-af", "apad"]
-    legacy.run(command + ["-t", str(seconds), "-c:a", "aac", "-b:a", "192k", str(mixed)], timeout_seconds=180)
+    legacy.run(command + ["-t", str(seconds), "-c:a", "aac", "-b:a", "192k", str(mixed)], timeout_seconds=max(180, seconds * 2))
     return visuals, mixed
 
 
@@ -262,7 +262,8 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
     legacy.write_ass_captions(cues, captions)
     write_json(directory / "timeline.json", timeline)
     temporary = directory / "movie_review.tmp.mp4"
-    legacy.mux_video_audio_with_captions(visuals, narration, captions, temporary, cursor, settings, timeout_seconds=600)
+    legacy.mux_video_audio_with_captions(visuals, narration, captions, temporary, cursor, settings,
+                                       timeout_seconds=max(600, cursor * 10))
     report = quality_check(temporary, cursor, captions)
     os.replace(temporary, output)
     write_json(directory / "quality.json", report)
@@ -286,7 +287,7 @@ def quality_check(video: Path, expected: float, captions: Path) -> dict:
     if not captions.exists() or "Dialogue:" not in captions.read_text(encoding="utf-8"):
         raise legacy.BotError("QA không đạt: thiếu phụ đề.")
     decoded = subprocess.run(["ffmpeg", "-v", "info", "-xerror", "-i", str(video), "-af", "volumedetect", "-f", "null", "-"],
-                             capture_output=True, text=True, timeout=300)
+                             capture_output=True, text=True, timeout=max(300, expected * 3))
     volume = re.search(r"mean_volume:\s*(-?[\d.]+) dB", decoded.stderr)
     if decoded.returncode or not volume or float(volume.group(1)) < -55:
         raise legacy.BotError("QA không đạt: decode lỗi hoặc audio gần như im lặng.")

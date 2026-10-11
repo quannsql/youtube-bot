@@ -17,7 +17,7 @@ def studio(monkeypatch, tmp_path):
     monkeypatch.setattr(web_app, "ACCESS_TOKEN", "studio-test-password")
     monkeypatch.setattr(legacy, "DATA_DIR", tmp_path)
     monkeypatch.setattr(legacy, "require_tools", lambda: None)
-    monkeypatch.setattr("movie_analysis.web.inspect_source", lambda *_: {})
+    monkeypatch.setattr("movie_analysis.web.inspect_source", lambda *_: {"duration": 4})
     client = web_app.app.test_client()
     client.post("/login", data={"token": "studio-test-password"})
     client.get("/movies")

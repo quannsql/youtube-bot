@@ -47,7 +47,8 @@ MOVIE_VISUAL_MODE=continuous
 MOVIE_MODEL=gemini-3.8-live
 MOVIE_VERIFIER_MODEL=gemini-3.8-live
 MOVIE_LIVE_TPM=65000
-MOVIE_LIVE_MAX_SECONDS=90
+MOVIE_LIVE_MAX_SECONDS=300
+MOVIE_LIVE_CHUNK_SECONDS=45
 MOVIE_GLOBAL_FPS=1
 MOVIE_SCENE_FPS=1
 MOVIE_RECHECK_FPS=1
@@ -63,15 +64,19 @@ GOOGLE_TTS_SERVICE_ACCOUNT_FILE=google_tts_service_account.json
 GOOGLE_TTS_VI_VOICE=vi-VN-Chirp3-HD-Aoede
 GOOGLE_TTS_VI_SPEAKING_RATE=1.0
 MOVIE_MAX_INPUT_MB=500
-MOVIE_MAX_INPUT_SECONDS=90
+MOVIE_MAX_INPUT_SECONDS=300
+MOVIE_MAX_SCENES=30
+MOVIE_MAX_CALLS=100
 BOT_DATA_DIR=/data
-WEB_JOB_TIMEOUT_SECONDS=5400
+WEB_JOB_TIMEOUT_SECONDS=7200
 YOUTUBE_PRIVACY_STATUS=private
 ```
 
 Không commit `.env`, key hoặc file credential. Với Railway, dùng `*_JSON_B64` theo hướng dẫn trong README; file JSON nằm ở máy Windows không tự xuất hiện trên server. YouTube OAuth chỉ cần nếu dùng chức năng đăng của bot cũ. Giới hạn token của movie là bộ đếm cục bộ, không thay thế quota toàn tài khoản hoặc bảo đảm mọi lượt gọi miễn phí.
 
-`OPENAI_API_KEY` cũ dùng lại được nếu đã có trên chính service Web. Variables của service Cron khác không tự truyền sang Web; dùng shared/reference variable hoặc thêm giá trị vào Web. `GEMINI_API_KEY` cần thêm riêng cho bước phân tích/nhận diện video. Giới hạn 90 giây ở trên khớp với cấu hình Live hiện tại; mục tiêu lời review thường chọn 60 giây trên dashboard.
+`OPENAI_API_KEY` cũ dùng lại được nếu đã có trên chính service Web. Variables của service Cron khác không tự truyền sang Web; dùng shared/reference variable hoặc thêm giá trị vào Web. `GEMINI_API_KEY` cần thêm riêng cho bước phân tích/nhận diện video. Nguồn MP4 tối đa 300 giây; phân tích tổng thể và nhận diện đều chia thành phiên ngắn tối đa 45 giây, giữ timestamp gốc. Mục tiêu lời review trên dashboard độc lập với độ dài nguồn, vẫn tối đa 180 giây. Chế độ giữ nguyên clip phát toàn bộ nguồn; nếu lời bình kết thúc sớm, phần còn lại tiếp tục với âm thanh gốc đã hạ nhỏ.
+
+Khi nâng cấp từ cấu hình cũ, sửa các biến đang đặt 90 giây / 60 lượt / 20 cảnh; biến Railway đã lưu sẽ ghi đè mặc định mới. Đặt `MOVIE_MAX_INPUT_SECONDS=300`, `MOVIE_LIVE_MAX_SECONDS=300`, `MOVIE_LIVE_CHUNK_SECONDS=45`, `MOVIE_MAX_SCENES=30`, `MOVIE_MAX_CALLS=100`, `WEB_JOB_TIMEOUT_SECONDS=7200`, rồi Deploy. Không cần đổi model nhận diện, API key hay JSON TTS.
 
 Để cập nhật Google TTS từ file JSON mới, chạy PowerShell trên máy của bạn (đổi đường dẫn nếu file có tên khác):
 

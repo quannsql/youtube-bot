@@ -22,6 +22,11 @@ from .provider import GeminiVideoClient, SYSTEM
 LOG = logging.getLogger("movie")
 
 
+def live_reservation(prompt, seconds, frames, output_tokens):
+    return (math.ceil(len(prompt.encode("utf-8")) / 2) + 4096 + frames * 512
+            + math.ceil(seconds * 50) + output_tokens)
+
+
 def tool_result(call):
     if call.name != "submit_analysis":
         raise legacy.BotError("Gemini Live gọi hàm không hợp lệ.")
@@ -58,7 +63,7 @@ class LiveRateBudget:
 
 
 class GeminiLiveVideoClient(GeminiVideoClient):
-    cache_version = "live-tools-v2"
+    cache_version = "live-tools-v3-chunks"
 
     def __init__(self, key, config, directory, sdk_client=None, rate_budget=None):
         super().__init__(key, config, directory)
@@ -75,7 +80,7 @@ class GeminiLiveVideoClient(GeminiVideoClient):
         data = probe(source)
         seconds = float(data["format"]["duration"])
         if seconds > self.cfg.live_max_seconds:
-            raise legacy.BotError(f"Live hiện hỗ trợ clip tối đa {self.cfg.live_max_seconds:g}s để giữ phiên audio/video ngắn. Cắt clip trước khi chạy.")
+            raise legacy.BotError(f"Video vượt MOVIE_LIVE_MAX_SECONDS={self.cfg.live_max_seconds:g}s; tăng giới hạn đầu vào nếu cần.")
         LOG.info("Gemini Live: đọc MP4 tại máy, gửi khung hình 1 FPS và âm thanh PCM theo thời gian thực.")
         return {"source": str(source.resolve()), "source_sha256": source_hash, "duration": seconds,
                 "has_audio": any(s["codec_type"] == "audio" for s in data["streams"])}
@@ -86,6 +91,8 @@ class GeminiLiveVideoClient(GeminiVideoClient):
         start, end = span or (0, remote["duration"])
         if not 0 <= start < end <= remote["duration"]:
             raise legacy.BotError("Khoảng video Live không hợp lệ.")
+        if end - start > min(60, self.cfg.live_chunk_seconds) + 2.01:
+            raise legacy.BotError("Lượt Live quá dài; cần chia đoạn trước khi gửi media.")
         fps = min(1., float(fps))
         key = digest([remote["source_sha256"], start, end, fps, self.cache_version])[:24]
         folder = self.directory / "live_media" / key
@@ -218,13 +225,19 @@ class GeminiLiveVideoClient(GeminiVideoClient):
         model = model_override or (self.cfg.verifier_model if verify else self.cfg.model)
         if "live" not in model:
             raise legacy.BotError("Nhánh Gemini Live cần model Live; không tự dùng Flash REST.")
+        if remote is not None:
+            start, end = span or (0, remote["duration"])
+            planned = live_reservation(prompt, end - start, math.ceil((end - start) * min(1, fps)), self.cfg.max_output_tokens)
+            if planned > int(self.cfg.live_tpm * .8):
+                raise legacy.BotError(f"Live {stage} vượt ngân sách TPM dự phòng trước khi gửi media; "
+                                      "giảm MOVIE_LIVE_CHUNK_SECONDS hoặc rút gọn hồ sơ phim. Cache được giữ.")
         media = self._prepare(remote, span, fps)
-        estimate = math.ceil(len(prompt.encode("utf-8")) / 2) + 4096 + len(media["frames"]) * 512 + math.ceil(media["seconds"] * 50)
-        reserve = estimate + self.cfg.max_output_tokens
+        reserve = live_reservation(prompt, media["seconds"], len(media["frames"]), self.cfg.max_output_tokens)
+        estimate = reserve - self.cfg.max_output_tokens
         for attempt in range(self.cfg.attempts):
             if len(self.usage["calls"]) >= self.cfg.max_calls or sum(c["charged_tokens"] for c in self.usage["calls"]) + reserve > self.cfg.max_tokens:
                 raise legacy.BotError("Đã tới giới hạn MOVIE_MAX_CALLS/MOVIE_MAX_TOKENS; cache được giữ để tiếp tục.")
-            self.rate.reserve(estimate)
+            self.rate.reserve(reserve)
             record = {"provider": "gemini_live", "stage": stage, "model": model, "attempt": attempt + 1,
                       "input_token_reservation": estimate, "charged_tokens": reserve, "status": "reserved",
                       "frames": len(media["frames"]), "audio_seconds": len(media["audio"]) / 32000,

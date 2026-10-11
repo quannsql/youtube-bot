@@ -64,9 +64,12 @@ def register_movie_routes(app, login_required, get_archive):
     @app.route("/movies")
     @login_required
     def movies():
+        cfg = MovieConfig.from_env()
         return render_template("studio/movies.html", csrf=csrf(), states=RIGHTS_STATES,
-                                      max_mb=MovieConfig.from_env().max_input_mb, default_style=DEFAULT_STYLE,
-                                      default_visual_mode=MovieConfig.from_env().visual_mode)
+                                      max_mb=cfg.max_input_mb, default_style=DEFAULT_STYLE,
+                                      max_seconds=min(cfg.max_input_seconds, cfg.live_max_seconds)
+                                      if cfg.video_provider == "gemini_live" else cfg.max_input_seconds,
+                                      default_visual_mode=cfg.visual_mode)
 
     @app.route("/movies/submit", methods=["POST"])
     @login_required
@@ -118,7 +121,9 @@ def register_movie_routes(app, login_required, get_archive):
                     output.write(chunk)
             enable_local_tools()
             legacy.require_tools()
-            inspect_source(source, cfg)
+            source_info = inspect_source(source, cfg)
+            if cfg.video_provider == "gemini_live" and source_info["duration"] > cfg.live_max_seconds:
+                raise legacy.BotError(f"Video vượt giới hạn Live {cfg.live_max_seconds:g} giây.")
         except (legacy.BotError, ValueError, KeyError) as exc:
             source.unlink(missing_ok=True)
             return jsonify(ok=False, error=str(exc)), 400

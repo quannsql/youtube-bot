@@ -15,7 +15,8 @@ from .media import build_scenes, detect_scenes, enable_local_tools, inspect_sour
 from .provider import GeminiVideoClient
 from .live_provider import GeminiLiveVideoClient
 from .narration import PROMPT_VERSION, load_context
-from .characters import identity_frames, recognize_characters
+from .characters import identity_frames, recognize_characters, recognize_character_chunks
+from .chunks import CHUNK_VERSION, analyze_chunks, session_seconds, scene_windows
 from .review import (plan_prompt, review_audit_prompt, review_writer_prompt, review_repair_prompt, validate_plan,
                      validate_review_audit, validate_review_script)
 from .openai_writer import OpenAIWriterClient
@@ -127,9 +128,15 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                 write_json(directory / "job.json", state)
 
             checkpoint("global")
-            detected = cache.stage("shots", [source_hash, config.max_scene_seconds, config.max_scenes],
-                                   lambda: detect_scenes(source, info, config))
+            scene_config = config
+            if config.video_provider == "gemini_live":
+                # Leave room for the verifier's one-second overlap on each side.
+                scene_config = replace(config, max_scene_seconds=min(config.max_scene_seconds, session_seconds(config) - 2))
+            detected = cache.stage("shots", [source_hash, scene_config.max_scene_seconds, config.max_scenes, "group-v2"],
+                                   lambda: detect_scenes(source, info, scene_config))
             global_dependencies = [source_hash, config.video_provider, config.model, config.global_fps, client.cache_version if isinstance(client, GeminiLiveVideoClient) else "rest-v1"]
+            if config.video_provider == "gemini_live":
+                global_dependencies += [CHUNK_VERSION, session_seconds(config)]
             global_prompt = (f"Watch the entire {info['duration']:.3f}s video including its sound. "
                             "Describe chronology, setting, character labels, relationships actually demonstrated, "
                             "audible dialogue (do not invent unintelligible speech), music/sound cues and camera choices. "
@@ -162,7 +169,9 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                             raise
 
             global_data = cache.stage(
-                "global", global_dependencies, analyze_global,
+                "global", global_dependencies,
+                (lambda: analyze_chunks(cache, directory, info, config, global_dependencies, ask, checkpoint))
+                if config.video_provider == "gemini_live" else analyze_global,
                 lambda data: validate_global(data, info["duration"], tolerance),
             )
             # Add semantic event boundaries to shot cuts. Fast cuts stay grouped,
@@ -170,7 +179,7 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
             boundaries = [s["end"] for s in detected[:-1]]
             boundaries += [t for s in detected for t in s["shot_cuts"]]
             boundaries += [e["end"] for e in global_data["events"]]
-            detected = build_scenes(info["duration"], boundaries, config.max_scene_seconds, config.max_scenes)
+            detected = build_scenes(info["duration"], boundaries, scene_config.max_scene_seconds, config.max_scenes)
             write_json(directory / "scenes.json", detected)
             claims, verdicts, rechecks = [], [], 0
             for scene in detected:
@@ -178,6 +187,8 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                 checkpoint("scene:" + sid)
                 scene_context = {"characters": global_data.get("characters", []), "events": [e for e in global_data["events"]
                            if e["start"] < scene["end"] and e["end"] > scene["start"]]}
+                scene_context["dialogue"] = [d for d in global_data.get("dialogue", [])
+                                             if d["start"] < scene["end"] + 1 and d["end"] > scene["start"] - 1]
                 fps = config.recheck_fps if scene["fast_action"] else config.scene_fps
                 deep = cache.stage(
                     sid + "_deep", [global_dependencies, config.model, scene, fps, scene_context],
@@ -185,7 +196,8 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                         f"Analyze every meaningful event and audio in {scene['start']}–{scene['end']}s. "
                         "Track distinct characters, action order, spatial advantages, camera/editing and dialogue. "
                         "Global context is a hypothesis to challenge, not truth: " + payload(scene_context) + "\n"
-                        "Return at most 16 atomic, useful claims. Split fact from causal interpretation. Evidence must "
+                        "Return at most 16 atomic, useful claims; keep each text and evidence under 240 characters. "
+                        "Split fact from causal interpretation. Evidence must "
                         "describe a directly visible/audible detail, not repeat the claim. Do not create external facts. "
                         'JSON: {claims:[{id:string,kind:"observed"|"inference"|"external",modality:"visual"|"audio"|"both",'
                         'start:number,end:number,text:string,evidence:string,confidence:number}], '
@@ -205,12 +217,12 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                     "supported means directly visible/audible at the stated source timestamp; uncertain includes "
                     "details not resolvable from this clip. Never increase certainty to satisfy a request. "
                     'JSON: {verdicts:[{id:string,status:"supported"|"uncertain"|"contradicted",confidence:number,reason:string}]}. '
-                    "Global chronology: " + payload(global_data) + "\nCandidates: " + payload(scene_claims)
+                    "Relevant chronology (hypotheses, not proof): " + payload(scene_context) + "\nCandidates: " + payload(scene_claims)
                 )
                 # A short overlap prevents treating a cut or clipped sentence as independent evidence.
                 span = {"start": max(0, scene["start"] - 1), "end": min(info["duration"], scene["end"] + 1)}
                 verified = cache.stage(
-                    sid + "_verify", [global_dependencies, config.verifier_model, scene_claims, global_data, fps],
+                    sid + "_verify", [global_dependencies, config.verifier_model, scene_claims, scene_context, fps],
                     lambda: ask("verify:" + sid, verification_prompt, span, fps, True),
                     lambda data: validate_verdicts(data, scene_claims),
                 )
@@ -239,7 +251,11 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                 write_json(directory / "job.json", state)
                 return directory / "evidence.json"
             checkpoint("characters")
-            context = recognize_characters(cache, directory, source_hash, config, evidence, context, ask_identity)
+            if config.video_provider == "gemini_live" and config.identity_provider == "gemini":
+                context = recognize_character_chunks(directory, source_hash, config, evidence, context,
+                    scene_windows(detected, session_seconds(config)), ask, checkpoint)
+            else:
+                context = recognize_characters(cache, directory, source_hash, config, evidence, context, ask_identity)
             checkpoint("script")
             if regeneration_id and state.get("regeneration_id") == regeneration_id:
                 regenerate_script = regenerate_voice = False

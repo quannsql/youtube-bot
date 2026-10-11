@@ -101,15 +101,15 @@ Variables thay đổi cần được **Deploy** để có hiệu lực. [Railway
 
 Logo mặc định là `overlay-logo.png` ở thư mục gốc repo (`D:\video-bot\overlay-logo.png` trên máy local). Có thể thay file này bằng PNG nền trong suốt cùng tên. File mặc định cũng dùng cho bot Short/Long; nếu chỉ đổi logo review phim, đặt file riêng, ví dụ `assets/movie-logo.png`, rồi đặt `MOVIE_LOGO_FILE=assets/movie-logo.png`. Đường dẫn tương đối bắt đầu ở gốc repo; đường dẫn tuyệt đối trên Volume cũng được hỗ trợ. Khi deploy Railway, file cần được commit/push cùng code hoặc tồn tại trên Volume; đường dẫn Windows không dùng được trên Railway.
 
-Review phim dùng nền đen `#000000`. Logo nằm bên phải ngay trên khung phim, mặc định rộng tối đa 140 px, cao tối đa 96 px, cách khung phim 20 px; phần trong suốt quanh logo không tính vào kích thước nhìn thấy. Điều chỉnh riêng bằng `MOVIE_LOGO_WIDTH` và `MOVIE_LOGO_GAP`; không dùng biến kích thước logo của bot Short/Long cho bố cục phim mới. Ví dụ:
+Review phim dùng nền đen `#000000`. Logo nằm bên phải ngay trên khung phim, mặc định rộng tối đa 70 px, cao tối đa 48 px, cách khung phim 20 px; phần trong suốt quanh logo không tính vào kích thước nhìn thấy. Điều chỉnh riêng bằng `MOVIE_LOGO_WIDTH` và `MOVIE_LOGO_GAP`; không dùng biến kích thước logo của bot Short/Long cho bố cục phim mới. Ví dụ:
 
 ```dotenv
 MOVIE_LOGO_FILE=assets/movie-logo.png
-MOVIE_LOGO_WIDTH=140
+MOVIE_LOGO_WIDTH=70
 MOVIE_LOGO_GAP=20
 ```
 
-Tên từ ô **Tên phim / trailer** (hoặc tên trong hồ sơ phim đã chọn) được hiển thị bằng chữ trắng dưới khung phim, giữ nguyên nội dung người dùng, tự xuống dòng và giảm cỡ nếu cần. Khi không có tên, bỏ phần chữ này. Phụ đề lời bình nằm thấp hơn, tách khỏi tên phim. Video ngang giữ toàn bộ hình; nguồn dọc/vuông cũng được thu vừa vùng giữa để còn chỗ cho logo và tên.
+Tên từ ô **Tên phim / trailer** (hoặc tên trong hồ sơ phim đã chọn) được hiển thị bằng chữ trắng dưới khung phim, giữ nguyên nội dung người dùng, tự xuống dòng và giảm cỡ nếu cần. Khi không có tên, bỏ phần chữ này. Video không chèn phụ đề lời bình; file ASS vẫn có thể tải riêng. Video ngang giữ toàn bộ hình; nguồn dọc/vuông cũng được thu vừa vùng giữa để còn chỗ cho logo và tên.
 
 Đổi logo/kích thước/tên hiển thị làm mất cache render liên quan, giọng đọc đã lưu được dùng lại khi lời bình và giọng không đổi. Video MP4 đã xuất trước đó không tự đổi; cần dựng lại job. Variables và file logo mới trên Railway cần Deploy để có hiệu lực.
 

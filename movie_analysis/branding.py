@@ -10,7 +10,7 @@ import youtube_shorts_bot as legacy
 from .core import write_json
 
 WIDTH, HEIGHT, VIEWPORT_HEIGHT = 1080, 1920, 960
-BRANDING_VERSION = "movie-branding-v1"
+BRANDING_VERSION = "movie-branding-v2"
 
 
 def footage_box(stream):
@@ -73,7 +73,7 @@ def branding_overlay(destination: Path, logo_path: Path, movie_title: str, box, 
             if not bounds:
                 raise legacy.BotError("Logo PNG hoàn toàn trong suốt.")
             logo = logo.crop(bounds)
-            logo.thumbnail((min(config.logo_width, 360), min(96, max(1, box["top"] - config.logo_gap))), Image.Resampling.LANCZOS)
+            logo.thumbnail((min(config.logo_width, 360), min(48, max(1, box["top"] - config.logo_gap))), Image.Resampling.LANCZOS)
     except (OSError, ValueError) as exc:
         raise legacy.BotError("Không đọc được file logo cho review phim.") from exc
     x, y = WIDTH - 36 - logo.width, max(0, box["top"] - config.logo_gap - logo.height)
@@ -90,16 +90,15 @@ def branding_overlay(destination: Path, logo_path: Path, movie_title: str, box, 
     overlay.save(destination)
     layout = {"version": BRANDING_VERSION, "background": "#000000", "footage": box,
               "logo": {"left": x, "top": y, "width": logo.width, "height": logo.height},
-              "movie_title": title, "title": title_box, "caption_margin_bottom": 160}
+              "movie_title": title, "title": title_box, "captions_burned_in": False}
     write_json(destination.with_suffix(".json"), layout)
     return layout
 
 
-def mux_movie(visuals, narration, captions, overlay, output, seconds):
+def mux_movie(visuals, narration, overlay, output, seconds):
     # Film title is painted in a PNG, so punctuation/backslashes/user content
-    # never enter the FFmpeg filter language. Subtitles remain their own layer.
-    filters = ("[0:v][2:v]overlay=0:0:format=auto[branded];"
-               f"[branded]{legacy.ass_video_filter(captions)}[v];"
+    # never enter the FFmpeg filter language. Narration captions are export-only.
+    filters = ("[0:v][2:v]overlay=0:0:format=auto[v];"
                f"[1:a]apad=pad_dur={seconds}[a]")
     legacy.run(["ffmpeg", "-y", "-i", str(visuals), "-i", str(narration),
                 "-loop", "1", "-i", str(overlay), "-filter_complex", filters,

@@ -272,7 +272,7 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
         box = {"left": 60, "top": 460 if rights["allow_source_visuals"] else 480, "width": 960, "height": 760 if rights["allow_source_visuals"] else 720}
     overlay = directory / "movie_branding.png"
     layout = branding_overlay(overlay, settings.overlay_logo, movie_title, box, config)
-    mux_movie(visuals, narration, captions, overlay, temporary, cursor)
+    mux_movie(visuals, narration, overlay, temporary, cursor)
     report = quality_check(temporary, cursor, captions)
     os.replace(temporary, output)
     write_json(directory / "quality.json", report)
@@ -301,4 +301,5 @@ def quality_check(video: Path, expected: float, captions: Path) -> dict:
     if decoded.returncode or not volume or float(volume.group(1)) < -55:
         raise legacy.BotError("QA không đạt: decode lỗi hoặc audio gần như im lặng.")
     return {"passed": True, "duration": seconds, "resolution": "1080x1920", "audio_mean_db": float(volume.group(1)),
-            "caption_timing": "estimated within each measured TTS beat; human review required"}
+            "captions_burned_in": False,
+            "caption_timing": "separate ASS export; estimated within each measured TTS beat; human review required"}

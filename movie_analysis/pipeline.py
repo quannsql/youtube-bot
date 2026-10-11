@@ -30,7 +30,7 @@ def payload(data):
 
 def movie_settings() -> legacy.Settings:
     """Reuse TTS/mux settings without requiring the documentary OpenAI credentials."""
-    logo = Path(os.getenv("OVERLAY_LOGO_FILE", "overlay-logo.png"))
+    logo = Path(os.getenv("MOVIE_LOGO_FILE", "").strip() or os.getenv("OVERLAY_LOGO_FILE", "overlay-logo.png"))
     if not logo.is_absolute():
         logo = legacy.ROOT / logo
     return legacy.Settings(
@@ -64,7 +64,7 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                 if not settings.google_tts_service_account.is_file():
                     raise legacy.BotError("Thiếu Google TTS service-account JSON; có thể chạy --analyze-only trước.")
             if not analyze_only and not script_only and not settings.overlay_logo.is_file():
-                raise legacy.BotError("Thiếu logo overlay; cấu hình OVERLAY_LOGO_FILE.")
+                raise legacy.BotError("Thiếu logo; kiểm tra MOVIE_LOGO_FILE hoặc OVERLAY_LOGO_FILE.")
             source_hash = file_digest(source)
             if state.get("source_sha256") and state["source_sha256"] != source_hash:
                 raise legacy.BotError("Thư mục job thuộc video khác; dùng thư mục mới để giữ evidence/usage chính xác.")
@@ -343,10 +343,11 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
             checkpoint("render")
             legacy.materialize_railway_credentials()
             if not settings.overlay_logo.is_file():
-                raise legacy.BotError("Thiếu logo overlay; cấu hình OVERLAY_LOGO_FILE.")
+                raise legacy.BotError("Thiếu logo; kiểm tra MOVIE_LOGO_FILE hoặc OVERLAY_LOGO_FILE.")
             legacy.ensure_dejavu_font()
             voice = tts or legacy.GoogleCloudVietnameseTTS(settings)
-            output = render_movie(source, directory, script, evidence, rights, settings, voice, client, config)
+            output = render_movie(source, directory, script, evidence, rights, settings, voice, client, config,
+                                  movie_title=context["title"])
             state.update(status="review", stage="complete", title=script["title"], output=str(output),
                          updated_at=datetime.now(UTC).isoformat(), error=None)
             write_json(directory / "job.json", state)

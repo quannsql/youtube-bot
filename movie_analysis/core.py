@@ -109,6 +109,8 @@ class MovieConfig:
     min_confidence: float = 0.85
     target_seconds: int = 60
     visual_mode: str = "continuous"
+    logo_width: int = 140
+    logo_gap: int = 20
     live_tpm: int = 65000
     live_max_seconds: float = 300
     live_chunk_seconds: float = 45

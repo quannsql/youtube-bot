@@ -97,6 +97,22 @@ Variables thay đổi cần được **Deploy** để có hiệu lực. [Railway
 5. Generate Domain để có HTTPS, mở trang đăng nhập. Railway tự cấp `PORT`; không cần đặt. Service sẽ từ chối khởi động trên Railway nếu thiếu mật khẩu hoặc khóa session ổn định. `/healthz` phục vụ kiểm tra khởi động; không xác nhận API AI/TTS đã hoạt động. [Railway Healthchecks](https://docs.railway.com/deployments/healthchecks)
 6. Test MP4 ngắn, theo dõi log và trang job. Xem video đã hoàn tất, restart service rồi kiểm tra file vẫn tải được. Đảm bảo Volume đủ chỗ cho video nguồn và các file trung gian; hiện chưa có nút tự dọn lịch sử/media.
 
+## Logo và tên phim trong video review
+
+Logo mặc định là `overlay-logo.png` ở thư mục gốc repo (`D:\video-bot\overlay-logo.png` trên máy local). Có thể thay file này bằng PNG nền trong suốt cùng tên. File mặc định cũng dùng cho bot Short/Long; nếu chỉ đổi logo review phim, đặt file riêng, ví dụ `assets/movie-logo.png`, rồi đặt `MOVIE_LOGO_FILE=assets/movie-logo.png`. Đường dẫn tương đối bắt đầu ở gốc repo; đường dẫn tuyệt đối trên Volume cũng được hỗ trợ. Khi deploy Railway, file cần được commit/push cùng code hoặc tồn tại trên Volume; đường dẫn Windows không dùng được trên Railway.
+
+Review phim dùng nền đen `#000000`. Logo nằm bên phải ngay trên khung phim, mặc định rộng tối đa 140 px, cao tối đa 96 px, cách khung phim 20 px; phần trong suốt quanh logo không tính vào kích thước nhìn thấy. Điều chỉnh riêng bằng `MOVIE_LOGO_WIDTH` và `MOVIE_LOGO_GAP`; không dùng biến kích thước logo của bot Short/Long cho bố cục phim mới. Ví dụ:
+
+```dotenv
+MOVIE_LOGO_FILE=assets/movie-logo.png
+MOVIE_LOGO_WIDTH=140
+MOVIE_LOGO_GAP=20
+```
+
+Tên từ ô **Tên phim / trailer** (hoặc tên trong hồ sơ phim đã chọn) được hiển thị bằng chữ trắng dưới khung phim, giữ nguyên nội dung người dùng, tự xuống dòng và giảm cỡ nếu cần. Khi không có tên, bỏ phần chữ này. Phụ đề lời bình nằm thấp hơn, tách khỏi tên phim. Video ngang giữ toàn bộ hình; nguồn dọc/vuông cũng được thu vừa vùng giữa để còn chỗ cho logo và tên.
+
+Đổi logo/kích thước/tên hiển thị làm mất cache render liên quan, giọng đọc đã lưu được dùng lại khi lời bình và giọng không đổi. Video MP4 đã xuất trước đó không tự đổi; cần dựng lại job. Variables và file logo mới trên Railway cần Deploy để có hiệu lực.
+
 ## Mức độ xác minh hiện tại
 
 Upload/hàng đợi, bảo vệ đăng nhập/CSRF, tiếp tục job, phân biệt thoại nháp với thoại đã duyệt, tải MP4 và dựng liên tục đã có kiểm thử. Bộ test hiện tại có 295 test đạt; các test API dùng giả lập. Clip Avengers thật 20,02 giây đã hoàn tất Live → OpenAI → Google TTS → MP4 29,33 giây; bản dựng liên tục dùng lại giọng đọc đã lưu, giữ khung hình cuối thêm 9,308 giây cho hết lời đọc. Chi tiết ở [Gemini Live](gemini-live.md). Lượt test này chạy trên máy local, chưa xác minh một deployment Railway thật.

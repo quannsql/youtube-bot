@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 import youtube_shorts_bot as legacy
 from .core import MovieConfig, digest, file_digest, read_json, write_json
+from .branding import BRANDING_VERSION, branding_overlay, footage_box, mux_movie
 
 
 def enable_local_tools():
@@ -86,7 +87,7 @@ def detect_scenes(source: Path, info: dict, config: MovieConfig) -> list[dict]:
 
 def graphic(beat: dict, claim: dict, title: str, destination: Path, source_allowed: bool):
     """Original typography/diagram; does not impersonate movie evidence."""
-    canvas = Image.new("RGB", (1080, 1920), "#101828")
+    canvas = Image.new("RGB", (1080, 1920), "#000000")
     draw = ImageDraw.Draw(canvas)
     font_path = legacy.ROOT / "fonts" / "DejaVuSans.ttf"
     font = lambda size: ImageFont.truetype(str(font_path), size)
@@ -110,13 +111,13 @@ def graphic(beat: dict, claim: dict, title: str, destination: Path, source_allow
             top += size * 1.35
         return top
 
-    draw.rounded_rectangle((60, 70, 1020, 148), radius=25, fill="#284a66")
+    draw.rounded_rectangle((60, 70, 1020, 148), radius=25, fill="#141414")
     draw.text((85, 85), "GÓC NHÌN ĐIỆN ẢNH", font=font(34), fill="white")
-    paragraph(beat["headline"], 270, 54, "#ffffff", max_lines=2)
+    paragraph(beat["headline"], 170, 48, "#ffffff", max_lines=2)
     stamp = f'Bằng chứng: {claim["start"]:.1f}s – {claim["end"]:.1f}s'
-    draw.text((80, 1290), stamp, font=font(32), fill="#73d7ee")
+    draw.text((80, 1460), stamp, font=font(32), fill="#a6b8cc")
     if not source_allowed:
-        draw.rounded_rectangle((65, 480, 1015, 1200), radius=38, fill="#1d3146")
+        draw.rounded_rectangle((65, 480, 1015, 1200), radius=38, fill="#141414")
         draw.ellipse((460, 530, 620, 690), fill="#ffcc80")
         draw.line((540, 690, 540, 835), fill="#73d7ee", width=12)
         draw.line((540, 750, 390, 830), fill="#73d7ee", width=12)
@@ -124,7 +125,6 @@ def graphic(beat: dict, claim: dict, title: str, destination: Path, source_allow
         draw.line((540, 835, 435, 925), fill="#73d7ee", width=12)
         draw.line((540, 835, 645, 925), fill="#73d7ee", width=12)
         paragraph(claim["text"], 970, 38, "white", max_lines=4)
-    paragraph("Phân tích & bình luận • " + title, 1400, 32, "#a6b8cc", max_lines=3)
     draw.text((80, 1810), "Minh họa tự tạo" if not source_allowed else "Cảnh có khai báo quyền sử dụng", font=font(28), fill="#a6b8cc")
     canvas.save(destination)
 
@@ -142,10 +142,12 @@ def continuous_media(source: Path, directory: Path, narration: Path, seconds: fl
     """Play the entire source once at its original speed; hold its end if voice runs longer."""
     visuals = directory / "visuals.mp4"
     hold = max(0.0, seconds - source_seconds)
+    stream = next(s for s in probe(source)["streams"] if s["codec_type"] == "video" and not s.get("disposition", {}).get("attached_pic"))
+    box = footage_box(stream)
     # Preserve the complete frame in the portrait canvas; no crop, scene seek or replay.
     filters = ("setpts=PTS-STARTPTS,"
-               "scale=1080:1920:force_original_aspect_ratio=decrease,"
-               "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=0x101828,setsar=1,fps=30,"
+               f"scale={box['width']}:{box['height']},"
+               "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,"
                f"tpad=stop_mode=clone:stop_duration={hold}")
     legacy.run(["ffmpeg", "-y", "-i", str(source), "-map", "0:v:0", "-an", "-vf", filters,
                 "-t", str(seconds), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -166,12 +168,13 @@ def continuous_media(source: Path, directory: Path, narration: Path, seconds: fl
 
 
 def render_movie(source: Path, directory: Path, script: dict, evidence: dict, rights: dict,
-                 settings: legacy.Settings, tts, provider, config: MovieConfig) -> Path:
+                 settings: legacy.Settings, tts, provider, config: MovieConfig, movie_title: str = "") -> Path:
     claims = {c["id"]: c for c in evidence["accepted"]}
     key = digest({"script": script, "evidence": evidence, "rights": rights,
                   "voice": settings.google_tts_vietnamese_voice, "rate": settings.google_tts_vietnamese_speaking_rate,
                   "logo": file_digest(settings.overlay_logo), "source": file_digest(source),
-                  "visual_mode": config.visual_mode, "render": 3})
+                  "visual_mode": config.visual_mode, "render": 4, "branding": BRANDING_VERSION,
+                  "movie_title": movie_title, "logo_width": config.logo_width, "logo_gap": config.logo_gap})
     continuous = config.visual_mode == "continuous" and rights["allow_source_visuals"]
     source_seconds = duration(source) if continuous else 0.0
     output = directory / "movie_review.mp4"
@@ -259,11 +262,17 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
         cursor = max(source_seconds, voice_seconds)
         visuals, narration = continuous_media(source, directory, narration, cursor, source_seconds)
     captions = directory / "captions_vi.ass"
-    legacy.write_ass_captions(cues, captions)
+    legacy.write_ass_captions(cues, captions, font_size=64, margin_v=160)
     write_json(directory / "timeline.json", timeline)
     temporary = directory / "movie_review.tmp.mp4"
-    legacy.mux_video_audio_with_captions(visuals, narration, captions, temporary, cursor, settings,
-                                       timeout_seconds=max(600, cursor * 10))
+    if continuous:
+        box = footage_box(next(s for s in probe(source)["streams"] if s["codec_type"] == "video"
+                              and not s.get("disposition", {}).get("attached_pic")))
+    else:
+        box = {"left": 60, "top": 460 if rights["allow_source_visuals"] else 480, "width": 960, "height": 760 if rights["allow_source_visuals"] else 720}
+    overlay = directory / "movie_branding.png"
+    layout = branding_overlay(overlay, settings.overlay_logo, movie_title, box, config)
+    mux_movie(visuals, narration, captions, overlay, temporary, cursor)
     report = quality_check(temporary, cursor, captions)
     os.replace(temporary, output)
     write_json(directory / "quality.json", report)
@@ -271,7 +280,7 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
                "visual_mode": "continuous" if continuous else "evidence" if rights["allow_source_visuals"] else "graphics",
                "source_duration": source_seconds if continuous else None, "voice_duration": voice_seconds,
                "held_end_seconds": max(0, voice_seconds - source_seconds) if continuous else 0,
-               "source_audio_volume": 0.12 if continuous else 0})
+               "source_audio_volume": 0.12 if continuous else 0, "branding": layout})
     legacy.run(["ffmpeg", "-y", "-ss", str(min(1, cursor / 2)), "-i", str(output), "-frames:v", "1", str(directory / "preview.jpg")], timeout_seconds=60)
     return output
 

@@ -1,5 +1,7 @@
 # YouTube Shorts documentary bot
 
+**Mới: Movie Analysis Bot** — tải MP4 trên `/movies` hoặc chạy `python movie_analysis_bot.py clip.mp4` để phân tích audio/video nhiều lớp, kiểm chứng bằng timestamp, viết lời bình tiếng Việt, tạo TTS và dựng bản nháp Reels 9:16. Giữ nguyên các chế độ Short/Long bên dưới. Xem [cách chạy và cấu hình](docs/movie-analysis-usage.md) và [khảo sát kiến trúc/kế hoạch nâng cấp](docs/movie-analysis-architecture.md). Movie cần Gemini API key và Google TTS; chưa khai báo quyền dùng clip thì xuất đồ họa tự tạo.
+
 Python bot tạo và đăng YouTube Shorts tiếng Anh cùng video dài 5–7 phút. Mỗi lượt chạy hoàn thành toàn bộ chu trình: GPT-5.4 mini nghiên cứu/kịch bản → GPT Image 2 và Brave Images tạo visual → Google Cloud Chirp 3 HD tạo narration tiếng Anh → FFmpeg ghép → YouTube upload.
 
 Phần text gọi OpenAI Responses API bằng `gpt-5.4-mini`: reasoning `low` cho Shorts và `medium` cho video dài. Khi bật chia sẻ input/output cho đúng OpenAI Project, lưu lượng đủ điều kiện sẽ tự dùng hạn mức token miễn phí hằng ngày; không đưa bí mật hoặc dữ liệu riêng tư vào prompt. Phần tạo ảnh vẫn tính phí riêng và giữ `gpt-image-2` chất lượng `low`.
@@ -186,7 +188,7 @@ Nội dung video dài là kênh GIẢI THÍCH/giáo dục gần gũi đời số
 
 ## Nhập ý tưởng thủ công (frontend web)
 
-Ngoài 2 luồng **auto** (Short Cron + Long Cron chạy như trên, không đổi), bot có thêm **luồng thủ công**: một trang web (giao diện đen, full chiều ngang) với **2 khu riêng biệt — Short bên trái, Long-form bên phải**:
+Ngoài 2 luồng **auto** (Short Cron + Long Cron), bot có **Video Studio** trên dashboard Flask hiện có: tổng quan hàng đợi, tạo Short/Long từ ý tưởng và upload MP4 để làm review phim. Giao diện responsive, có xem trước clip, tiến trình upload, tìm/lọc lịch sử và trang kết quả. [Hướng dẫn dashboard và Railway](docs/dashboard-railway.md).
 
 - **Short (so sánh):** nhập **2 ô riêng — đối tượng A và đối tượng B** (kèm ô "góc so sánh" tuỳ chọn). Hai ô riêng là cách rõ ràng nhất cho bot: A luôn là panel trái, B luôn là panel phải, không phải đoán/tách chuỗi. Tên bạn nhập được **giữ nguyên tuyệt đối** — nếu model tự đổi tên hoặc tìm ảnh sai đối tượng, bot ghi đè lại theo đúng tên bạn nhập.
 - **Long-form (giải thích):** nhập một ý tưởng tự do như trước, ra video người-que 5–7 phút. Bot tự phân loại ý tưởng thủ công vào một trong 7 playlist Long-form trước khi viết kịch bản, lưu category trong `plan.json`, rồi tự tạo/tái sử dụng playlist và thêm video sau khi upload.
@@ -227,3 +229,9 @@ FLASK_SECRET_KEY=mot-chuoi-ngau-nhien-dai
 ```
 
 Railway tự cấp `PORT`; không cần đặt thủ công. Vì dùng chung `DATABASE_URL` với luồng auto, video thủ công vẫn được lưu vào archive nên chống-trùng của luồng auto vẫn tính cả các video này. Container build từ cùng repo nên đã có sẵn `ffmpeg` để render.
+
+Với **review phim**, chọn `railway.web.toml` làm Config File và gắn Volume `/data` vào service Web để giữ MP4 upload, cache và kết quả qua restart. PostgreSQL không lưu các file này. Chạy một replica; server dùng Waitress và healthcheck `/healthz`. Review hoàn tất ở dạng bản nháp để xem/tải, chưa tự đăng lên mạng xã hội. Hồ sơ nhân vật có thể chọn mẫu Avengers: Doomsday hoặc upload JSON riêng. [Các bước cấu hình chi tiết](docs/dashboard-railway.md).
+
+Để xem thử giao diện mà không gọi API hay chạy hàng đợi thật: `.\.venv\Scripts\python.exe scripts\preview_dashboard.py`, rồi mở `http://127.0.0.1:8085`.
+
+Phân tích phim bằng **Gemini 3.8 Live** (luồng khung hình 1 FPS + âm thanh, TPM 65.000) và OpenAI viết thoại: [cấu hình local/Railway và lệnh test hoàn chỉnh](docs/gemini-live.md).

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><title>{% block title %}Video Studio{% endblock %}</title>
+<link rel="stylesheet" href="{{url_for('static',filename='studio.css')}}"><script src="{{url_for('static',filename='studio.js')}}" defer></script></head>
+<body data-csrf="{{studio_csrf}}">
+<aside class="sidebar"><a class="brand" href="/"> <span class="brand-mark">▶</span> video<span>studio</span><small>WORKSPACE</small></a>
+<div class="nav-caption">KHÔNG GIAN SÁNG TẠO</div><nav aria-label="Điều hướng chính">
+<a class="nav-item {{'active' if request.endpoint=='index'}}" href="/"><span>▦</span>Tổng quan</a>
+<a class="nav-item {{'active' if request.endpoint in ['movies','movie_review']}}" href="/movies"><span>▷</span>Review phim <em>MỚI</em></a>
+<a class="nav-item" href="/#create"><span>＋</span>Tạo từ ý tưởng</a>
+<a class="nav-item" href="/#history"><span>◷</span>Lịch sử video</a></nav>
+<div class="sidebar-note"><span class="pulse"></span> Một ý tưởng. Một câu chuyện.<p>Upload đoạn phim, thêm bối cảnh và để bot hỗ trợ bạn kể lại.</p><a href="/movies">Bắt đầu sáng tạo ↗</a></div>
+<div class="account"><span class="avatar">Q</span><div>Studio của bạn<small>Không gian riêng</small></div>{% if require_auth %}<a href="/logout" title="Đăng xuất" aria-label="Đăng xuất">↪</a>{% endif %}</div></aside>
+<div class="workspace"><header class="topbar"><span>Workspace <span class="separator">/</span> {% block breadcrumb %}Tổng quan{% endblock %}</span><span class="top-tag">VIDEO STUDIO <span class="dot"></span></span></header>
+<main>{% if preview_mode %}<div class="aside-note">Bản xem trước giao diện · Worker tắt, dữ liệu thử riêng. Các thao tác ở đây không gọi API.</div>{% endif %}{% block content %}{% endblock %}</main><footer>Video Studio <span>Ý tưởng của bạn, câu chuyện của bạn.</span></footer></div>
+<div id="toast" role="status" class="toast" hidden></div>{% block scripts %}{% endblock %}</body></html>

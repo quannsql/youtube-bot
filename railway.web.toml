@@ -7,6 +7,9 @@ builder = "NIXPACKS"
 [deploy]
 # Server web luôn bật (khác với 2 cron one-shot).
 startCommand = "python -u web_app.py"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 60
+numReplicas = 1
 # Là tiến trình chạy dài: nếu crash thì cho Railway tự khởi động lại.
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

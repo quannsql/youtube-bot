@@ -1,0 +1,186 @@
+"""Authenticated upload, review boundaries and legacy queue controls."""
+import io
+import json
+from pathlib import Path
+
+import pytest
+
+import web_app
+import youtube_shorts_bot as legacy
+from movie_analysis.core import read_json, write_json
+
+
+@pytest.fixture
+def studio(monkeypatch, tmp_path):
+    web_app.reset_archive()
+    monkeypatch.setattr(web_app, "Archive", lambda: legacy.Archive(tmp_path / "queue.db"))
+    monkeypatch.setattr(web_app, "ACCESS_TOKEN", "studio-test-password")
+    monkeypatch.setattr(legacy, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(legacy, "require_tools", lambda: None)
+    monkeypatch.setattr("movie_analysis.web.inspect_source", lambda *_: {})
+    client = web_app.app.test_client()
+    client.post("/login", data={"token": "studio-test-password"})
+    client.get("/movies")
+    with client.session_transaction() as session:
+        csrf = session["movie_csrf"]
+        studio_csrf = session["studio_csrf"]
+    yield client, csrf, studio_csrf
+    web_app.reset_archive()
+
+
+def upload(studio, **fields):
+    client, csrf, _ = studio
+    response = client.post("/movies/submit", data={"csrf": csrf, "video": (io.BytesIO(b"test-video"), "clip.mp4"), **fields})
+    return response
+
+
+def test_profile_upload_is_validated_saved_and_passed_to_worker(studio):
+    response = upload(studio, context_preset="avengers-doomsday", movie_title="Avengers: Doomsday")
+    assert response.status_code == 302
+    client, _, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    row = web_app.get_archive().get_idea(job_id)
+    data = json.loads(row["idea"])
+    context = read_json(Path(data["context_file"]))
+    assert len(context["characters"]) == 3
+    assert context["review_scope"] == "trailer"
+    assert row["publish"] == 0
+    assert client.get(response.location).status_code == 200
+    assert client.get(response.location + "/status").json["stage"] == "queued"
+
+
+@pytest.mark.parametrize("fields", [
+    {"context_preset": "avengers-doomsday", "movie_title": "A different film"},
+    {"context_file": (io.BytesIO(b"[]"), "bad.json")},
+    {"context_file": (io.BytesIO(b"x" * 65537), "large.json")},
+    {"rights_status": "owned", "rights_basis": ""},
+    {"visual_mode": "loop-everything"},
+])
+def test_bad_profile_or_rights_never_enqueues(studio, fields):
+    assert upload(studio, **fields).status_code == 400
+    assert web_app.get_archive().recent_ideas() == []
+
+
+def test_review_keeps_unapproved_candidate_separate_from_old_approved(studio):
+    response = upload(studio)
+    client, _, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    row = web_app.get_archive().get_idea(job_id)
+    directory = Path(json.loads(row["idea"])["directory"])
+    write_json(directory / "script.response.json", {"data": {"beats": [{"voiceover": "Latest candidate"}]}})
+    write_json(directory / "script_approved.json", {"script": {"beats": [{"voiceover": "Older approved"}]}})
+    write_json(directory / "evidence.json", {"test": True})
+    (directory / "movie_review.mp4").write_bytes(b"old-output")
+    web_app.get_archive().update_idea(job_id, "failed", error="Audit failed")
+    page = client.get(response.location).get_data(as_text=True)
+    assert "Latest candidate" in page and "Older approved" in page and "CHƯA DUYỆT" in page
+    assert client.get(response.location + "/media/movie_review.mp4").status_code == 404
+    assert client.get(response.location + "/media/evidence.json").status_code == 200
+    assert client.get(response.location + "/media/source.mp4").status_code == 404
+    with client.session_transaction() as session:
+        session.clear()
+    assert client.get(response.location + "/status").status_code == 302
+
+
+def test_legacy_controls_require_csrf_and_respect_unchecked_publish(studio):
+    client, _, csrf = studio
+    assert client.get("/").status_code == 200
+    assert client.post("/submit", data={"mode": "long", "idea": "A topic"}).status_code == 400
+    response = client.post("/submit", data={"csrf": csrf, "mode": "long", "idea": "A topic"})
+    job_id = response.json["id"]
+    assert not web_app.get_archive().get_idea(job_id)["publish"]
+    assert client.post(f"/cancel/{job_id}").status_code == 400
+    assert client.post(f"/cancel/{job_id}", data={"csrf": csrf}).status_code == 200
+    assert client.get("/api/jobs").json[0]["status"] == "failed"
+
+
+def test_status_endpoint_refuses_queue_paths_outside_movie_root(studio, tmp_path):
+    client, _, _ = studio
+    job_id = web_app.get_archive().enqueue_idea("movie", json.dumps({"directory": str(tmp_path), "filename": "a.mp4"}), 60, False, "private")
+    assert client.get(f"/movies/{job_id}/status").status_code == 404
+
+
+def test_large_requests_return_actionable_json(studio, monkeypatch):
+    client, _, _ = studio
+    monkeypatch.setitem(web_app.app.config, "MAX_CONTENT_LENGTH", 100)
+    response = upload(studio)
+    assert response.status_code == 413 and response.json["error"]
+
+
+@pytest.mark.parametrize("visual_mode", ["continuous", "evidence"])
+def test_worker_receives_uploaded_profile_and_completed_media_is_accessible(studio, monkeypatch, visual_mode):
+    from movie_analysis.pipeline import run_queued_movie
+    response = upload(studio, context_preset="avengers-doomsday", visual_mode=visual_mode)
+    client, _, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    archive = web_app.get_archive()
+    archive.update_idea(job_id, "processing")
+    row = archive.get_idea(job_id)
+    data = json.loads(row["idea"])
+    directory = Path(data["directory"])
+    received = {}
+    def render(_source, target, _config, *_args, **kwargs):
+        received.update(kwargs)
+        received["visual_mode"] = _config.visual_mode
+        write_json(target / "job.json", {"title": "Completed review", "stage": "complete"})
+        write_json(target / "script_approved.json", {"script": {"beats": [{"voiceover": "Approved narration"}]}})
+        (target / "movie_review.mp4").write_bytes(b"completed-media")
+    monkeypatch.setattr("movie_analysis.pipeline.run_movie", render)
+    assert run_queued_movie(archive, row) == 0
+    assert received["context_file"] == Path(data["context_file"])
+    assert received["visual_mode"] == visual_mode == data["visual_mode"]
+    assert client.get(response.location + "/media/movie_review.mp4?download=1").data == b"completed-media"
+    page = client.get(response.location).get_data(as_text=True)
+    assert "Approved narration" in page and "ĐÃ DUYỆT" in page
+    assert "BẢN NHÁP · CHƯA DUYỆT" not in page
+
+
+def test_retry_preserves_source_identity_and_paid_cache_revision(studio):
+    response = upload(studio)
+    client, csrf, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    row = web_app.get_archive().get_idea(job_id)
+    directory = Path(json.loads(row["idea"])["directory"])
+    write_json(directory / "job.json", {"status": "failed", "stage": "script_audit", "source_sha256": "stable-hash",
+               "script_revision": 3, "regeneration_id": "previous", "error": "old error"})
+    web_app.get_archive().update_idea(job_id, "failed")
+    assert client.post(response.location + "/retry", data={"csrf": csrf, "action": "resume"}).status_code == 302
+    state = read_json(directory / "job.json")
+    assert state["stage"] == "queued" and state["error"] is None
+    assert state["source_sha256"] == "stable-hash" and state["script_revision"] == 3
+
+
+def test_script_retry_can_change_tone_without_changing_input_or_render_mode(studio, monkeypatch):
+    from movie_analysis.pipeline import run_queued_movie
+    response = upload(studio, visual_mode="continuous", context_preset="avengers-doomsday")
+    client, csrf, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    archive = web_app.get_archive()
+    original = json.loads(archive.get_idea(job_id)["idea"])
+    archive.update_idea(job_id, "done")
+    new_style = "Tấu hài hơi lầy, dùng sắp toang đúng tình huống."
+    retried = client.post(response.location + "/retry", data={"csrf": csrf, "action": "script", "narration_style": new_style})
+    assert retried.status_code == 302
+    new_id = int(retried.location.rsplit("/", 1)[1])
+    archive = web_app.get_archive()
+    fresh = json.loads(archive.get_idea(new_id)["idea"])
+    assert fresh["narration_style"] == new_style and fresh["regenerate"] == "script"
+    assert all(fresh[key] == original[key] for key in ("source", "directory", "context_file", "visual_mode"))
+    def render(_source, target, _config, *_args, **kwargs):
+        assert kwargs["narration_style"] == new_style and kwargs["regenerate_script"]
+        write_json(target / "job.json", {"title": "Changed tone"})
+    monkeypatch.setattr("movie_analysis.pipeline.run_movie", render)
+    archive.update_idea(new_id, "processing")
+    assert run_queued_movie(archive, archive.get_idea(new_id)) == 0
+    page = client.get(retried.location).get_data(as_text=True)
+    assert "Đổi phong cách lời bình" in page and new_style in page
+
+
+def test_invalid_retry_tone_does_not_enqueue_another_paid_job(studio):
+    response = upload(studio)
+    client, csrf, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    archive = web_app.get_archive()
+    archive.update_idea(job_id, "done")
+    retried = client.post(response.location + "/retry", data={"csrf": csrf, "action": "script", "narration_style": "x" * 1001})
+    assert retried.status_code == 400 and len(web_app.get_archive().recent_ideas()) == 1

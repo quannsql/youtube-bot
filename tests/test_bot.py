@@ -3390,7 +3390,8 @@ def test_ass_video_filter_points_libass_at_the_caption_font_directory(tmp_path, 
     assert video_filter.startswith("ass=filename='")
     assert "captions_en.ass" in video_filter
     # Without fontsdir a single bad fonts.conf silently blanks every subtitle.
-    assert f"fontsdir='{font_dir.resolve().as_posix()}'" in video_filter
+    expected_font_dir = font_dir.resolve().as_posix().replace(":", "\\:")
+    assert f"fontsdir='{expected_font_dir}'" in video_filter
 
 
 # --- Manual idea queue + manual planners ---------------------------------- #

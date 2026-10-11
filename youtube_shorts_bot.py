@@ -5455,6 +5455,10 @@ def purge_stale_generated_dirs(
     reclaimed = 0.0
     for candidate in generated.iterdir():
         try:
+            # Movie drafts contain source/evidence for human review and resume.
+            # The documentary cleanup owns neither their lifecycle nor retention.
+            if candidate.name == "movies":
+                continue
             if not candidate.is_dir() or not candidate.name.startswith(name_prefix):
                 continue
             if keep is not None and candidate.resolve() == keep.resolve():
@@ -7016,6 +7020,17 @@ def main() -> int:
     run_mode = os.getenv("BOT_RUN_MODE", "").strip().lower().replace("_", "-")
     env_forces_long_form = run_mode in {"long", "long-form", "longform"}
     LOG.info("Startup args: %s | BOT_RUN_MODE=%s", " ".join(sys.argv[1:]) or "(none)", run_mode or "(unset)")
+    # Dispatch movie uploads before documentary credential/font checks. The movie
+    # pipeline uses Gemini and Vietnamese TTS, and never invokes a publisher.
+    if args.idea_id is not None:
+        movie_archive = Archive()
+        try:
+            queued = movie_archive.get_idea(args.idea_id)
+            if queued and queued.get("mode") == "movie":
+                from movie_analysis.pipeline import run_queued_movie
+                return run_queued_movie(movie_archive, queued)
+        finally:
+            movie_archive.conn.close()
     materialize_railway_credentials()
     ensure_dejavu_font()
     settings = Settings.from_env(args.duration)

@@ -1,0 +1,55 @@
+{
+  "title": "Avengers: Doomsday",
+  "review_scope": "trailer",
+  "style": "Kể thẳng nội dung chính như người bạn mê phim: nhân vật nào gặp chuyện gì, nguy cơ ra sao. Tiếng Việt đời thường, tấu hài hơi lầy; dùng 'sắp toang', 'rén', 'tới công chuyện' nếu hợp cảnh, khoảng hai câu đùa ngắn trong review 60 giây, ít hơn với clip ngắn. Đùa ngay trong lời kể, không mở lời 'mình đùa thôi'. Nhắc đúng tên nhân vật đã nhận diện; thay đổi 'ông', 'anh', 'thằng' khi hợp vai và rõ đang nói ai. Bỏ cảm thán lan man, động tác vụn và bình luận cách trailer cắt cảnh. Không nhồi meme, không bịa nguyên nhân hay nhân vật gây cháy, không đùa về khuyết tật.",
+  "facts": [
+    {
+      "id": "ctx_xavier",
+      "text": "Trong hồ sơ nhân vật Marvel, Charles Xavier / Professor X có năng lực ngoại cảm và lập trường School for Gifted Youngsters để đào tạo các dị nhân. Đây là kiến thức nền về nhân vật, không tự xác nhận danh tính người trong clip hay việc trường bị tấn công bởi ai.",
+      "source": "https://share.marvel.com/comics/discover/1378/professor-x"
+    },
+    {
+      "id": "ctx_premise",
+      "text": "Giới thiệu chính thức của Disney: các anh hùng từ ba vũ trụ khác nhau bị cuốn vào một cuộc va chạm nguy hiểm và đối mặt với một mối đe dọa sinh tồn chưa từng gặp. Đây là bối cảnh tổng thể của phim, không phải xác nhận mọi sự kiện trong clip tải lên.",
+      "source": "https://movies.disney.com/avengers-doomsday"
+    },
+    {
+      "id": "ctx_magneto",
+      "text": "Hồ sơ X-Men của Marvel kể về tình bạn trước đây giữa Charles Xavier và Erik Magnus Lehnsherr / Magneto, cùng những bất đồng về cách bảo vệ dị nhân. Đây là kiến thức nền nhân vật từ truyện, không tự xác nhận quan hệ hay hành động trong phiên bản phim/clip đang review.",
+      "source": "https://www.marvel.com/teams-and-groups/x-men/in-comics"
+    },
+    {
+      "id": "ctx_doom",
+      "text": "Disney xác nhận Robert Downey Jr. đóng Victor von Doom / Doctor Doom trong Avengers: Doomsday. Thông tin này không tự chứng minh rằng nhân vật mặc giáp trong clip tải lên là Doctor Doom, hay Doom gây ra vụ cháy ở trường Xavier.",
+      "source": "https://movies.disney.com/avengers-doomsday"
+    }
+  ],
+  "characters": [
+    {
+      "id": "char_xavier",
+      "name": "Charles Xavier / Professor X",
+      "spoken_name": "Giáo sư X",
+      "recognition_notes": "Đối chiếu gương mặt/giọng với hình tượng Professor X trong phim X-Men (Patrick Stewart hoặc James McAvoy). Xe lăn và trường Xavier là dấu hiệu hỗ trợ, không đủ để nhận diện khi gương mặt mờ. Không tự gán giọng thuyết minh ngoài hình cho nhân vật.",
+      "context_ids": ["ctx_xavier"]
+    },
+    {
+      "id": "char_magneto",
+      "name": "Erik Lehnsherr / Magneto",
+      "spoken_name": "Magneto",
+      "recognition_notes": "Đối chiếu thiết kế mũ Magneto ôm đầu, mép nhô vùng trán và khoảng mở quanh mắt/mũi/má, áo choàng, cùng gương mặt của hình tượng phim (Ian McKellen hoặc Michael Fassbender). Phân biệt với mặt nạ kim loại che toàn mặt của Doctor Doom. Chỉ có mũ/giáp tối mờ chưa đủ: cần thiết kế nhận diện rõ hoặc gương mặt phù hợp. Không tự gán ai gây vụ cháy.",
+      "context_ids": ["ctx_magneto"]
+    },
+    {
+      "id": "char_doom",
+      "name": "Victor von Doom / Doctor Doom",
+      "spoken_name": "Doom",
+      "recognition_notes": "Đối chiếu thiết kế mặt nạ kim loại đặc trưng, áo choàng/mũ trùm và giáp của Doctor Doom. Góc nghiêng tối hoặc một bộ giáp bất kỳ chưa đủ kết luận. Thông tin Robert Downey Jr. đóng Doom không xác nhận nhân vật trong clip.",
+      "context_ids": ["ctx_doom"]
+    }
+  ],
+  "style_examples": [
+    "Mẫu diễn đạt, không phải dữ kiện: Nguy cơ đã đến sát nơi nhân vật đang ở. Chi tiết này đáng lo vì nó ảnh hưởng trực tiếp đến những người nhân vật muốn bảo vệ. Nêu chuyện gì và vì sao quan trọng; không kể lần lượt nhân vật ngồi, nhìn, đưa tay hay màn hình chuyển đen.",
+    "Mẫu viết gọn, không phải dữ kiện: Mối đe dọa đã rõ, nhưng nguyên nhân chưa được xác nhận. Nói đúng phần biết được rồi kết, không kéo dài bằng câu hỏi về cách trailer cắt câu hoặc giấu mặt."
+  ],
+  "slang_bank": ["sắp toang", "rén", "tới công chuyện", "hết cứu", "căng đét", "xin một vé quay xe", "cái nết", "khét lẹt"]
+}

@@ -1,0 +1,10 @@
+{
+  "title": "Tên phim của bạn",
+  "review_scope": "trailer",
+  "facts": [
+    {"id": "ctx_main", "text": "Thông tin đã kiểm tra về nhân vật hoặc bối cảnh phim.", "source": "Đường dẫn nguồn chính thức hoặc user_provided"}
+  ],
+  "characters": [
+    {"id": "char_main", "name": "Tên đầy đủ của nhân vật", "spoken_name": "Tên gọi trong lời bình", "playful_names": [], "recognition_notes": "Gợi ý đối chiếu gương mặt, trang phục hoặc dấu hiệu đặc trưng. Không dùng bối cảnh làm bằng chứng duy nhất.", "context_ids": ["ctx_main"]}
+  ]
+}

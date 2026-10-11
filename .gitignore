@@ -5,7 +5,9 @@ google_tts_service_account.json
 youtube_token.json
 shorts.db
 generated/
+clips/
 __pycache__/
 .pytest_cache/
+.tools/
 fpt_tts.html
 fonts.conf

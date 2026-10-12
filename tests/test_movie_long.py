@@ -312,12 +312,20 @@ def test_real_five_minute_source_analysis_render_and_cached_resume(tmp_path, mon
                                      "confidence": .99, "reason": "Synthetic confirmation"}]}
             return super().generate(stage, *args, **kwargs)
 
-    ai, tts = LongAI(), SyntheticTTS()
+    class LongTTS(SyntheticTTS):
+        def speech(self, text, path):
+            self.calls += 1
+            legacy.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=80",
+                        "-c:a", "libmp3lame", str(path)], timeout_seconds=30)
+    ai, tts = LongAI(), LongTTS()
     job = tmp_path / "job"
     output = run_movie(source, job, config(), "owned", "Synthetic fixture created locally", provider=ai, tts=tts)
     assert abs(duration(output) - 300) < .4
     assert read_json(job / "quality.json")["passed"]
     assert read_json(job / "render.json")["held_end_seconds"] == 0
+    assert read_json(job / "render.json")["raw_voice_duration"] > 180
+    assert read_json(job / "render.json")["narration_timing"] == "source_claims"
+    assert read_json(job / "timeline.json")[-1]["end"] > 295
     assert len([s for s, _ in ai.calls if s.startswith("global:")]) == 7
     assert all(k["span"] and k["span"][1] - k["span"][0] <= 45 for s, k in ai.calls
                if s.startswith(("global:", "deep:", "verify:")))

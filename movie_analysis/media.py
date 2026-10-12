@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 import youtube_shorts_bot as legacy
 from .core import MovieConfig, digest, file_digest, read_json, write_json
 from .branding import BRANDING_VERSION, branding_overlay, footage_box, mux_movie
+from .timing import align_narration, narration_schedule
 
 
 def enable_local_tools():
@@ -141,7 +142,8 @@ def audio_ready(path: Path) -> bool:
         return False
 
 
-def continuous_media(source: Path, directory: Path, narration: Path, seconds: float, source_seconds: float):
+def continuous_media(source: Path, directory: Path, narration: Path, seconds: float, source_seconds: float,
+                     source_audio_volume: float = .30):
     """Play the entire source once at its original speed; hold its end if voice runs longer."""
     visuals = directory / "visuals.mp4"
     hold = max(0.0, seconds - source_seconds)
@@ -160,8 +162,9 @@ def continuous_media(source: Path, directory: Path, narration: Path, seconds: fl
     command = ["ffmpeg", "-y", "-i", str(narration)]
     if has_audio:
         command += ["-i", str(source), "-filter_complex",
-                    f"[0:a]asetpts=PTS-STARTPTS,apad[voice];"
-                    f"[1:a:0]asetpts=PTS-STARTPTS,atrim=duration={source_seconds},volume=0.12,apad[background];"
+                    f"[0:a]asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,apad[voice];"
+                    f"[1:a:0]asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo,"
+                    f"atrim=duration={source_seconds},volume={source_audio_volume},apad[background];"
                     "[voice][background]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95[a]",
                     "-map", "[a]"]
     else:
@@ -176,7 +179,8 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
     key = digest({"script": script, "evidence": evidence, "rights": rights,
                   "voice": settings.google_tts_vietnamese_voice, "rate": settings.google_tts_vietnamese_speaking_rate,
                   "logo": file_digest(settings.overlay_logo), "source": file_digest(source),
-                  "visual_mode": config.visual_mode, "render": 4, "branding": BRANDING_VERSION,
+                  "visual_mode": config.visual_mode, "render": 5, "branding": BRANDING_VERSION,
+                  "source_audio_volume": config.source_audio_volume, "timing": "source-anchors-v1",
                   "movie_title": movie_title, "logo_width": config.logo_width, "logo_gap": config.logo_gap})
     continuous = config.visual_mode == "continuous" and rights["allow_source_visuals"]
     source_seconds = duration(source) if continuous else 0.0
@@ -185,7 +189,7 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
     if cached and cached.get("key") == key and output.is_file() and cached.get("sha256") == file_digest(output):
         quality_check(output, cached["duration"], directory / "captions_vi.ass")
         return output
-    clips, audio_parts, cues, timeline = [], [], [], []
+    clips, audio_parts, cues, timeline, voice_durations = [], [], [], [], []
     cursor = 0.0
     for beat in script["beats"]:
         bid = beat["id"]
@@ -214,9 +218,11 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
                 raise last_error
             write_json(directory / f"{bid}_voice.json", {"key": audio_key, "sha256": file_digest(narration)})
         seconds = duration(narration)
-        if cursor + seconds > 180:
-            raise legacy.BotError("Lời đọc vượt 180s; tạo lại kịch bản ngắn hơn, audio đã tạo được giữ.")
+        limit = max(180, source_seconds * 1.2) if continuous else 180
+        if cursor + seconds > limit:
+            raise legacy.BotError(f"Lời đọc vượt {limit:.0f}s; tạo lại kịch bản ngắn hơn, audio đã tạo được giữ.")
         audio_parts.append(narration)
+        voice_durations.append(seconds)
         for cue in legacy.caption_cues_from_text(beat["voiceover"], seconds):
             cues.append(legacy.CaptionCue(start=cue.start + cursor, end=cue.end + cursor, text=cue.text))
         claim = claims[beat["visual_claim_id"]]
@@ -259,11 +265,24 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
     visuals, narration = directory / "visuals.mp4", directory / "narration_vi.mp3"
     if not continuous:
         legacy.run(["ffmpeg", "-y", "-f", "concat", "-safe", "1", "-i", str(directory / "visuals.txt"), "-c", "copy", str(visuals)], timeout_seconds=300)
-    legacy.run(["ffmpeg", "-y", "-f", "concat", "-safe", "1", "-i", str(directory / "voice.txt"), "-c", "copy", str(narration)], timeout_seconds=120)
-    voice_seconds = cursor
+    raw_voice_seconds = cursor
+    scheduled = continuous and source_seconds > 30
+    if scheduled:
+        timeline = narration_schedule(script["beats"], claims, voice_durations, source_seconds)
+        narration = directory / "narration_aligned.m4a"
+        align_narration(audio_parts, timeline, narration, source_seconds, legacy.run)
+        cues = []
+        for beat, slot in zip(script["beats"], timeline):
+            for cue in legacy.caption_cues_from_text(beat["voiceover"], slot["end"] - slot["start"]):
+                cues.append(legacy.CaptionCue(start=cue.start + slot["start"], end=cue.end + slot["start"], text=cue.text))
+            slot.update(source_start=slot["start"], source_end=slot["end"], visual_type="source_continuous")
+        voice_seconds = timeline[-1]["end"]
+    else:
+        legacy.run(["ffmpeg", "-y", "-f", "concat", "-safe", "1", "-i", str(directory / "voice.txt"), "-c", "copy", str(narration)], timeout_seconds=120)
+        voice_seconds = cursor
     if continuous:
         cursor = max(source_seconds, voice_seconds)
-        visuals, narration = continuous_media(source, directory, narration, cursor, source_seconds)
+        visuals, narration = continuous_media(source, directory, narration, cursor, source_seconds, config.source_audio_volume)
     captions = directory / "captions_vi.ass"
     legacy.write_ass_captions(cues, captions, font_size=64, margin_v=160)
     write_json(directory / "timeline.json", timeline)
@@ -282,8 +301,12 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
     write_json(directory / "render.json", {"key": key, "sha256": file_digest(output), "duration": cursor,
                "visual_mode": "continuous" if continuous else "evidence" if rights["allow_source_visuals"] else "graphics",
                "source_duration": source_seconds if continuous else None, "voice_duration": voice_seconds,
+               "raw_voice_duration": raw_voice_seconds,
+               "speech_coverage": sum(t["end"] - t["start"] for t in timeline) / cursor,
+               "narration_timing": "source_claims" if scheduled else "sequential",
                "held_end_seconds": max(0, voice_seconds - source_seconds) if continuous else 0,
-               "source_audio_volume": 0.12 if continuous else 0, "branding": layout})
+               "source_has_audio": any(s["codec_type"] == "audio" for s in probe(source)["streams"]),
+               "source_audio_volume": config.source_audio_volume if continuous else 0, "branding": layout})
     legacy.run(["ffmpeg", "-y", "-ss", str(min(1, cursor / 2)), "-i", str(output), "-frames:v", "1", str(directory / "preview.jpg")], timeout_seconds=60)
     return output
 

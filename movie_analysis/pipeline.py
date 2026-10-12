@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -282,16 +283,18 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
             if regeneration_id:
                 state["regeneration_id"] = regeneration_id
             write_json(directory / "job.json", state)
-            script_deps = [evidence, config.writer_provider, writer_model, audit_model, config.target_seconds,
+            timed_source = info["duration"] if config.visual_mode == "continuous" and rights["allow_source_visuals"] else None
+            review_seconds = max(20, math.ceil(timed_source)) if timed_source is not None else config.target_seconds
+            script_deps = [evidence, config.writer_provider, writer_model, audit_model, review_seconds, timed_source,
                            state.get("script_revision", 0), PROMPT_VERSION, context]
             checkpoint("review_plan")
             plan = cache.stage("review_plan", script_deps,
-                               lambda: ask_text("review_plan", plan_prompt(config.target_seconds, evidence, context)),
+                               lambda: ask_text("review_plan", plan_prompt(review_seconds, evidence, context, timed_source)),
                                lambda data: validate_plan(data, evidence, context))
             approved = read_json(directory / "script_approved.json")
             script_key = digest(script_deps)
             if approved and approved.get("key") == script_key:
-                script = validate_review_script(approved["script"], evidence, context, config.target_seconds)
+                script = validate_review_script(approved["script"], evidence, context, review_seconds, timed_source)
                 validate_review_audit(approved["audit"], script)
             repair = None
             saved_repair = read_json(directory / "script_repair.json")
@@ -303,23 +306,23 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                 if previous_script and previous_audit:
                     previous = previous_script["data"]
                     expected = digest({"version": VERSION, "dependencies": [previous, evidence, context,
-                                      config.writer_provider, audit_model, PROMPT_VERSION]})
+                                      config.writer_provider, audit_model, PROMPT_VERSION, timed_source]})
                     if previous_audit["key"] == expected:
                         try:
                             validate_review_audit(previous_audit["data"], previous)
                         except legacy.BotError:
                             repair = {"script": previous, "audit": previous_audit["data"]}
             for attempt in range(0 if approved and approved.get("key") == script_key else 3):
-                prompt = review_writer_prompt(config.target_seconds, evidence, context, global_data, plan)
+                prompt = review_writer_prompt(review_seconds, evidence, context, global_data, plan, timed_source)
                 if repair:
-                    prompt = review_repair_prompt(repair, evidence, context, config.target_seconds)
+                    prompt = review_repair_prompt(repair, evidence, context, review_seconds, timed_source)
                     state["editorial_attempt"] = int(state.get("editorial_attempt", 0)) + 1
                     write_json(directory / "job.json", state)
                     repair = {**repair, "repair_mode": "targeted-v1", "editorial_attempt": state["editorial_attempt"]}
                 try:
                     script = cache.stage("script", [script_deps, repair],
                                          lambda: ask_text("script", prompt),
-                                         lambda d: validate_review_script(d, evidence, context, config.target_seconds))
+                                         lambda d: validate_review_script(d, evidence, context, review_seconds, timed_source))
                 except legacy.BotError as exc:
                     response = read_json(directory / "script.response.json")
                     # Do not hide transport/quota failures as editorial retries.
@@ -333,8 +336,8 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                     continue
                 checkpoint("script_audit")
                 audit = cache.stage(
-                    "script_audit", [script, evidence, context, config.writer_provider, audit_model, PROMPT_VERSION],
-                    lambda: ask_text("script_audit", review_audit_prompt(script, evidence, context, plan)),
+                    "script_audit", [script, evidence, context, config.writer_provider, audit_model, PROMPT_VERSION, timed_source],
+                    lambda: ask_text("script_audit", review_audit_prompt(script, evidence, context, plan, timed_source)),
                 )
                 try:
                     validate_review_audit(audit, script)

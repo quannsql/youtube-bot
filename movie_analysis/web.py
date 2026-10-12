@@ -23,6 +23,9 @@ STEPS = ["Phân tích nội dung", "Kiểm chứng chi tiết", "Nhận diện n
 LOG = logging.getLogger("movie.web")
 
 MISSING_SOURCE = "Không còn video gốc tại đường dẫn đã lưu. Kiểm tra Volume của service dashboard và BOT_DATA_DIR; tải lại đúng video vào job nếu dữ liệu đối chiếu còn, hoặc tạo job mới."
+STYLE_PRESETS = [("Hoang dã · bạn thân", DEFAULT_STYLE),
+                 ("Hài nhẹ · tự nhiên", "Kể phim gần gũi, hài nhẹ, câu ngắn; đùa đúng diễn biến và nhân vật, không dùng từ tục."),
+                 ("Nghiêm túc · phân tích", "Phân tích phim rõ ràng, súc tích, nghiêm túc; giải thích diễn biến và nhân vật, không đùa hoặc chửi thề.")]
 
 
 def storage_warning():
@@ -100,7 +103,7 @@ def register_movie_routes(app, login_required, get_archive):
     def movies():
         cfg = MovieConfig.from_env()
         return render_template("studio/movies.html", csrf=csrf(), states=RIGHTS_STATES,
-                                      max_mb=cfg.max_input_mb, default_style=DEFAULT_STYLE,
+                                      max_mb=cfg.max_input_mb, default_style=DEFAULT_STYLE, style_presets=STYLE_PRESETS,
                                       max_seconds=min(cfg.max_input_seconds, cfg.live_max_seconds)
                                       if cfg.video_provider == "gemini_live" else cfg.max_input_seconds,
                                       default_visual_mode=cfg.visual_mode, storage_warning=storage_warning())
@@ -176,7 +179,7 @@ def register_movie_routes(app, login_required, get_archive):
         approved = read_json(directory / "script_approved.json", {})
         candidate = read_json(directory / "script.response.json", {}).get("data", {})
         script = approved.get("script", {}) if row["status"] == "done" else candidate
-        return render_template("studio/review.html", row=row, data=data, csrf=csrf(),
+        return render_template("studio/review.html", row=row, data=data, csrf=csrf(), style_presets=STYLE_PRESETS,
             state=read_json(directory / "job.json", {}), evidence=read_json(directory / "evidence.json", {}),
             script=script, previous_approved=approved.get("script", {}) if row["status"] != "done" else {},
             editorial=approved.get("audit", {}).get("quality", {}) if row["status"] == "done" else

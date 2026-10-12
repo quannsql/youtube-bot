@@ -487,16 +487,21 @@ def test_real_ffmpeg_end_to_end_resume_rights_and_voice_regeneration(synthetic_c
     receipt = read_json(directory / "render.json")
     assert receipt["visual_mode"] == "continuous" and receipt["source_duration"] == pytest.approx(4)
     assert receipt["held_end_seconds"] == pytest.approx(2, abs=.1)
-    assert resumed.calls == [] and tts.calls == 3
-    run_movie(synthetic_clip, directory, cfg, "owned", "Synthetic clip created by the test", regenerate_voice=True,
+    assert [s for s, _ in resumed.calls] == ["review_plan", "script", "script_audit"] and tts.calls == 4
+    resumed.calls.clear()
+    run_movie(synthetic_clip, directory, replace(cfg, visual_mode="continuous", source_audio_volume=.45), "owned",
+              "Synthetic clip created by the test", provider=resumed, tts=tts)
+    assert resumed.calls == [] and tts.calls == 4
+    assert read_json(directory / "render.json")["source_audio_volume"] == .45
+    run_movie(synthetic_clip, directory, replace(cfg, visual_mode="continuous"), "owned", "Synthetic clip created by the test", regenerate_voice=True,
               provider=resumed, tts=tts, regeneration_id="voice-request-1")
-    assert resumed.calls == [] and tts.calls == 6
-    run_movie(synthetic_clip, directory, cfg, "owned", "Synthetic clip created by the test", regenerate_voice=True,
+    assert resumed.calls == [] and tts.calls == 7
+    run_movie(synthetic_clip, directory, replace(cfg, visual_mode="continuous"), "owned", "Synthetic clip created by the test", regenerate_voice=True,
               provider=resumed, tts=tts, regeneration_id="voice-request-1")
-    assert tts.calls == 6
+    assert tts.calls == 7
 
 
-@pytest.mark.parametrize("voice_seconds,source_audio", [(1, False), (4, True)])
+@pytest.mark.parametrize("voice_seconds,source_audio", [(1, False), (1, True), (4, True)])
 def test_continuous_playback_keeps_all_scenes_and_holds_only_the_end(tmp_path, voice_seconds, source_audio):
     import subprocess
     import shutil
@@ -542,7 +547,13 @@ def test_continuous_playback_keeps_all_scenes_and_holds_only_the_end(tmp_path, v
             real = sum(v * math.cos(2 * math.pi * frequency * i / 16000) for i, v in enumerate(samples))
             imag = sum(v * math.sin(2 * math.pi * frequency * i / 16000) for i, v in enumerate(samples))
             return 2 * math.hypot(real, imag) / len(samples)
-        assert .05 < amplitude(220) / amplitude(440) < .25
+        assert .20 < amplitude(220) / amplitude(440) < .40
+    if source_audio:
+        assert next(s for s in probe(mixed)["streams"] if s["codec_type"] == "audio")["channels"] == 2
+        if voice_seconds == 1:
+            from test_movie_timing import amplitude
+            assert .025 < amplitude(mixed, 2.3, 220) < .06
+            assert amplitude(mixed, 2.3, 440) < .001
 
 
 def test_upload_review_auth_and_csrf(synthetic_clip, monkeypatch, tmp_path):

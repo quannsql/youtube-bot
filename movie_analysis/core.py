@@ -110,6 +110,7 @@ class MovieConfig:
     min_confidence: float = 0.85
     target_seconds: int = 60
     visual_mode: str = "continuous"
+    source_audio_volume: float = 0.30
     logo_width: int = 70
     logo_gap: int = 20
     live_tpm: int = 65000
@@ -126,6 +127,8 @@ class MovieConfig:
         cfg = cls(**values)
         if cfg.visual_mode not in {"continuous", "evidence"}:
             raise BotError("MOVIE_VISUAL_MODE phải là continuous hoặc evidence.")
+        if not 0 < cfg.source_audio_volume <= 1:
+            raise BotError("MOVIE_SOURCE_AUDIO_VOLUME phải lớn hơn 0 và không quá 1.")
         if cfg.video_provider not in {"gemini", "gemini_live"}:
             raise BotError("MOVIE_VIDEO_PROVIDER phải là gemini hoặc gemini_live.")
         if cfg.video_provider == "gemini_live":

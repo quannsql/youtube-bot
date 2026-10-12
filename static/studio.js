@@ -42,6 +42,10 @@ if (movieForm) {const input = $('#video-file'), drop = $('#drop-zone'), preview 
     xhr.onload = () => {const destination = xhr.responseURL && new URL(xhr.responseURL); if (destination && destination.pathname === '/login') {location.assign('/login'); return;} if (xhr.status >= 200 && xhr.status < 300 && destination && /^\/movies\/\d+$/.test(destination.pathname)) {location.assign(destination.href); return;} let message = 'Không tạo được job. Kiểm tra file hoặc tải lại trang.'; try {message = JSON.parse(xhr.responseText).error || message;} catch {} fail(message);}; xhr.onerror = () => fail('Kết nối bị gián đoạn. Kiểm tra lịch sử trước khi upload lại để tránh tạo trùng job.'); xhr.onabort = () => fail('Upload đã bị ngắt.'); xhr.send(new FormData(movieForm));
   }); window.addEventListener('pagehide', () => {if (objectURL) URL.revokeObjectURL(objectURL);});
 }
+document.querySelectorAll('.narration-style-preset').forEach(select => select.addEventListener('change', () => {
+  const field = $('textarea[name=narration_style]', select.closest('form'));
+  if (field && select.value) field.value = select.value;
+}));
 document.querySelectorAll('.movie-retry-form').forEach(form => form.addEventListener('submit', async event => {
   event.preventDefault(); const button = $('button', form), old = button.textContent;
   const controller = new AbortController(), upload = $('input[type=file]', form);

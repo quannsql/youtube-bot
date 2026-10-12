@@ -7,11 +7,14 @@ from pathlib import Path
 from youtube_shorts_bot import BotError
 from .core import read_json, write_json
 
-PROMPT_VERSION = "review-story-v10"
-DEFAULT_STYLE = ("Review như người bạn mê phim đang kể chuyện: nói thẳng nội dung chính, câu ngắn, tiếng Việt đời thường; "
-                 "tấu hài, hơi lầy, đùa ngay trong lời kể. Dùng 'sắp toang', 'rén', 'tới công chuyện' khi đúng tình huống; "
+PROMPT_VERSION = "review-story-v11-timed"
+DEFAULT_STYLE = ("Kể phim như đang chém gió với hội bạn thân: hoang dã, lầy lội, sáng tạo, hơi tục; "
+                 "đùa ngay trong diễn biến chính, câu ngắn, thuần Việt. Có thể dùng 'vãi', 'đệt', 'ăn hành', "
+                 "'sắp toang', 'rén', 'tới công chuyện' đúng tình huống; không chửi đệm mỗi câu. "
                  "có thể gọi nhân vật là 'thằng', 'ông', 'anh' hoặc biệt danh vui khi hợp vai và đã rõ đang nói ai. "
-                 "Khoảng hai câu đùa ngắn cho review 60 giây, ít hơn nếu clip ngắn; không cố nhồi meme, "
+                 "Chọc đúng hành động, đối thủ và thế trận bằng ví von đời thường; không chỉ rắc tiếng lóng. "
+                 "Bỏ mô tả vụn về tóc, che mắt, ánh sáng, tư thế nếu không ảnh hưởng câu chuyện; "
+                 "dịch thuật ngữ như dorsal plates thành vây lưng. Không cố nhồi meme, "
                  "không bịa tình tiết hay nhầm tên nhân vật, không đùa về khuyết tật.")
 DEFAULT_SLANG = ["sắp toang", "rén", "tới công chuyện", "hết cứu", "căng đét", "xin một vé quay xe", "cái nết", "khét lẹt"]
 
@@ -21,7 +24,7 @@ def spoken_style_guidance(context):
     return (
         "\nVIETNAMESE DELIVERY: Follow the user's requested tone. For funny/tấu hài/lầy narration, "
         "use conversational Vietnamese and concise situational wit inside the story, not detached jokes. "
-        "A roughly 60s review can carry two or three brief comic turns; a very short clip can carry one or two. "
+        "A roughly 60s review can carry several brief comic turns; a very short clip can carry one or two. "
         "These are pacing guides, not mandatory quotas. Keep serious or restrained styles serious when requested. "
         "Use slang as natural phrasing: 'sắp toang' expresses a threatened bad outcome, not a confirmed defeat; "
         "'rén' can be a playful viewer reaction, not proof the character feels fear; 'tới công chuyện' reacts "
@@ -38,6 +41,13 @@ def spoken_style_guidance(context):
         "verified Kong clearly towers over buildings → 'Con khỉ này đứng lên là thành phố mất luôn view'. "
         "Examples are NOT facts about the supplied clip and must never be copied without their premise. "
         "Use only familiar Vietnamese slang or the supplied bank; do not invent a currently trending meme. "
+        "When the user requests hoang dã/tục/bạn thân, allow playful rough language such as 'vãi', 'đệt', "
+        "and 'ăn hành' when it lands naturally. Do not sanitize that requested tone into bland polite "
+        "commentary, and do not add swearing to a serious style. Creative figurative comparisons may "
+        "exaggerate the viewer's reaction, but may not invent a fight, winner, power or character motive. "
+        "Avoid pointless eyewitness inventories such as a man's hand covering a girl's eyes or wet hair. "
+        "Mention a human reaction only when it changes the stakes, and summarize its story meaning. "
+        "Use plain Vietnamese technical descriptions, e.g. 'vây lưng' rather than 'dorsal plates'. "
         "Avoid disclaimers such as 'mình đùa thôi', 'nói vui một chút', 'tôi xin phép gọi là' before punchlines. "
         "A joke must sound naturally figurative, not like an asserted event, motive, culprit or ending. "
         "No jokes about disability. Slang must not obscure meaning or inflate word count."

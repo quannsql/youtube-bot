@@ -47,6 +47,11 @@ const script = fs.readFileSync(path.join(__dirname, '../static/studio.js'), 'utf
       const form = page.locator('.movie-retry-form').filter({has: page.locator(`input[name="action"][value="${expectedAction}"]`)});
       // Prove the collision in the actual DOM, not just a simplified form double.
       assert.equal(await form.evaluate(node => node.action instanceof HTMLInputElement), true);
+      if (action === 'script') {
+        await form.locator('summary').click();
+        await form.locator('.narration-style-preset').selectOption({label: 'Hoang dã · bạn thân'});
+        assert.ok((await form.locator('textarea[name=narration_style]').inputValue()).includes('hoang dã'));
+      }
       if (action === 'restore') {
         await form.locator('input[type=file]').setInputFiles({name: 'clip.mp4', mimeType: 'video/mp4', buffer: Buffer.from('test-video')});
       }
@@ -56,6 +61,7 @@ const script = fs.readFileSync(path.join(__dirname, '../static/studio.js'), 'utf
       assert.equal(new URL(request.url()).pathname, fixture.review_path + '/retry', action);
       assert.equal(request.headers().accept, 'application/json');
       assert.ok(request.postData().includes(`name="action"\r\n\r\n${expectedAction}\r\n`));
+      if (action === 'script') assert.ok(request.postData().includes('hoang dã'));
       await page.waitForURL('https://studio.example/movies/999', {timeout: 5000});
       assert.equal(posts.length, 1);
       await page.close();

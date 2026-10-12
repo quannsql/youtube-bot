@@ -200,7 +200,7 @@ def test_retry_legacy_redirect_lands_on_new_review_without_enqueuing_twice(studi
     new_id = int(new_path.rsplit("/", 1)[1])
     assert web_app.get_archive().get_idea(new_id)["status"] == "pending"
     assert len(web_app.get_archive().recent_ideas()) == 2
-    assert "studio.js?v=retry-action-3" in resumed.get_data(as_text=True)
+    assert "studio.js?v=timed-style-4" in resumed.get_data(as_text=True)
 
 
 def test_retry_json_acknowledges_committed_job_before_loading_review(studio, caplog):

@@ -11,7 +11,25 @@ QUALITY_CRITERIA = ("story", "natural_vietnamese", "humour", "opening", "closing
 ROLES = ("opening", "development", "closing")
 
 
-def plan_prompt(seconds, evidence, context):
+def timing_guidance(source_seconds):
+    if source_seconds is None:
+        return ""
+    return (
+        f"\nCONTINUOUS SOURCE TIMING: The full source lasts {source_seconds:.3f}s and plays once, in order. "
+        "Write commentary for that WHOLE duration, not a 60s summary followed by minutes of silence. "
+        "Aim for roughly 3.0–3.4 Vietnamese space-separated words per second, allowing short pauses "
+        "for original dialogue/action. Use 3–8 substantive beats spread across the source's beginning, "
+        "middle and end. Choose each visual_claim_id at the point its main event happens; development "
+        "anchors must be chronological. Allocate each beat's words to the time until the next anchor. "
+        "Do not discuss a later attack or outcome while earlier footage is playing. Closing is a short "
+        "assessment near the source end; never summarize the ending in the opening. Evidence timestamps "
+        "are the timing references, not spoken dialogue. Sparse evidence permits original-audio pauses; "
+        "never repeat jokes, invent events or list incidental gestures just to fill a duration. "
+        "Prefer several distinct relevant developments over recycling the same fire/danger description. "
+    )
+
+
+def plan_prompt(seconds, evidence, context, source_seconds=None):
     from .narration import spoken_style_guidance
     short_clip = max((c["end"] for c in evidence["accepted"]), default=0) <= 30
     focus = ("This source clip is at most 30 seconds long. Plan EXACTLY THREE sections (opening, development, closing). "
@@ -40,6 +58,7 @@ def plan_prompt(seconds, evidence, context):
         + "\nCONTEXT: " + json.dumps(context, ensure_ascii=False)
         + "\nCLIP: " + json.dumps(evidence["accepted"], ensure_ascii=False)
         + spoken_style_guidance(context)
+        + timing_guidance(source_seconds)
     )
 
 
@@ -86,9 +105,14 @@ def validate_roles(parts):
         raise BotError("Review thiếu hoặc sai thứ tự mở đầu/phát triển/kết thúc.")
 
 
-def validate_review_script(data, evidence, context, seconds):
+def validate_review_script(data, evidence, context, seconds, source_seconds=None):
     data = validate_script(data, evidence, context)
     validate_roles(data["beats"])
+    if source_seconds is not None:
+        claims = {c["id"]: c for c in evidence["accepted"]}
+        anchors = [claims[b["visual_claim_id"]]["start"] for b in data["beats"][1:]]
+        if any(b < a for a, b in zip(anchors, anchors[1:])):
+            raise BotError("Lời bình giữ nguyên clip phải chọn bằng chứng theo thứ tự thời gian; viết lại các beat đang kể vượt cảnh.")
     text = " ".join(b["voiceover"] for b in data["beats"])
     words = len(text.split())
     maximum = int(seconds * 4.2) + 12
@@ -125,7 +149,7 @@ def validate_review_audit(data, script):
     return data
 
 
-def review_writer_prompt(seconds, evidence, context, chronology, plan):
+def review_writer_prompt(seconds, evidence, context, chronology, plan, source_seconds=None):
     from .narration import writer_prompt
     short_clip = max((c["end"] for c in evidence["accepted"]), default=0) <= 30
     focus = (f"\nSHORT CLIP: EXACTLY THREE beats; at most {min(140, int(seconds * 4.2) + 12)} spoken words total. "
@@ -177,10 +201,11 @@ def review_writer_prompt(seconds, evidence, context, chronology, plan):
         "Remove repetition and quote padding; a shorter coherent review is preferable to filling the time. "
         "Add role to each beat. "
         + "\nREVIEW PLAN: " + json.dumps(plan, ensure_ascii=False)
+        + timing_guidance(source_seconds)
     )
 
 
-def review_audit_prompt(script, evidence, context, plan):
+def review_audit_prompt(script, evidence, context, plan, source_seconds=None):
     from .narration import audit_prompt, spoken_style_guidance
     return audit_prompt(script, evidence, context) + (
         "\nFINAL REVIEW AUDIT CONTRACT: Verified ctx_identity_ mappings establish recognized names in this "
@@ -200,6 +225,10 @@ def review_audit_prompt(script, evidence, context, plan):
         "4 means appropriate to the requested tone, not a quota of punchlines. Do not demand higher joke "
         "density at the expense of clear content. For a serious requested style, score appropriate restraint favourably. "
         "Penalize vague repeated 'nặng/lạnh gáy', literal translations, purposeless English quotes, "
+        "For a full-length continuous review with evidence across multiple phases, penalize a brief "
+        "opening-only summary that skips substantive middle/end developments. Allocate commentary to "
+        "the actual source duration with sensible original-audio pauses. When a rough friends-only "
+        "tone is requested, do not mark fitting mild profanity down just for being impolite. "
         "unsupported causality, and mechanical uncertainty disclaimers. Style references calibrate tone. "
         "A faithful Vietnamese translation of an audible English line is supported, including quotation "
         "marks; never reject it solely because the language changed. It must preserve uncertainty and any "
@@ -219,10 +248,11 @@ def review_audit_prompt(script, evidence, context, plan):
         "repair_notes:[string] to the JSON response. Give actionable edits, not generic approval. "
         + "\nREVIEW PLAN: " + json.dumps(plan, ensure_ascii=False)
         + spoken_style_guidance(context)
+        + timing_guidance(source_seconds)
     )
 
 
-def review_repair_prompt(feedback, evidence, context, seconds=60):
+def review_repair_prompt(feedback, evidence, context, seconds=60, source_seconds=None):
     from .narration import spoken_style_guidance
     short_clip = max((c["end"] for c in evidence["accepted"]), default=0) <= 30
     maximum = min(140, int(seconds * 4.2) + 12) if short_clip else int(seconds * 4.2) + 12
@@ -244,6 +274,7 @@ def review_repair_prompt(feedback, evidence, context, seconds=60):
         + "\nCONTEXT: " + json.dumps(context, ensure_ascii=False)
         + "\nCLIP: " + json.dumps(evidence["accepted"], ensure_ascii=False)
         + spoken_style_guidance(context)
+        + timing_guidance(source_seconds)
     )
 
 

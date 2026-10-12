@@ -406,6 +406,8 @@ class FakeVideoAI:
         self.tts_calls.append(data)
     def generate(self, stage, *args, **kwargs):
         self.calls.append((stage, kwargs))
+        if stage == "character_identity_discover":
+            return {"matches": []}  # plain synthetic colours contain no film character
         if stage == "global":
             return {"summary": "Nền đỏ trong clip thử tổng hợp.", "events": [{"start": 0, "end": 4, "description": "Nền đỏ"}], "characters": []}
         if stage.startswith("deep:"):

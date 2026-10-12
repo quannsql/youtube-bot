@@ -66,7 +66,7 @@ def test_script_only_uses_cached_analysis_and_context_changes_only_text(syntheti
     path = run_movie(synthetic_clip, directory, cfg, provider=ai, script_only=True,
                      movie_title="Synthetic Film", narration_style="Hài hơi lầy")
     assert path.name == "narration_vi.txt" and "Khung hình" in path.read_text(encoding="utf-8")
-    assert [s for s, _ in ai.calls] == ["review_plan", "script", "script_audit"] and ai.uploads == 0
+    assert [s for s, _ in ai.calls] == ["character_identity_discover", "review_plan", "script", "script_audit"] and ai.uploads == 1
     assert not (directory / "movie_review.mp4").exists()
     assert read_json(directory / "job.json")["status"] == "script_ready"
     resumed = FakeVideoAI()

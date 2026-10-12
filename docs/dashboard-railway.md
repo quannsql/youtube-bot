@@ -24,7 +24,7 @@ Mở `http://127.0.0.1:8085`. Dữ liệu demo nằm trong `generated/dashboard-
 ## Tạo review từ dashboard
 
 1. Chọn **Review phim**, upload MP4. Giới hạn mặc định 500 MB và 300 giây; nên thử clip 15–30 giây trước.
-2. Nhập tên phim. Chọn hồ sơ **Avengers: Doomsday** nếu đúng phim hoặc upload JSON riêng theo mẫu trên form. Hồ sơ giúp đối chiếu nhân vật; danh tính vẫn cần kiểm chứng từ clip.
+2. Nhập tên phim và để **Tự nhận diện từ video** nếu không có hồ sơ JSON. Bot đề xuất tên nhân vật từ clip, rồi đối chiếu lần hai trước khi dùng trong lời bình. Có thể chọn hồ sơ **Avengers: Doomsday** hoặc upload JSON riêng để giới hạn các nhân vật cần tìm.
 3. Thêm bối cảnh đã kiểm tra và giọng bình luận mong muốn; mục tiêu mặc định 60 giây. Clip ít nội dung có thể cho lời bình ngắn hơn để tránh kéo dài.
 4. Chọn **Giữ nguyên clip từ đầu đến cuối** để phát clip một lần ở tốc độ gốc, có lời review và phụ đề; hoặc chọn cảnh theo từng ý. Chọn quyền sử dụng hình ảnh. Nếu chưa xác định, bản dựng dùng đồ họa tự tạo. Khi dùng cảnh phim, điền căn cứ sử dụng.
 5. Bấm **Bắt đầu tạo review**. Sau upload, trang kết quả theo dõi các bước. Lỗi API hoặc thoại chưa đạt được hiển thị rõ; bản nháp chưa duyệt không được đưa sang TTS.

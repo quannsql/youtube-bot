@@ -51,6 +51,22 @@ def test_profile_upload_is_validated_saved_and_passed_to_worker(studio):
     assert client.get(response.location + "/status").json["stage"] == "queued"
 
 
+def test_auto_identity_ui_needs_no_profile_and_shows_unconfirmed_candidates(studio):
+    client, _, _ = studio
+    assert "Tự nhận diện từ video" in client.get("/movies").get_data(as_text=True)
+    response = upload(studio, movie_title="Synthetic Film")
+    job_id = int(response.location.rsplit("/", 1)[1])
+    data = json.loads(web_app.get_archive().get_idea(job_id)["idea"])
+    directory = Path(data["directory"])
+    assert read_json(Path(data["context_file"]))["characters"] == []
+    write_json(directory / "characters.json", {"mode": "automatic", "model": "gpt-5.4-mini", "accepted": [],
+        "status": "no_verified_matches", "rejected": [{"profile": {"spoken_name": "Batman"},
+        "verification": {"reason": "Cảnh quá mờ"}, "rejection_reason": "Cảnh quá mờ, chưa xác nhận được"}]})
+    page = client.get(response.location).get_data(as_text=True)
+    assert "Tự nhận diện từ video" in page and "Nhân vật chưa được xác nhận" in page
+    assert "Batman" in page and "Cảnh quá mờ, chưa xác nhận được" in page
+
+
 @pytest.mark.parametrize("fields", [
     {"context_preset": "avengers-doomsday", "movie_title": "A different film"},
     {"context_file": (io.BytesIO(b"[]"), "bad.json")},

@@ -44,12 +44,12 @@ class OpenAIWriterClient:
             beat["visual_claim_id"] = {"type": "string", "enum": list(allowed_visual_ids)}
             if allowed_claim_ids:
                 beat["sentences"]["items"]["properties"]["claim_ids"]["items"] = {"type": "string", "enum": list(allowed_claim_ids)}
-        if stage == "character_identity" and allowed_claim_ids:
+        if stage in {"character_identity", "character_identity_discover"} and allowed_claim_ids:
             # Replace the leaf: schema templates share string objects across
             # fields. Mutating one would constrain names/reasons to clip IDs too.
             schema["properties"]["matches"]["items"]["properties"]["claim_ids"]["items"] = {
                 "type": "string", "enum": list(allowed_claim_ids)}
-        if stage.startswith("character_identity") and allowed_character_ids:
+        if stage in {"character_identity", "character_identity_verify"} and allowed_character_ids:
             items = schema["properties"]["matches" if stage == "character_identity" else "verdicts"]["items"]["properties"]
             items["character_id" if stage == "character_identity" else "id"] = {
                 "type": "string", "enum": list(allowed_character_ids)}

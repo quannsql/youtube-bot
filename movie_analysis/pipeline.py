@@ -114,6 +114,7 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
 
             def ask_identity(stage, prompt, **kwargs):
                 nonlocal identity_writer, identity_images
+                character_ids = kwargs.pop("character_ids", None)
                 if config.identity_provider == "gemini":
                     return ask(stage, prompt, model_override=config.identity_model or None, **kwargs)
                 if identity_writer is None:
@@ -124,7 +125,26 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                     identity_images = identity_frames(source, directory, evidence)
                 return identity_writer.generate(stage, prompt, image_paths=identity_images,
                                                 allowed_claim_ids=[c["id"] for c in evidence["accepted"]],
-                                                allowed_character_ids=[c["id"] for c in context["characters"]])
+                                                allowed_character_ids=character_ids or [c["id"] for c in context["characters"]])
+
+            window_images = {}
+
+            def ask_window_identity(stage, prompt, window, **kwargs):
+                nonlocal identity_writer
+                character_ids = kwargs.pop("character_ids", None)
+                if config.identity_provider == "gemini":
+                    return ask(stage, prompt, window, **kwargs)
+                if identity_writer is None:
+                    identity_writer = text_provider or OpenAIWriterClient(
+                        os.getenv("OPENAI_API_KEY", "").strip(), config, client,
+                        config.identity_model or config.writer_model or os.getenv("OPENAI_TEXT_MODEL", "gpt-5.4-mini"))
+                scoped = [c for c in evidence["accepted"] if c["start"] >= window["start"] and c["end"] <= window["end"]]
+                if window["id"] not in window_images:
+                    window_images[window["id"]] = identity_frames(source, directory / "identity_chunks" / window["id"],
+                                                                {"accepted": scoped})
+                return identity_writer.generate(stage, prompt, image_paths=window_images[window["id"]],
+                    allowed_claim_ids=[c["id"] for c in scoped],
+                    allowed_character_ids=character_ids or [c["id"] for c in context["characters"]])
 
             def checkpoint(stage):
                 state.update(stage=stage, updated_at=datetime.now(UTC).isoformat())
@@ -267,9 +287,10 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                 write_json(directory / "job.json", state)
                 return directory / "evidence.json"
             checkpoint("characters")
-            if config.video_provider == "gemini_live" and config.identity_provider == "gemini":
+            if config.video_provider == "gemini_live" or (config.identity_provider == "openai" and info["duration"] > 45):
                 context = recognize_character_chunks(directory, source_hash, config, evidence, context,
-                    scene_windows(detected, session_seconds(config)), ask, checkpoint)
+                    scene_windows(detected, session_seconds(config) if config.video_provider == "gemini_live" else 45),
+                    ask_window_identity, checkpoint)
             else:
                 context = recognize_characters(cache, directory, source_hash, config, evidence, context, ask_identity)
             checkpoint("script")

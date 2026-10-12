@@ -328,7 +328,12 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                     # Do not hide transport/quota failures as editorial retries.
                     if not response or response.get("key") != digest({"version": VERSION, "dependencies": [script_deps, repair]}):
                         raise
+                    previous_audit = (repair or {}).get("audit") or (repair or {}).get("previous_audit")
                     repair = {"script": response["data"], "validation_error": str(exc)}
+                    if previous_audit:
+                        # Structural repairs must not forget why the prior draft
+                        # failed its factual/editorial audit.
+                        repair["previous_audit"] = previous_audit
                     write_json(directory / "script_repair.json", {"key": script_key, "feedback": repair})
                     if attempt == 2:
                         raise

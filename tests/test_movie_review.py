@@ -239,6 +239,82 @@ def test_invalid_writer_output_is_repaired_and_cached_without_reanalysis(synthet
     assert read_json(directory / "script_approved.json")["script"]["beats"][0]["role"] == "opening"
 
 
+def test_dropped_introduction_is_restored_from_sourced_title_and_audited():
+    context = ctx()
+    context["facts"].append({"id": "ctx_title", "source": "user_provided",
+                            "text": "Tên phim/trailer do người dùng xác nhận: Synthetic Film"})
+    data = FakeVideoAI().generate("script")
+    data["beats"][0]["sentences"][0]["text"] = "Khung hình có nền đỏ."
+    evidence = {"accepted": [claim()]}
+    result = validate_review_script(data, evidence, context, 30)
+    introduction = result["beats"][0]["sentences"][0]
+    assert introduction == {"text": "Đây là Synthetic Film.", "kind": "context", "claim_ids": ["ctx_title"]}
+    assert result["beats"][0]["sentences"][1]["claim_ids"] == [claim()["id"]]
+    assert validate_review_script(copy.deepcopy(result), evidence, context, 30) == result
+    # A previous audit cannot approve the newly inserted sentence implicitly.
+    with pytest.raises(BotError, match="mọi câu"):
+        validate_review_audit(FakeVideoAI().generate("script_audit"), result)
+    for change in ({"source": "unverified"}, {"text": "Tên một phim khác"}):
+        bad_context = copy.deepcopy(context)
+        bad_context["facts"][-1].update(change)
+        with pytest.raises(BotError, match='giới thiệu phim.*Synthetic Film'):
+            validate_review_script(missing_title_script(), evidence, bad_context, 30)
+
+
+def missing_title_script():
+    data = FakeVideoAI().generate("script")
+    data["beats"][0]["sentences"][0]["text"] = "Khung hình có nền đỏ."
+    return data
+
+
+def test_resume_missing_title_failure_reuses_video_and_requires_new_audit(synthetic_clip, tmp_path, monkeypatch):
+    import movie_analysis.pipeline as pipeline
+    directory = tmp_path / "missing-title-resume"
+
+    class Editor(FakeVideoAI):
+        resume_mode = False
+
+        def generate(self, stage, *args, **kwargs):
+            value = super().generate(stage, *args, **kwargs)
+            if stage == "script" and (self.resume_mode or sum(s == "script" for s, _ in self.calls) > 1):
+                value["beats"][0]["sentences"][0]["text"] = "Khung hình có nền đỏ."
+            if stage == "script_audit":
+                draft = read_json(directory / "script.json")["data"]
+                failed = not self.resume_mode and sum(s == "script" for s, _ in self.calls) == 1
+                value["reviews"] = [{"id": f'{b["id"]}:{i}', "supported": not failed,
+                                     "reason": "Synthetic factual check"}
+                                    for b in draft["beats"] for i, _ in enumerate(b["sentences"])]
+                value["repair_notes"] = ["Remove unsupported assertion"] if failed else []
+            return value
+
+    def old_validator(data, evidence, context, seconds, source_seconds=None):
+        if "Synthetic Film" not in data["beats"][0]["sentences"][0]["text"]:
+            raise BotError("Mở đầu review thiếu lời giới thiệu phim.")
+        return validate_review_script(data, evidence, context, seconds, source_seconds)
+
+    monkeypatch.setattr(pipeline, "validate_review_script", old_validator)
+    with pytest.raises(BotError, match="giới thiệu phim"):
+        run_movie(synthetic_clip, directory, MovieConfig(), provider=Editor(), script_only=True,
+                  movie_title="Synthetic Film")
+    assert "previous_audit" in read_json(directory / "script_repair.json")["feedback"]
+    monkeypatch.setattr(pipeline, "validate_review_script", validate_review_script)
+    resumed = Editor()
+    # Return another title-less corrected draft even on this provider's first call.
+    resumed.resume_mode = True
+    run_movie(synthetic_clip, directory, MovieConfig(), provider=resumed, script_only=True,
+              movie_title="Synthetic Film")
+    assert [s for s, _ in resumed.calls] == ["script", "script_audit"]
+    assert resumed.uploads == 0
+    approved = read_json(directory / "script_approved.json")
+    assert approved["script"]["beats"][0]["sentences"][0]["claim_ids"] == ["ctx_title"]
+    assert len(approved["audit"]["reviews"]) == 4
+    assert not (directory / "script_repair.json").exists()
+    cached = Editor()
+    run_movie(synthetic_clip, directory, MovieConfig(), provider=cached, script_only=True,
+              movie_title="Synthetic Film")
+    assert cached.calls == [] and cached.uploads == 0
+
+
 def test_identity_model_override_does_not_reanalyze_video(synthetic_clip, tmp_path):
     from dataclasses import replace
     from movie_analysis.core import write_json

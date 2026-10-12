@@ -6,6 +6,14 @@ import math
 from youtube_shorts_bot import BotError
 
 
+class NarrationTimingError(BotError):
+    """A measured speech window needs editing, rather than another TTS retry."""
+
+    def __init__(self, message, feedback):
+        super().__init__(message)
+        self.feedback = feedback
+
+
 def narration_schedule(beats, claims, durations, source_seconds):
     if (not beats or len(beats) != len(durations) or not math.isfinite(source_seconds)
             or source_seconds <= 0 or any(not math.isfinite(d) or d <= 0 for d in durations)):
@@ -27,8 +35,21 @@ def narration_schedule(beats, claims, durations, source_seconds):
         available = end - anchors[first]
         raw = sum(durations[first:stop])
         if raw > available * 1.2 + .03:
-            raise BotError(f"Lời bình {beats[first]['id']} cần {raw:.1f}s nhưng cảnh chỉ có {available:.1f}s. "
-                           "Viết lại đoạn này ngắn hơn; giọng đọc đã tạo được giữ để tiếp tục.")
+            # Estimate a safe word cap from this voice's measured duration,
+            # leaving space instead of relying on extreme audio acceleration.
+            affected = []
+            for beat, seconds in zip(beats[first:stop], durations[first:stop]):
+                spoken = beat.get("voiceover") or " ".join(s["text"] for s in beat["sentences"])
+                words = len(spoken.split())
+                affected.append({"id": beat["id"], "visual_claim_id": beat["visual_claim_id"],
+                                 "measured_voice_seconds": seconds, "word_count": words,
+                                 "maximum_words": max(1, math.floor(words * available * .92 / raw))})
+            raise NarrationTimingError(
+                f"Lời bình {beats[first]['id']} cần {raw:.1f}s nhưng cảnh chỉ có {available:.1f}s. "
+                "Cần rút gọn đoạn này; giọng đọc đã tạo được giữ để tiếp tục.",
+                {"source_seconds": source_seconds, "window_start": anchors[first], "window_end": end,
+                 "available_seconds": available, "beats": affected},
+            )
         tempo = min(1.2, max(.9, raw / (available * .96)))
         gap = max(0.0, available - raw / tempo) / (stop - first)
         cursor = anchors[first]

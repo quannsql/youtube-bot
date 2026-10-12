@@ -21,6 +21,8 @@ from .chunks import CHUNK_VERSION, analyze_chunks, session_seconds, scene_window
 from .review import (plan_prompt, review_audit_prompt, review_writer_prompt, review_repair_prompt, validate_plan,
                      validate_review_audit, validate_review_script)
 from .openai_writer import OpenAIWriterClient
+from .timing import NarrationTimingError
+from .timing_repair import repair_narration_timing
 
 LOG = logging.getLogger("movie")
 
@@ -367,8 +369,21 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                 raise legacy.BotError("Thiếu logo; kiểm tra MOVIE_LOGO_FILE hoặc OVERLAY_LOGO_FILE.")
             legacy.ensure_dejavu_font()
             voice = tts or legacy.GoogleCloudVietnameseTTS(settings)
-            output = render_movie(source, directory, script, evidence, rights, settings, voice, client, config,
-                                  movie_title=context["title"])
+            for timing_attempt in range(3):
+                checkpoint("render")
+                try:
+                    output = render_movie(source, directory, script, evidence, rights, settings, voice, client, config,
+                                          movie_title=context["title"])
+                    (directory / "narration_timing_error.json").unlink(missing_ok=True)
+                    break
+                except NarrationTimingError as exc:
+                    write_json(directory / "narration_timing_error.json", {"key": script_key, "timing": exc.feedback})
+                    if timing_attempt == 2:
+                        raise
+                    LOG.warning("Đang rút gọn lời bình theo audio đo được: %s", exc)
+                    script = repair_narration_timing(directory, cache, script_key, script, exc.feedback,
+                        evidence, context, review_seconds, timed_source, plan, ask_text, checkpoint)
+                    narration_path.write_text("\n\n".join(b["voiceover"] for b in script["beats"]) + "\n", encoding="utf-8")
             state.update(status="review", stage="complete", title=script["title"], output=str(output),
                          updated_at=datetime.now(UTC).isoformat(), error=None)
             write_json(directory / "job.json", state)

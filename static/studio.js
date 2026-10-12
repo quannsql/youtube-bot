@@ -48,7 +48,8 @@ document.querySelectorAll('.movie-retry-form').forEach(form => form.addEventList
   const timeout = setTimeout(() => controller.abort(), upload && upload.files.length ? 600000 : 45000);
   button.disabled = true; button.textContent = 'Đang kiểm tra…'; formError(form, '');
   try {
-    const response = await fetch(form.action, {method: 'POST', body: new FormData(form), headers: {'Accept': 'application/json'}, signal: controller.signal});
+    // The input named "action" shadows form.action in a real browser DOM.
+    const response = await fetch(form.getAttribute('action'), {method: 'POST', body: new FormData(form), headers: {'Accept': 'application/json'}, signal: controller.signal});
     const destination = new URL(response.url);
     if (response.redirected && destination.pathname === '/login') {location.assign(destination.href); return;}
     // Older deployments acknowledge a queued retry by redirecting to its HTML

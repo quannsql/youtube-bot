@@ -159,7 +159,30 @@ def test_retry_frontend_submits_missing_error_element_and_handles_timeout():
     result = subprocess.run([node, str(Path(__file__).with_name("test_studio_frontend.js"))],
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
-    assert "9 dashboard retry behaviours passed" in result.stdout
+    assert "11 dashboard retry behaviours passed" in result.stdout
+
+
+def test_retry_browser_uses_route_attribute_with_named_action_input(studio, tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to execute the dashboard JavaScript")
+    response = upload(studio)
+    client, _, _ = studio
+    job_id = int(response.location.rsplit("/", 1)[1])
+    data = json.loads(web_app.get_archive().get_idea(job_id)["idea"])
+    web_app.get_archive().update_idea(job_id, "failed")
+    html = client.get(response.location).get_data(as_text=True)
+    Path(data["source"]).unlink()
+    restore_html = client.get(response.location).get_data(as_text=True)
+    fixture = tmp_path / "retry-browser.json"
+    fixture.write_text(json.dumps({"review_path": response.location, "review_html": html,
+                                   "restore_html": restore_html}), encoding="utf-8")
+    result = subprocess.run([node, str(Path(__file__).with_name("test_studio_frontend_browser.js")), str(fixture)],
+                            capture_output=True, text=True, timeout=45)
+    if result.returncode == 77:
+        pytest.skip("Playwright is optional for the real DOM regression test")
+    assert result.returncode == 0, result.stderr
+    assert "4 real DOM retry behaviours passed" in result.stdout
 
 
 def test_retry_legacy_redirect_lands_on_new_review_without_enqueuing_twice(studio):
@@ -177,7 +200,7 @@ def test_retry_legacy_redirect_lands_on_new_review_without_enqueuing_twice(studi
     new_id = int(new_path.rsplit("/", 1)[1])
     assert web_app.get_archive().get_idea(new_id)["status"] == "pending"
     assert len(web_app.get_archive().recent_ideas()) == 2
-    assert "studio.js?v=retry-response-2" in resumed.get_data(as_text=True)
+    assert "studio.js?v=retry-action-3" in resumed.get_data(as_text=True)
 
 
 def test_retry_json_acknowledges_committed_job_before_loading_review(studio, caplog):

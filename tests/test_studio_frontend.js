@@ -5,13 +5,16 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../static/studio.js'), 'utf8');
 
-async function submitRetry(mode, upload = false) {
+async function submitRetry(mode, upload = false, action = 'resume') {
   let handler, error, timer;
   const button = {disabled: false, textContent: 'Tiếp tục từ bước đã lưu'};
   const destinations = [], requests = [], delays = [];
   let jsonReads = 0;
   const form = {
-    action: 'https://studio.example/movies/18/retry',
+    // HTMLFormElement named controls override native properties. The real
+    // template has <input name="action">, so form.action is this input.
+    action: {value: action, toString() {return '[object HTMLInputElement]';}},
+    getAttribute(name) {assert.equal(name, 'action'); return '/movies/18/retry';},
     querySelector(selector) {
       if (selector === 'button') return button;
       if (selector === '.form-error') return error || null;
@@ -40,7 +43,7 @@ async function submitRetry(mode, upload = false) {
       const redirect = mode === 'redirect' || mode === 'login' || mode === 'review-error';
       const html = redirect || mode === 'html-error' || mode === 'unexpected-html';
       return {
-        url: redirect ? `https://studio.example/${mode === 'login' ? 'login' : 'movies/19'}` : url,
+        url: redirect ? `https://studio.example/${mode === 'login' ? 'login' : 'movies/19'}` : new URL(url, 'https://studio.example').href,
         redirected: redirect,
         ok: ['success', 'redirect', 'login', 'unexpected-html'].includes(mode),
         status: mode === 'html-error' || mode === 'review-error' ? 502 : mode === 'error' ? 409 : 200,
@@ -56,6 +59,7 @@ async function submitRetry(mode, upload = false) {
   const pending = handler({preventDefault() {}});
   // The previous bug threw here before reaching fetch: this form has no error element.
   assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/movies/18/retry');
   assert.equal(requests[0].options.headers.Accept, 'application/json');
   assert.equal(error.role, 'alert');
   assert.equal(button.disabled, true);
@@ -92,5 +96,7 @@ async function submitRetry(mode, upload = false) {
   await submitRetry('html-error');
   await submitRetry('unexpected-html');
   await submitRetry('review-error');
-  process.stdout.write('9 dashboard retry behaviours passed\n');
+  await submitRetry('success', false, 'script');
+  await submitRetry('success', false, 'voice');
+  process.stdout.write('11 dashboard retry behaviours passed\n');
 })().catch(error => {process.stderr.write(String(error.stack)); process.exitCode = 1;});

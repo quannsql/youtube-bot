@@ -180,7 +180,7 @@ def render_movie(source: Path, directory: Path, script: dict, evidence: dict, ri
                   "voice": settings.google_tts_vietnamese_voice, "rate": settings.google_tts_vietnamese_speaking_rate,
                   "logo": file_digest(settings.overlay_logo), "source": file_digest(source),
                   "visual_mode": config.visual_mode, "render": 5, "branding": BRANDING_VERSION,
-                  "source_audio_volume": config.source_audio_volume, "timing": "source-anchors-v1",
+                  "source_audio_volume": config.source_audio_volume, "timing": "batch-closing-v2",
                   "movie_title": movie_title, "logo_width": config.logo_width, "logo_gap": config.logo_gap})
     continuous = config.visual_mode == "continuous" and rights["allow_source_visuals"]
     source_seconds = duration(source) if continuous else 0.0

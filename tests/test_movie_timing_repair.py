@@ -173,7 +173,7 @@ def test_real_render_resume_shortens_only_failed_beat_and_reuses_other_audio(tmp
     resumed = AI()
     output = pipeline.run_movie(source, directory, config, "owned", "Synthetic source", provider=resumed,
                                 tts=tts, movie_title="Synthetic Film")
-    assert [s for s, _ in resumed.calls] == ["script", "script", "timing_rewrite", "script_audit"] and resumed.uploads == 0
+    assert [s for s, _ in resumed.calls] == ["timing_rewrite", "script_audit"] and resumed.uploads == 0
     assert tts.calls == 4
     assert saved_audio == [read_json(directory / f"b{i:02d}_voice.json") for i in (1, 2)]
     assert read_json(directory / "quality.json")["passed"]

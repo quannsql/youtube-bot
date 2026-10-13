@@ -39,6 +39,7 @@ def test_compact_edits_cannot_evade_cap_or_change_provenance(change):
 
 def test_old_two_failed_word_cap_rewrites_resume_with_only_compact_and_audit(tmp_path):
     script, evidence, context, timing = fixture()
+    timing.pop("timing_version")  # emulate legacy single-window repair receipts
     calls = []
 
     def ask(stage, _prompt):
@@ -69,6 +70,7 @@ def test_old_two_failed_word_cap_rewrites_resume_with_only_compact_and_audit(tmp
 
 def test_compact_audit_transport_failure_resumes_without_another_edit(tmp_path):
     script, evidence, context, timing = fixture()
+    timing.pop("timing_version")
     calls = []
     failing = True
 
@@ -100,6 +102,7 @@ def test_compact_audit_transport_failure_resumes_without_another_edit(tmp_path):
 
 def test_compact_cannot_bypass_factual_audit_and_all_failed_edits_are_cached(tmp_path):
     script, evidence, context, timing = fixture()
+    timing.pop("timing_version")
     calls = []
 
     def ask(stage, _prompt):
@@ -136,7 +139,8 @@ def test_request_schema_bounds_each_beat_and_never_allows_space_inside_word(tmp_
     http = HTTP()
     client = OpenAIWriterClient("fake-key", MovieConfig(), GeminiVideoClient("fake-key", MovieConfig(), tmp_path),
                                "gpt-5.4-mini", http)
-    client.generate("timing_rewrite", "fixture", allowed_claim_ids=["s001_c3"], timing_word_limits={"b02": 47, "b03": 3})
+    client.generate("timing_rewrite", "fixture", allowed_claim_ids=["s001_c3", "future_claim"],
+                    timing_word_limits={"b02": 47, "b03": 3}, timing_claim_ids={"b02": ["s001_c2"], "b03": ["s001_c3"]})
     schema = http.payload["text"]["format"]["schema"]["properties"]["edits"]
     assert schema["required"] == ["b02", "b03"] and schema["additionalProperties"] is False
     for bid, cap in (("b02", 47), ("b03", 3)):
@@ -144,7 +148,7 @@ def test_request_schema_bounds_each_beat_and_never_allows_space_inside_word(tmp_
         assert props["words"]["maxItems"] == cap
         assert re.fullmatch(props["words"]["items"]["pattern"], "toang")
         assert not re.fullmatch(props["words"]["items"]["pattern"], "sắp toang")
-        assert props["claim_ids"]["items"]["enum"] == ["s001_c3"]
+        assert props["claim_ids"]["items"]["enum"] == ["s001_c2" if bid == "b02" else "s001_c3"]
 
 
 def test_log_case_b02_40_seconds_has_47_word_cap_and_unaffected_beats_remain_identical(tmp_path):

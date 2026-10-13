@@ -68,11 +68,139 @@ def test_unverified_discovery_never_becomes_writer_context(tmp_path, changes, st
 @pytest.mark.parametrize("matches", [
     [candidate(claim_ids=["ctx_title"])], [candidate(claim_ids=["missing_id"])],
     [candidate(name="")], [candidate(confidence=1.1)], [candidate(cues=["made_up_cue"])],
+    [candidate(claim_ids=[{}])], [candidate(cues=[{}])],
     [candidate(), candidate(name=" BATMAN ")], [candidate(str(i)) for i in range(11)],
 ])
 def test_discovery_rejects_invalid_or_duplicate_unbounded_candidates(matches):
     with pytest.raises(BotError):
         validate_discovery({"matches": matches}, {"accepted": [claim()]})
+
+
+@pytest.mark.parametrize("alias", [None, "", "   "])
+def test_missing_delivery_alias_uses_canonical_name_and_still_requires_verification(tmp_path, alias):
+    calls = []
+
+    def ask(stage, _prompt, **kwargs):
+        calls.append(stage)
+        if stage == "character_identity_discover":
+            item = candidate(spoken_name=alias)
+            if alias is None:
+                item.pop("spoken_name")
+            return {"matches": [item]}
+        return {"verdicts": [{"id": kwargs["character_ids"][0], "status": "uncertain",
+                             "confidence": .99, "reason": "Cannot independently confirm identity"}]}
+
+    result = recognize_characters(Cache(tmp_path), tmp_path, "hash", MovieConfig(), {"accepted": [claim()]},
+                                  validate_context({}), ask)
+    assert result["recognized_characters"] == [] and result["facts"] == []
+    assert calls == ["character_identity_discover", "character_identity_verify"]
+    report = read_json(tmp_path / "characters.json")
+    assert report["rejected"][0]["spoken_name"] == "Batman"
+
+
+@pytest.mark.parametrize("item,field", [(candidate(name=""), "name"),
+    (candidate(name=None), "name"), (candidate(name="x" * 101), "name"),
+    (candidate(spoken_name=42), "spoken_name"), (candidate(spoken_name="x" * 101), "spoken_name")])
+def test_name_validation_identifies_bad_field_without_guessing_from_context(item, field):
+    with pytest.raises(BotError, match=f"Ứng viên 1: {field}"):
+        validate_discovery({"matches": [item]}, {"accepted": [claim()]})
+
+
+def test_resume_repairs_saved_bad_fourth_window_without_repeating_successful_windows(tmp_path, monkeypatch):
+    import movie_analysis.characters as characters
+
+    class OldCache(Cache):
+        def stage(self, name, dependencies, produce, validate=lambda x: x, **kwargs):
+            if name == "character_discovery":
+                kwargs.pop("repair", None)
+                kwargs["attempts"] = 1
+            return super().stage(name, dependencies, produce, validate, **kwargs)
+
+    windows = [{"id": f"c00{i}", "start": (i - 1) * 45, "end": i * 45} for i in range(1, 5)]
+    evidence = {"accepted": [{**claim(f"s00{i}_c1"), "start": (i - 1) * 45,
+                             "end": (i - 1) * 45 + 2} for i in range(1, 5)]}
+    calls = []
+    saved_bad = {"matches": [candidate(name="", claim_ids=["s004_c1"])]}
+
+    def ask(stage, prompt, window, **kwargs):
+        calls.append((window["id"], stage))
+        ref = "s00" + window["id"][-1] + "_c1"
+        if stage == "character_identity_discover":
+            if window["id"] == "c004" and "\nREPAIR:" not in prompt:
+                return copy.deepcopy(saved_bad)
+            if window["id"] == "c004":
+                assert "name cần" in prompt and json.dumps(saved_bad, ensure_ascii=False) in prompt
+                assert "inventing a name" in prompt and "independent verification" in prompt
+            return {"matches": [candidate(claim_ids=[ref])]}
+        return {"verdicts": [{"id": kwargs["character_ids"][0], "status": "supported",
+                             "confidence": .99, "reason": "Synthetic independent check"}]}
+
+    def run():
+        return recognize_character_chunks(tmp_path, "hash", MovieConfig(), evidence, validate_context({}),
+                                          windows, ask, lambda _: None)
+
+    monkeypatch.setattr(characters, "Cache", OldCache)
+    with pytest.raises(BotError, match="name cần"):
+        run()
+    assert len(calls) == 7
+    raw = tmp_path / "identity_chunks" / "c004" / "character_discovery.response.json"
+    raw_before = raw.read_bytes()
+    successful = [(tmp_path / "identity_chunks" / w["id"] / "character_discovery.json")
+                  for w in windows[:3]]
+    saved = [p.stat().st_mtime_ns for p in successful]
+
+    monkeypatch.setattr(characters, "Cache", Cache)
+    calls.clear()
+    result = run()
+    assert calls == [("c004", "character_identity_discover"), ("c004", "character_identity_verify")]
+    assert [p.stat().st_mtime_ns for p in successful] == saved and raw.read_bytes() == raw_before
+    assert result["recognized_characters"][0]["claim_ids"] == [f"s00{i}_c1" for i in range(1, 5)]
+    assert not (raw.parent / "character_discovery.validation_error.json").exists()
+    calls.clear()
+    assert run() == result and calls == []
+
+
+def test_discovery_repairs_are_bounded_and_cached_even_when_all_responses_are_invalid(tmp_path):
+    calls = []
+
+    def ask(stage, prompt, **_kwargs):
+        calls.append(stage)
+        return {"matches": [candidate(name="")]}
+
+    def run():
+        return recognize_characters(Cache(tmp_path), tmp_path, "hash", MovieConfig(), {"accepted": [claim()]},
+                                    validate_context({}), ask)
+
+    for _ in range(2):
+        with pytest.raises(BotError, match="name cần"):
+            run()
+    assert calls == ["character_identity_discover"] * 3  # initial plus at most two repairs, including resume
+    assert not (tmp_path / "character_discovery.json").exists()
+    assert not (tmp_path / "characters.json").exists()
+    error = read_json(tmp_path / "character_discovery.validation_error.json")
+    assert error["response_file"] == "character_discovery_repair_2.response.json"
+
+
+def test_discovery_repair_transport_failure_resumes_raw_without_repeating_original_request(tmp_path):
+    calls = []
+
+    def ask(stage, prompt, **_kwargs):
+        calls.append(stage)
+        if "\nREPAIR:" not in prompt:
+            return {"matches": [candidate(name="")]}
+        if len(calls) == 2:
+            raise BotError("Synthetic quota HTTP 429")
+        return {"matches": []}  # unidentifiable candidate is removed, never guessed from title
+
+    def run():
+        return recognize_characters(Cache(tmp_path), tmp_path, "hash", MovieConfig(), {"accepted": [claim()]},
+                                    validate_context({"title": "Batman"}), ask)
+
+    with pytest.raises(BotError, match="429"):
+        run()
+    assert run()["recognized_characters"] == []
+    assert calls == ["character_identity_discover"] * 3
+    assert read_json(tmp_path / "characters.json")["status"] == "no_candidates"
 
 
 def test_empty_discovery_is_saved_and_does_not_pay_for_verification(tmp_path):

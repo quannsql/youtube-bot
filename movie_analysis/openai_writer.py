@@ -31,8 +31,18 @@ class OpenAIWriterClient:
         if self.effort not in {"none", "low", "medium", "high", "xhigh"}:
             raise legacy.BotError("OPENAI_TEXT_REASONING_EFFORT không hợp lệ.")
 
-    def generate(self, stage, prompt, image_paths=None, allowed_claim_ids=None, allowed_character_ids=None, allowed_visual_ids=None):
-        schema = response_schema(stage)
+    def generate(self, stage, prompt, image_paths=None, allowed_claim_ids=None, allowed_character_ids=None, allowed_visual_ids=None,
+                 timing_word_limits=None):
+        if stage == "timing_rewrite":
+            from .timing_repair import compact_rewrite_schema
+            if not timing_word_limits:
+                raise legacy.BotError("Rút gọn theo thời lượng cần giới hạn từ của từng beat.")
+            schema = compact_rewrite_schema(timing_word_limits)
+            if allowed_claim_ids:
+                for edit in schema["properties"]["edits"]["properties"].values():
+                    edit["properties"]["claim_ids"]["items"] = {"type": "string", "enum": list(allowed_claim_ids)}
+        else:
+            schema = response_schema(stage)
         if stage == "review_plan" and allowed_visual_ids:
             section = schema["properties"]["sections"]["items"]
             section["properties"]["visual_claim_id"] = {"type": "string", "enum": list(allowed_visual_ids)}

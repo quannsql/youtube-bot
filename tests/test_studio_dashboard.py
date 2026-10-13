@@ -67,6 +67,22 @@ def test_auto_identity_ui_needs_no_profile_and_shows_unconfirmed_candidates(stud
     assert "Batman" in page and "Cảnh quá mờ, chưa xác nhận được" in page
 
 
+def test_shared_retry_state_shows_current_timing_error_instead_of_old_audit_error(studio):
+    client, _, _ = studio
+    response = upload(studio)
+    job_id = int(response.location.rsplit("/", 1)[1])
+    row = web_app.get_archive().get_idea(job_id)
+    directory = Path(json.loads(row["idea"])["directory"])
+    web_app.get_archive().update_idea(job_id, "failed", error="Script audit phải kiểm tra mọi câu.")
+    current_error = "Beat b02 phải còn tối đa 47 từ theo giọng đọc thực tế."
+    write_json(directory / "job.json", {"status": "failed", "stage": "timing_script", "error": current_error})
+    page = client.get(response.location).get_data(as_text=True)
+    assert current_error in page and "Script audit phải kiểm tra mọi câu." not in page
+    assert "Rút gọn lời bình theo thời lượng" in page
+    status = client.get(response.location + "/status").json
+    assert status["error"] == current_error and status["step"] == 3
+
+
 @pytest.mark.parametrize("fields", [
     {"context_preset": "avengers-doomsday", "movie_title": "A different film"},
     {"context_file": (io.BytesIO(b"[]"), "bad.json")},

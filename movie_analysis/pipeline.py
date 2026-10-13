@@ -86,7 +86,7 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                           if config.writer_provider == "openai" else config.model)
             audit_model = writer_model if config.writer_provider == "openai" else (config.writer_model or config.verifier_model)
 
-            def ask_text(stage, prompt):
+            def ask_text(stage, prompt, timing_word_limits=None):
                 nonlocal writer
                 if config.writer_provider == "openai":
                     if writer is None:
@@ -94,7 +94,8 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                     if isinstance(writer, OpenAIWriterClient):
                         return writer.generate(stage, prompt,
                             allowed_claim_ids=[c["id"] for c in evidence["accepted"]] + [f["id"] for f in context["facts"]],
-                            allowed_visual_ids=[c["id"] for c in evidence["accepted"] if c["modality"] in {"visual", "both"}])
+                            allowed_visual_ids=[c["id"] for c in evidence["accepted"] if c["modality"] in {"visual", "both"}],
+                            timing_word_limits=timing_word_limits)
                     return writer.generate(stage, prompt)
                 if provider is not None:
                     return ask(stage, prompt, False, verify=stage == "script_audit")
@@ -417,7 +418,8 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                         raise
                     LOG.warning("Đang rút gọn lời bình theo audio đo được: %s", exc)
                     script = repair_narration_timing(directory, cache, script_key, script, exc.feedback,
-                        evidence, context, review_seconds, timed_source, plan, ask_text, checkpoint)
+                        evidence, context, review_seconds, timed_source, plan, ask_text, checkpoint,
+                        ask_compact=lambda stage, prompt, limits: ask_text(stage, prompt, timing_word_limits=limits))
                     narration_path.write_text("\n\n".join(b["voiceover"] for b in script["beats"]) + "\n", encoding="utf-8")
             state.update(status="review", stage="complete", title=script["title"], output=str(output),
                          updated_at=datetime.now(UTC).isoformat(), error=None)

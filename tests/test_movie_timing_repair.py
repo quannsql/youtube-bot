@@ -137,6 +137,9 @@ def test_real_render_resume_shortens_only_failed_beat_and_reuses_other_audio(tmp
 
     class AI(FakeVideoAI):
         def generate(self, stage, *args, **kwargs):
+            if stage == "timing_rewrite":
+                self.calls.append((stage, kwargs))
+                return {"edits": {"b03": {"words": ["Đỏ", "nóng", "thật."], "kind": "joke", "claim_ids": ["s001_c3"]}}}
             if stage.startswith("deep:"):
                 self.calls.append((stage, kwargs))
                 return {"claims": copy.deepcopy(evidence["accepted"])}
@@ -145,7 +148,7 @@ def test_real_render_resume_shortens_only_failed_beat_and_reuses_other_audio(tmp
                 return {"verdicts": [verdict(c["id"]) for c in evidence["accepted"]]}
             value = super().generate(stage, *args, **kwargs)
             if stage == "script":
-                return corrected(original) if "MEASURED TTS REPAIR" in args[0] else copy.deepcopy(original)
+                return copy.deepcopy(original)  # two long rewrites force the bounded compact fallback
             return value
 
     class TTS(SyntheticTTS):
@@ -170,7 +173,7 @@ def test_real_render_resume_shortens_only_failed_beat_and_reuses_other_audio(tmp
     resumed = AI()
     output = pipeline.run_movie(source, directory, config, "owned", "Synthetic source", provider=resumed,
                                 tts=tts, movie_title="Synthetic Film")
-    assert [s for s, _ in resumed.calls] == ["script", "script_audit"] and resumed.uploads == 0
+    assert [s for s, _ in resumed.calls] == ["script", "script", "timing_rewrite", "script_audit"] and resumed.uploads == 0
     assert tts.calls == 4
     assert saved_audio == [read_json(directory / f"b{i:02d}_voice.json") for i in (1, 2)]
     assert read_json(directory / "quality.json")["passed"]

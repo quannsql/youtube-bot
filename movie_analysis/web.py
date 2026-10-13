@@ -61,7 +61,7 @@ def stage_index(stage):
         return 5
     if stage == "script_audit":
         return 4
-    if stage in {"review_plan", "script"}:
+    if stage in {"review_plan", "script", "timing_script"}:
         return 3
     if str(stage).startswith("character"):
         return 2
@@ -71,6 +71,8 @@ def stage_index(stage):
 
 
 def stage_label(stage):
+    if stage == "timing_script":
+        return "Rút gọn lời bình theo thời lượng"
     return "Đang chờ trong hàng đợi" if stage in {None, "queued"} else "Hoàn tất" if stage == "complete" else STEPS[stage_index(stage)]
 
 
@@ -201,7 +203,7 @@ def register_movie_routes(app, login_required, get_archive):
         stage = state.get("stage", "queued")
         artifacts = [directory / name for name in ("script.response.json", "script_approved.json", "characters.json")]
         return {"status": row["status"], "stage": stage, "step": stage_index(stage),
-                "error": row.get("error") or state.get("error"),
+                "error": state.get("error") or row.get("error"),
                 "revision": ":".join(str(p.stat().st_mtime_ns) if p.exists() else "0" for p in artifacts)}
 
     @app.route("/movies/<int:idea_id>/status")

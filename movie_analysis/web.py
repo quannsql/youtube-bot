@@ -24,6 +24,12 @@ LOG = logging.getLogger("movie.web")
 
 MISSING_SOURCE = "Không còn video gốc tại đường dẫn đã lưu. Kiểm tra Volume của service dashboard và BOT_DATA_DIR; tải lại đúng video vào job nếu dữ liệu đối chiếu còn, hoặc tạo job mới."
 STYLE_PRESETS = [("Hoang dã · bạn thân", DEFAULT_STYLE),
+                 ("Tấu hài · tò mò", "Kể phim như chém gió cùng bạn thân: tấu hài, tò mò, lầy lội, có cá tính; "
+                  "đùa nhiều hơn bằng câu ngắn và ví von đúng tình huống. Thỉnh thoảng hỏi về thế trận, "
+                  "phản ứng 'định làm gì nữa đây?', 'thì ra là…' khi có chuyển biến; không hỏi mọi câu. "
+                  "Giới thiệu đúng tên rồi linh hoạt gọi 'ông chú', 'thanh niên này', 'chị gái này', 'anh bạn' "
+                  "khi phù hợp và rõ đang nói ai. Không bịa tình tiết, động cơ, kết quả hay lời nhân vật; "
+                  "không nhồi câu đùa hoặc đọc mã dẫn chứng."),
                  ("Hài nhẹ · tự nhiên", "Kể phim gần gũi, hài nhẹ, câu ngắn; đùa đúng diễn biến và nhân vật, không dùng từ tục."),
                  ("Nghiêm túc · phân tích", "Phân tích phim rõ ràng, súc tích, nghiêm túc; giải thích diễn biến và nhân vật, không đùa hoặc chửi thề.")]
 

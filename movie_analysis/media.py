@@ -175,12 +175,24 @@ def continuous_media(source: Path, directory: Path, narration: Path, seconds: fl
 
 def render_movie(source: Path, directory: Path, script: dict, evidence: dict, rights: dict,
                  settings: legacy.Settings, tts, provider, config: MovieConfig, movie_title: str = "") -> Path:
+    from copy import deepcopy
+    from .core import spoken_text, SPOKEN_CLEAN_VERSION
+    script = deepcopy(script)
+    for beat in script["beats"]:
+        # Cover old cached voiceovers and direct render callers too. Cleaned
+        # text feeds TTS, audio cache keys, captions and measured timing.
+        beat["voiceover"] = spoken_text(beat["voiceover"])
+        if not re.search(r"\w", beat["voiceover"]):
+            raise legacy.BotError("Lời đọc chỉ chứa mã dẫn chứng; dừng trước TTS.")
+        for sentence in beat.get("sentences", []):
+            sentence["text"] = spoken_text(sentence["text"])
     claims = {c["id"]: c for c in evidence["accepted"]}
     key = digest({"script": script, "evidence": evidence, "rights": rights,
                   "voice": settings.google_tts_vietnamese_voice, "rate": settings.google_tts_vietnamese_speaking_rate,
                   "logo": file_digest(settings.overlay_logo), "source": file_digest(source),
                   "visual_mode": config.visual_mode, "render": 5, "branding": BRANDING_VERSION,
                   "source_audio_volume": config.source_audio_volume, "timing": "batch-closing-v2",
+                  "spoken_clean": SPOKEN_CLEAN_VERSION,
                   "movie_title": movie_title, "logo_width": config.logo_width, "logo_gap": config.logo_gap})
     continuous = config.visual_mode == "continuous" and rights["allow_source_visuals"]
     source_seconds = duration(source) if continuous else 0.0

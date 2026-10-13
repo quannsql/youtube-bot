@@ -15,13 +15,26 @@ from youtube_shorts_bot import BotError
 
 VERSION = "movie-v1"
 RIGHTS_STATES = ("unknown", "restricted", "owned", "licensed", "legal_basis")
-INLINE_CITATION = re.compile(r"\[\s*(?:s\d{3}_[\w-]+|ctx_[\w-]+)(?:\s*[,;]\s*(?:s\d{3}_[\w-]+|ctx_[\w-]+))*\s*\]")
+SPOKEN_CLEAN_VERSION = "spoken-metadata-v2"
+REFERENCE_TOKEN = r"(?:[sc]\d{3}_[\w-]+|ctx_[\w-]+|char_[\w-]+|b\d{2}:\d+)"
+REFERENCE_LIST = REFERENCE_TOKEN + r"(?:(?:\s*[,;|]\s*|\s+)" + REFERENCE_TOKEN + r")*"
+INLINE_CITATION = re.compile(r"[\[(]\s*" + REFERENCE_LIST + r"\s*[\])]", re.IGNORECASE)
+QUOTED_CITATION = re.compile(r"(?P<quote>[\"'`]|\*{1,2})\s*" + REFERENCE_LIST + r"\s*(?P=quote)", re.IGNORECASE)
+BARE_CITATION = re.compile(r"(?<![\w-])" + REFERENCE_TOKEN + r"(?![\w-])", re.IGNORECASE)
 
 
 def spoken_text(text: str) -> str:
-    # IDs belong to JSON metadata, never the narration/subtitles. Only strip
-    # recognisable citation brackets; ordinary bracketed dialogue is preserved.
-    return re.sub(r"\s+", " ", INLINE_CITATION.sub("", text)).strip()
+    # Reserved tokens may leak without brackets or in mixed case. Preserve
+    # ordinary dialogue, character names (C-3PO/R2-D2) and film numbers.
+    clean = INLINE_CITATION.sub("", text)
+    clean = QUOTED_CITATION.sub("", clean)
+    clean = BARE_CITATION.sub("", clean)
+    if clean != text:
+        clean = re.sub(r"[\[(]\s*[,;|]*\s*[\])]", "", clean)
+        clean = re.sub(r"[,;:]\s*([.!?])", r"\1", clean)
+        clean = re.sub(r"(?:[,;]\s*){2,}", ", ", clean)
+        clean = re.sub(r"\s+([,.;:!?])", r"\1", clean)
+    return re.sub(r"\s+", " ", clean).strip()
 
 
 def digest(value: Any) -> str:
@@ -338,7 +351,7 @@ def validate_script(data: dict, evidence: dict, context: dict | None = None) -> 
             if not isinstance(text, str) or not text.strip() or len(text) > 500:
                 raise BotError("Câu thuyết minh rỗng hoặc quá dài.")
             sentence["text"] = spoken_text(text)
-            if not sentence["text"]:
+            if not re.search(r"\w", sentence["text"]):
                 raise BotError("Câu thuyết minh chỉ chứa mã bằng chứng.")
             if sentence.get("kind") not in {"fact", "context", "inference", "joke"}:
                 raise BotError("Câu thuyết minh cần phân loại fact/context/inference/joke.")

@@ -83,6 +83,16 @@ def test_shared_retry_state_shows_current_timing_error_instead_of_old_audit_erro
     assert status["error"] == current_error and status["step"] == 3
 
 
+def test_curious_humour_preset_is_available_on_upload_and_review_forms(studio):
+    client, _, _ = studio
+    page = client.get("/movies").get_data(as_text=True)
+    assert "Tấu hài · tò mò" in page and "thanh niên này" in page
+    response = upload(studio)
+    job_id = int(response.location.rsplit("/", 1)[1])
+    web_app.get_archive().update_idea(job_id, "failed", error="Synthetic error")
+    assert "Tấu hài · tò mò" in client.get(response.location).get_data(as_text=True)
+
+
 @pytest.mark.parametrize("fields", [
     {"context_preset": "avengers-doomsday", "movie_title": "A different film"},
     {"context_file": (io.BytesIO(b"[]"), "bad.json")},

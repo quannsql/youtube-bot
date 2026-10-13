@@ -9,9 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import youtube_shorts_bot as legacy
-from .core import (VERSION, Cache, MovieConfig, accepted_evidence, digest, file_digest, job_lock, read_json,
+from .core import (VERSION, AuditCoverageError, Cache, MovieConfig, accepted_evidence, digest, file_digest, job_lock, read_json,
                    rights_manifest, validate_audit, validate_global, validate_scene, validate_script,
-                   validate_verdicts, write_json)
+                   validate_audit_coverage, validate_verdicts, write_json)
+from .audit import complete_review_audit
 from .media import build_scenes, detect_scenes, enable_local_tools, inspect_source, render_movie
 from .provider import GeminiVideoClient
 from .live_provider import GeminiLiveVideoClient
@@ -335,6 +336,15 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                             validate_review_audit(previous_audit["data"], previous)
                         except legacy.BotError:
                             repair = {"script": previous, "audit": previous_audit["data"]}
+            resume_script = None
+            if repair and "audit" in repair:
+                try:
+                    validate_audit_coverage(repair["audit"], repair["script"])
+                except AuditCoverageError:
+                    # A malformed reviewer response is not evidence that the
+                    # already validated draft needs another paid writer call.
+                    resume_script = validate_review_script(repair["script"], evidence, context, review_seconds, timed_source)
+                    repair = None
             for attempt in range(0 if approved and approved.get("key") == script_key else 3):
                 prompt = review_writer_prompt(review_seconds, evidence, context, global_data, plan, timed_source)
                 if repair:
@@ -343,9 +353,12 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                     write_json(directory / "job.json", state)
                     repair = {**repair, "repair_mode": "targeted-v1", "editorial_attempt": state["editorial_attempt"]}
                 try:
-                    script = cache.stage("script", [script_deps, repair],
-                                         lambda: ask_text("script", prompt),
-                                         lambda d: validate_review_script(d, evidence, context, review_seconds, timed_source))
+                    if resume_script is not None:
+                        script, resume_script = resume_script, None
+                    else:
+                        script = cache.stage("script", [script_deps, repair],
+                                             lambda: ask_text("script", prompt),
+                                             lambda d: validate_review_script(d, evidence, context, review_seconds, timed_source))
                 except legacy.BotError as exc:
                     response = read_json(directory / "script.response.json")
                     # Do not hide transport/quota failures as editorial retries.
@@ -363,10 +376,11 @@ def run_movie(source: Path, directory: Path, config: MovieConfig, rights_status=
                     LOG.warning("Review cần biên tập lại: %s", exc)
                     continue
                 checkpoint("script_audit")
-                audit = cache.stage(
+                audit = complete_review_audit(cache,
                     "script_audit", [script, evidence, context, config.writer_provider, audit_model, PROMPT_VERSION, timed_source],
-                    lambda: ask_text("script_audit", review_audit_prompt(script, evidence, context, plan, timed_source)),
-                )
+                    script, review_audit_prompt(script, evidence, context, plan, timed_source), ask_text,
+                    on_incomplete=lambda incomplete: write_json(directory / "script_repair.json",
+                        {"key": script_key, "feedback": {"script": script, "audit": incomplete}}))
                 try:
                     validate_review_audit(audit, script)
                     write_json(directory / "script_approved.json", {"key": script_key, "script": script, "audit": audit})

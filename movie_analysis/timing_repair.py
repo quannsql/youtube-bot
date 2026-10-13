@@ -6,6 +6,7 @@ import logging
 
 from youtube_shorts_bot import BotError
 from .core import VERSION, digest, read_json, write_json
+from .audit import complete_review_audit
 from .review import (review_audit_prompt, review_repair_prompt, validate_review_audit,
                      validate_review_script)
 
@@ -66,9 +67,9 @@ def repair_narration_timing(directory, cache, script_key, script, timing, eviden
             LOG.warning("Sửa thời lượng cần biên tập lại: %s", exc)
             continue
         checkpoint("script_audit")
-        audit = cache.stage(f"timing_script_audit_{attempt + 1}", [dependencies, candidate, evidence, context],
-                            lambda: ask_text("script_audit", review_audit_prompt(
-                                candidate, evidence, context, plan, source_seconds)))
+        audit = complete_review_audit(cache, f"timing_script_audit_{attempt + 1}",
+                                     [dependencies, candidate, evidence, context], candidate,
+                                     review_audit_prompt(candidate, evidence, context, plan, source_seconds), ask_text)
         try:
             validate_review_audit(audit, candidate)
         except BotError as exc:

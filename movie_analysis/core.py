@@ -360,12 +360,33 @@ def validate_script(data: dict, evidence: dict, context: dict | None = None) -> 
     return data
 
 
-def validate_audit(data: dict, script: dict) -> dict:
-    expected = {f'{b["id"]}:{i}' for b in script["beats"] for i, _ in enumerate(b["sentences"])}
+class AuditCoverageError(BotError):
+    """Incomplete reviewer output, distinct from a rejected script."""
+
+
+def script_sentence_ids(script: dict) -> list[str]:
+    return [f'{b["id"]}:{i}' for b in script["beats"] for i, _ in enumerate(b["sentences"])]
+
+
+def validate_audit_coverage(data: dict, script: dict) -> dict:
+    expected = set(script_sentence_ids(script))
     reviews = data.get("reviews") if isinstance(data, dict) else None
-    if (not isinstance(reviews, list) or len(reviews) != len(expected)
-            or {r.get("id") for r in reviews} != expected):
-        raise BotError("Script audit phải kiểm tra mọi câu.")
+    if not isinstance(reviews, list) or any(not isinstance(r, dict) or not isinstance(r.get("id"), str) for r in reviews):
+        raise AuditCoverageError("Script audit phải kiểm tra mọi câu. reviews cần danh sách object có id dạng chuỗi.")
+    ids = [r["id"] for r in reviews]
+    actual = set(ids)
+    if len(ids) != len(expected) or actual != expected:
+        missing, unknown = sorted(expected - actual), sorted(actual - expected)
+        duplicates = sorted({rid for rid in ids if ids.count(rid) > 1})
+        details = "; ".join(label + ", ".join(values) for label, values in
+                            (("Thiếu: ", missing), ("ID lạ: ", unknown), ("Trùng: ", duplicates)) if values)
+        raise AuditCoverageError("Script audit phải kiểm tra mọi câu. " + details)
+    return data
+
+
+def validate_audit(data: dict, script: dict) -> dict:
+    validate_audit_coverage(data, script)
+    reviews = data["reviews"]
     if data.get("title_supported") is not True or data.get("style_ok") is not True:
         raise BotError("Tiêu đề hoặc phong cách kịch bản chưa đạt audit.")
     if any(r.get("supported") is not True or not r.get("reason") for r in reviews):

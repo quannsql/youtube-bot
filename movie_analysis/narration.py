@@ -176,6 +176,9 @@ def writer_prompt(seconds, evidence, context, chronology):
 
 
 def audit_prompt(script, evidence, context):
+    ledger = [{"id": f'{beat["id"]}:{index}', "text": sentence["text"],
+               "kind": sentence["kind"], "claim_ids": sentence["claim_ids"]}
+              for beat in script["beats"] for index, sentence in enumerate(beat["sentences"])]
     return (
         "Return JSON only. Audit EVERY spoken sentence against the actual content of its cited IDs. "
         "CLIP observations and sourced CONTEXT are distinct. Context can establish background, names "
@@ -188,11 +191,15 @@ def audit_prompt(script, evidence, context):
         "thread, smooth transitions, a closing/payoff, and humour that fits the requested style. "
         "Set style_ok=false for disconnected shot descriptions, an academic lecture, or forced memes. "
         "Check the title is supported. Give specific repair feedback, not generic approval. "
-        "Sentence IDs are beatID:zeroBasedSentenceIndex. "
+        "Sentence IDs are beatID:zeroBasedSentenceIndex, starting at :0 in EACH beat. Copy the EXACT "
+        "IDs in SENTENCE LEDGER, one review per entry, including context, inference and joke sentences. "
+        "Never split or combine an entry because its text has multiple punctuation marks. "
+        f"Return exactly {len(ledger)} reviews with distinct IDs; no omitted, extra or invented IDs. "
         'JSON: {title_supported:boolean,style_ok:boolean,reviews:[{id:string,supported:boolean,reason:string}]}. '
         + "\nCONTEXT: " + json.dumps(context, ensure_ascii=False)
         + "\nCLIP: " + json.dumps(evidence["accepted"], ensure_ascii=False)
         + "\nSCRIPT: " + json.dumps(script, ensure_ascii=False)
+        + "\nSENTENCE LEDGER: " + json.dumps(ledger, ensure_ascii=False)
     )
 
 

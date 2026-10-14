@@ -14,7 +14,7 @@ from .review import (review_audit_prompt, review_repair_prompt, validate_review_
 
 LOG = logging.getLogger("movie")
 TIMING_REPAIR_VERSION = "measured-tts-edit-v1"
-COMPACT_REPAIR_VERSION = "measured-tts-words-v2-quality-repair"
+COMPACT_REPAIR_VERSION = "measured-tts-words-v3-preserve-approved-sections"
 
 
 def compact_rewrite_schema(limits):
@@ -70,6 +70,41 @@ def assemble_compact_repair(data, original, timing, evidence, context, seconds, 
     return validate_timing_repair(candidate, original, timing, evidence, context, seconds, source_seconds)
 
 
+def retain_approved_unchanged_section_scores(audit, original, candidate, approved):
+    """Do not fail a timed edit on a style score for an untouched approved section."""
+    if (not isinstance(approved, dict) or approved.get("script") != original
+            or not isinstance(approved.get("audit"), dict)):
+        return audit
+    baseline_quality = approved["audit"].get("quality")
+    current_quality = audit.get("quality") if isinstance(audit, dict) else None
+    if not isinstance(baseline_quality, dict) or not isinstance(current_quality, dict):
+        return audit
+
+    result = copy.deepcopy(audit)
+    for role in ("opening", "closing"):
+        old = [beat for beat in original["beats"] if beat.get("role") == role]
+        new = [beat for beat in candidate["beats"] if beat.get("role") == role]
+        before = baseline_quality.get(role)
+        current = current_quality.get(role)
+        if (len(old) != len(new) or any(a.get("voiceover") != b.get("voiceover")
+                                         for a, b in zip(old, new))):
+            continue
+        if (not isinstance(before, dict) or type(before.get("score")) is not int
+                or before["score"] < 4 or not isinstance(before.get("reason"), str)
+                or not before["reason"].strip()):
+            continue
+        if (not isinstance(current, dict) or type(current.get("score")) is not int
+                or not isinstance(current.get("reason"), str) or not current["reason"].strip()):
+            continue
+        if current["score"] < 4:
+            result["quality"][role] = {
+                "score": before["score"],
+                "reason": "Giữ điểm từ bản đã duyệt vì phần này không thay đổi trong lần sửa thời lượng: "
+                          + before["reason"],
+            }
+    return result
+
+
 def compact_timing_repair(directory, cache, script_key, script, timing, evidence, context,
                           seconds, source_seconds, plan, ask_text, ask_compact, checkpoint):
     from .narration import spoken_style_guidance
@@ -84,6 +119,9 @@ def compact_timing_repair(directory, cache, script_key, script, timing, evidence
     saved_feedback = saved.get("feedback", {}) if isinstance(saved, dict) else {}
     feedback = (saved_feedback.get("compact") if saved.get("key") == script_key
                 and isinstance(saved_feedback, dict) else None)
+    approved = read_json(directory / "script_approved.json", {})
+    if not isinstance(approved, dict) or approved.get("key") != script_key:
+        approved = None
 
     def save_feedback(value):
         write_json(receipt, {"key": script_key, "feedback": {
@@ -143,7 +181,7 @@ def compact_timing_repair(directory, cache, script_key, script, timing, evidence
             )
             dependencies = [script_key, COMPACT_REPAIR_VERSION, script, timing, edit_feedback,
                             review_attempt, format_attempt]
-            name = f"timing_compact_v2_r{review_attempt + 1}_{format_attempt + 1}"
+            name = f"timing_compact_v3_r{review_attempt + 1}_{format_attempt + 1}"
             save_feedback(edit_feedback)
             try:
                 def validate_edit(data):
@@ -181,9 +219,10 @@ def compact_timing_repair(directory, cache, script_key, script, timing, evidence
                 "such assertion even if ordinary film context mentions it. Check the closing against "
                 "its allowed_claim_ids and replacement_visual_claim_id below.\nTIMING WINDOWS: "
                 + json.dumps(timing, ensure_ascii=False))
-        audit = complete_review_audit(cache, f"timing_compact_v2_audit_{review_attempt + 1}",
+        audit = complete_review_audit(cache, f"timing_compact_v3_audit_{review_attempt + 1}",
             [dependencies, candidate, evidence, context], candidate,
             audit_prompt, ask_text)
+        audit = retain_approved_unchanged_section_scores(audit, script, candidate, approved)
         try:
             validate_review_audit(audit, candidate)
         except BotError as exc:
